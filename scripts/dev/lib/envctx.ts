@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { liveEnvPath } from "./pool.ts";
 import { bestEffort, readEnvFile, sha256Hex } from "./util.ts";
 import { run } from "./proc.ts";
+import { codexNativeAuthPresent } from "../../../src/harness/codex-auth.ts";
 
 export interface AssembledEnv {
   env: Record<string, string>;
@@ -124,14 +125,17 @@ export async function assembleEnv(opts: {
     env.OPENAI_API_KEY = wtEnv.OPENAI_API_KEY;
     openaiKeySource = "the worktree .env";
   }
+  for (const key of ["CODEX_ACCESS_TOKEN", "CODEX_AUTH_JSON"]) {
+    if (!env[key] && wtEnv[key]) env[key] = wtEnv[key];
+  }
 
   let harness: "pi" | "mock" | "opencode" | "codex" | "claude";
   if (opts.callerEnv.HARNESS === "codex" || opts.callerEnv.HARNESS === "claude") {
     harness = opts.callerEnv.HARNESS;
     env.HARNESS = harness;
-    if (harness === "codex" && !env.OPENAI_API_KEY) {
+    if (harness === "codex" && !env.OPENAI_API_KEY && !codexNativeAuthPresent(env)) {
       throw new Error(
-        "HARNESS=codex needs OPENAI_API_KEY (its CLI cannot do browser OAuth in a container) -- export it, or add it to the live env file or the worktree .env",
+        "HARNESS=codex needs OPENAI_API_KEY or CODEX_ACCESS_TOKEN -- export one, or add it to the live env file or the worktree .env",
       );
     }
   } else if (env.ANTHROPIC_API_KEY) {

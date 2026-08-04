@@ -194,6 +194,7 @@ export function isMissingOrPlaceholder(value: string | undefined): boolean {
 export function isInvalidSecret(name: string, value: string | undefined): boolean {
   if (isMissingOrPlaceholder(value)) return true;
   const candidate = value!.trim();
+  if (name === "CODEX_AUTH_JSON") return normalizeCodexAuthJson(candidate) === undefined;
   if (name === "ADMIN_GRANTS") {
     const entries = candidate
       .split(",")
@@ -211,6 +212,27 @@ export function isInvalidSecret(name: string, value: string | undefined): boolea
     (name === "CONNECTOR_SECRET_KEY" || name === "CORE_SIGNING_SECRET" || name === "SKILL_SIGNING_SECRET") &&
     candidate.length < 32
   );
+}
+
+export function normalizeCodexAuthJson(value: string): string | undefined {
+  let auth: unknown;
+  try {
+    auth = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  if (!auth || typeof auth !== "object" || Array.isArray(auth)) return undefined;
+  const record = auth as Record<string, unknown>;
+  const tokens = record.tokens;
+  const tokenRecord =
+    tokens && typeof tokens === "object" && !Array.isArray(tokens) ? (tokens as Record<string, unknown>) : {};
+  const usable = [record.OPENAI_API_KEY, tokenRecord.access_token, tokenRecord.refresh_token].some(
+    (credential) =>
+      typeof credential === "string" &&
+      Boolean(credential.trim()) &&
+      !/^(replace-me|placeholder|changeme|todo)$/i.test(credential.trim()),
+  );
+  return usable ? JSON.stringify(record) : undefined;
 }
 
 export function readEnvFile(path: string): Map<string, string> {

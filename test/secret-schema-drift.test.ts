@@ -64,6 +64,24 @@ test("an OpenAI base model on the Codex harness reports its one missing key once
   );
 });
 
+test("the Codex harness accepts native authentication when no API provider is declared", () => {
+  assert.deepEqual(validateCoreSecretEnv({ HARNESS: "codex" } as NodeJS.ProcessEnv), ["CODEX_ACCESS_TOKEN"]);
+  assert.deepEqual(
+    validateCoreSecretEnv({ HARNESS: "codex", CODEX_ACCESS_TOKEN: "native-access-token" } as NodeJS.ProcessEnv),
+    [],
+  );
+  assert.deepEqual(validateCoreSecretEnv({ HARNESS: "codex", CODEX_ACCESS_TOKEN: "{bad-json" } as NodeJS.ProcessEnv), [
+    "CODEX_ACCESS_TOKEN",
+  ]);
+  assert.deepEqual(
+    validateCoreSecretEnv({ HARNESS: "codex", CODEX_ACCESS_TOKEN: "placeholder" } as NodeJS.ProcessEnv),
+    ["CODEX_ACCESS_TOKEN"],
+  );
+  assert.deepEqual(validateCoreSecretEnv({ HARNESS: "codex", CODEX_AUTH_JSON: "{}" } as NodeJS.ProcessEnv), [
+    "CODEX_ACCESS_TOKEN",
+  ]);
+});
+
 test("each core secret is named by exactly one spec, so boot failures never repeat a name", () => {
   const names = CORE_SECRET_SPECS.map((spec) => spec.name);
   assert.deepEqual(

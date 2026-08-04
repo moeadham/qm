@@ -6,6 +6,7 @@ import {
   defaultModelForHarness,
   isHarnessId,
   modelProviderAvailabilityFor,
+  modelServiceable,
   modelSupportedByHarness,
   resolveModel,
   serviceableModelIds,
@@ -963,10 +964,18 @@ async function getSurfaceConfig(ctx: ApiCtx): Promise<void> {
   ]);
   const harnessId = deps.harnessId ?? "pi";
   const managedKeys = deps.modelCredentials ? await deps.modelCredentials.availability() : null;
+  const configuredKeys = deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
+  const providers = modelProviderAvailabilityFor(
+    harnessId,
+    configuredKeys,
+    managedKeys ?? configuredKeys,
+    deps.nativeAuthHarnesses?.includes(harnessId),
+  );
   const catalog = managedKeys?.openrouter
     ? await selectableModelCatalog(deps.modelCredentialFetch)
     : builtInModelCatalog();
   const allowed = selectableCatalogForHarness(catalog, harnessId).map((model) => model.id);
+  const modelProviderConfigured = allowed.some((id) => modelServiceable(id, providers));
   const configuredPicker = webuiModels?.filter((id) => modelSupportedByHarness(id, harnessId)) ?? [];
   const resolvedBase = modelSupportedByHarness(baseModel ?? undefined, harnessId)
     ? baseModel!
@@ -996,7 +1005,7 @@ async function getSurfaceConfig(ctx: ApiCtx): Promise<void> {
     webuiModels: configuredPicker.length ? configuredPicker : allowed,
     baseModel: resolvedBase,
     harnessId,
-    ...(managedKeys ? { modelProviderConfigured: Object.values(managedKeys).some(Boolean) } : {}),
+    ...(managedKeys || deps.providerKeys || deps.nativeAuthHarnesses ? { modelProviderConfigured } : {}),
     externalSlackParticipants,
     ...(Object.keys(resolvedBranding).length ? { branding: resolvedBranding } : {}),
   });
@@ -1037,7 +1046,13 @@ async function runtimeConfigBody(ctx: ApiCtx, scope: ScopeId): Promise<Record<st
       : { harnessId: firstApproved, modelId: defaultModelForHarness(firstApproved, fallback.modelId) };
   const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
   const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
-  const providersFor = (harnessId: string) => modelProviderAvailabilityFor(harnessId, configuredKeys, managedKeys);
+  const providersFor = (harnessId: string) =>
+    modelProviderAvailabilityFor(
+      harnessId,
+      configuredKeys,
+      managedKeys,
+      ctx.deps.nativeAuthHarnesses?.includes(harnessId),
+    );
   const catalog =
     ctx.deps.modelCredentials && managedKeys.openrouter
       ? await selectableModelCatalog(ctx.deps.modelCredentialFetch)

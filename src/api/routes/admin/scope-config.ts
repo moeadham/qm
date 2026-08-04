@@ -239,7 +239,8 @@ export async function getScopeConfig(ctx: ApiCtx): Promise<void> {
   ].filter((host) => !isHostDenied(host, effectiveEgressPolicy.deniedHosts));
   const configuredKeys = deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
   const managedKeys = deps.modelCredentials ? await deps.modelCredentials.availability() : configuredKeys;
-  const providersFor = (harnessId: string) => modelProviderAvailabilityFor(harnessId, configuredKeys, managedKeys);
+  const providersFor = (harnessId: string) =>
+    modelProviderAvailabilityFor(harnessId, configuredKeys, managedKeys, deps.nativeAuthHarnesses?.includes(harnessId));
   const catalog =
     deps.modelCredentials && managedKeys.openrouter
       ? await selectableModelCatalog(deps.modelCredentialFetch)

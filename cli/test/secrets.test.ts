@@ -211,8 +211,7 @@ test("naming a base model provider makes that provider's key a required deployme
 test("the providers a deployment did not select stay optional", () => {
   const anthropic = makeConfig({ modelProvider: "anthropic" });
   assert.equal(secretByName(anthropic, "OPENROUTER_API_KEY").required, false);
-  // OPENAI_API_KEY keeps its own Codex rule, so it is absent rather than optional here.
-  assert.ok(!computedSecrets(anthropic).some((secret) => secret.name === "OPENAI_API_KEY"));
+  assert.equal(secretByName(anthropic, "OPENAI_API_KEY").required, false);
 });
 
 test("an OpenAI base model and the Codex harness agree on one required key", () => {
@@ -220,6 +219,15 @@ test("an OpenAI base model and the Codex harness agree on one required key", () 
   const matches = computedSecrets(both).filter((secret) => secret.name === "OPENAI_API_KEY");
   assert.equal(matches.length, 1, "overlapping rules collapse to a single secret");
   assert.equal(matches[0]!.required, true);
+  assert.ok(!computedSecrets(both).some((secret) => secret.name === "CODEX_AUTH_JSON"));
+});
+
+test("the Codex harness uses subscription auth when no API model provider is declared", () => {
+  const config = makeConfig({ env: { core: { HARNESS: "codex" } } });
+  const auth = secretByName(config, "CODEX_AUTH_JSON");
+  assert.equal(auth.required, true);
+  assert.deepEqual(runtimeSecretNames("core", auth), ["CODEX_ACCESS_TOKEN"]);
+  assert.equal(secretByName(config, "OPENAI_API_KEY").required, false);
 });
 
 test("omitting modelProvider preserves the pre-existing deferred-to-Admin behavior", () => {

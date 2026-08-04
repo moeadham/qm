@@ -11,6 +11,8 @@ import { buildApp, type BuiltApp } from "../src/wiring.ts";
 import { testConfig } from "./support/test-config.ts";
 import { createModelCredentialStore, type StoredModelCredential } from "../src/model/model-credential-store.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import { modelProviderAvailabilityFor } from "../src/model/pi-models.ts";
+import { nativeAuthHarnessesPresent } from "../src/config.ts";
 
 const ADMIN = { "content-type": "application/json", "x-admin-actor": "admin-alice@default-org" };
 
@@ -22,13 +24,11 @@ function start(
   built: BuiltApp;
   close: () => Promise<void>;
 } {
-  const built = buildApp(
-    testConfig({
-      dataDir: mkdtempSync(join(tmpdir(), "model-credential-route-")),
-      ...config,
-    }),
-    { modelCredentialFetch },
-  );
+  const resolvedConfig = testConfig({
+    dataDir: mkdtempSync(join(tmpdir(), "model-credential-route-")),
+    ...config,
+  });
+  const built = buildApp(resolvedConfig, { modelCredentialFetch });
   const server = createInsecureTestServer(built.app, {
     config: built.config,
     modelCredentials: built.modelCredentials,
@@ -39,6 +39,12 @@ function start(
       openai: Boolean(config.openaiApiKey),
       openrouter: Boolean(config.openrouterApiKey),
     },
+    modelProviders: modelProviderAvailabilityFor(config.harness ?? "pi", {
+      anthropic: Boolean(config.anthropicApiKey),
+      openai: Boolean(config.openaiApiKey),
+      openrouter: Boolean(config.openrouterApiKey),
+    }),
+    nativeAuthHarnesses: nativeAuthHarnessesPresent(resolvedConfig),
     admin: built.admin,
     auditLog: built.auditLog,
   });
@@ -396,6 +402,65 @@ test("surface-config reports whether any model provider is configured", async ()
     await srv.built.modelCredentials.set("anthropic", "working-admin-key", "admin-alice@default-org");
     const after = await fetch(`${srv.base}/v1/surface-config`);
     assert.equal(((await after.json()) as { modelProviderConfigured?: boolean }).modelProviderConfigured, true);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("surface-config treats authenticated native harnesses as configured without an API key", async () => {
+  const srv = start({ harness: "claude", claudeProcessEnv: { CLAUDE_CODE_OAUTH_TOKEN: "native-token" } });
+  try {
+    const response = await fetch(`${srv.base}/v1/surface-config`);
+    assert.equal(response.status, 200);
+    assert.equal(((await response.json()) as { modelProviderConfigured?: boolean }).modelProviderConfigured, true);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("surface-config does not treat a credential-less native harness as configured", async () => {
+  const srv = start({ harness: "claude" });
+  try {
+    const response = await fetch(`${srv.base}/v1/surface-config`);
+    assert.equal(response.status, 200);
+    assert.equal(((await response.json()) as { modelProviderConfigured?: boolean }).modelProviderConfigured, false);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("surface-config ignores credentials for providers the active native harness cannot use", async () => {
+  for (const config of [
+    { harness: "claude" as const, openaiApiKey: "wrong-provider-key" },
+    { harness: "codex" as const, anthropicApiKey: "wrong-provider-key" },
+  ]) {
+    const srv = start(config);
+    try {
+      const response = await fetch(`${srv.base}/v1/surface-config`);
+      assert.equal(response.status, 200);
+      assert.equal(((await response.json()) as { modelProviderConfigured?: boolean }).modelProviderConfigured, false);
+    } finally {
+      await srv.close();
+    }
+  }
+});
+
+test("Codex subscription auth exposes OpenAI models without an API key", async () => {
+  const srv = start({
+    harness: "claude",
+    codexProcessEnv: { CODEX_ACCESS_TOKEN: JSON.stringify({ tokens: { access_token: "private" } }) },
+  });
+  try {
+    await srv.built.config.setApprovedHarnesses(["claude", "codex"]);
+    await srv.built.config.flushScope("org:default-org");
+    const response = await fetch(`${srv.base}/v1/runtime-config?principalId=alice&scopeId=personal%3Aalice`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      approvedHarnesses: string[];
+      modelsByHarness: Record<string, string[]>;
+    };
+    assert.deepEqual(body.approvedHarnesses, ["claude", "codex"]);
+    assert.ok(body.modelsByHarness.codex!.includes("gpt-5.6-sol"));
   } finally {
     await srv.close();
   }

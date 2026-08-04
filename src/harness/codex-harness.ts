@@ -14,6 +14,7 @@ import { swallow } from "../util/errors.ts";
 import { countTokens } from "../util/tokens.ts";
 import { parseSecurityScreenVerdict, SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
 import { CodexAppServer, CodexRpcError } from "./codex-app-server.ts";
+import { codexAuthJson, parseCodexAuthJson } from "./codex-auth.ts";
 import { defineHarness, type Harness, type HarnessTurnInput, type HarnessTurnResult } from "./harness.ts";
 import { coreToolOptions, createPiTools, type PiToolsOptions, type ToolContextRef } from "./pi-tools.ts";
 import { reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
@@ -191,6 +192,7 @@ export function codexChildEnv(source: NodeJS.ProcessEnv, jail: string): NodeJS.P
     CODEX_HOME: join(jail, "codex-home"),
   };
   for (const name of CODEX_ENV_PASSTHROUGH) {
+    if (name === "CODEX_ACCESS_TOKEN" && source.CODEX_ACCESS_TOKEN?.trimStart().startsWith("{")) continue;
     if (source[name] !== undefined) env[name] = source[name];
   }
   return env;
@@ -199,7 +201,11 @@ export function codexChildEnv(source: NodeJS.ProcessEnv, jail: string): NodeJS.P
 export function prepareCodexHome(source: NodeJS.ProcessEnv, jail: string): string {
   const target = join(jail, "codex-home");
   mkdirSync(target, { recursive: true });
-  if (source.OPENAI_API_KEY) {
+  const authJson = codexAuthJson(source);
+  if (authJson) {
+    const auth = parseCodexAuthJson(authJson);
+    writeFileSync(join(target, "auth.json"), JSON.stringify(auth), { mode: 0o600 });
+  } else if (source.OPENAI_API_KEY) {
     writeFileSync(
       join(target, "auth.json"),
       JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: source.OPENAI_API_KEY }),

@@ -215,7 +215,7 @@ test("env assembly precedence: caller > login shell > dev.env > worktree .env; h
 
   await assert.rejects(
     assembleEnv({ worktree, callerEnv: { HARNESS: "codex" }, allowMock: false, log, probeLoginShell: async () => "" }),
-    /HARNESS=codex needs OPENAI_API_KEY/,
+    /HARNESS=codex needs OPENAI_API_KEY or CODEX_ACCESS_TOKEN/,
   );
   const codex = await assembleEnv({
     worktree,
@@ -227,6 +227,15 @@ test("env assembly precedence: caller > login shell > dev.env > worktree .env; h
   assert.equal(codex.harness, "codex");
   assert.equal(codex.env.HARNESS, "codex");
   assert.equal(codex.openaiKeySource, "your shell export");
+  const codexNative = await assembleEnv({
+    worktree,
+    callerEnv: { HARNESS: "codex", CODEX_ACCESS_TOKEN: "native-access-token" },
+    allowMock: false,
+    log,
+    probeLoginShell: async () => "",
+  });
+  assert.equal(codexNative.harness, "codex");
+  assert.equal(codexNative.env.CODEX_ACCESS_TOKEN, "native-access-token");
 
   const claude = await assembleEnv({
     worktree,

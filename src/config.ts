@@ -19,6 +19,7 @@ import {
   type ModelProvider,
   type ModelProviderAvailability,
 } from "./model/pi-models.ts";
+import { codexNativeAuthPresent } from "./harness/codex-auth.ts";
 
 export interface Config {
   production: boolean;
@@ -156,6 +157,18 @@ export function providerKeysPresent(config: Config): ModelProviderAvailability {
     openai: Boolean(config.openaiApiKey),
     openrouter: Boolean(config.openrouterApiKey),
   };
+}
+
+export function nativeAuthHarnessesPresent(config: Config): string[] {
+  const harnesses: string[] = [];
+  if (codexNativeAuthPresent(config.codexProcessEnv) || config.codexProcessEnv.OPENAI_API_KEY) harnesses.push("codex");
+  if (
+    config.claudeProcessEnv.CLAUDE_CODE_OAUTH_TOKEN ||
+    config.claudeProcessEnv.ANTHROPIC_AUTH_TOKEN ||
+    config.claudeProcessEnv.ANTHROPIC_API_KEY
+  )
+    harnesses.push("claude");
+  return harnesses;
 }
 
 export function baseModelProviders(config: Config): ModelProviderAvailability | undefined {
@@ -652,6 +665,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "OPENAI_API_KEY",
       "OPENAI_BASE_URL",
       "CODEX_ACCESS_TOKEN",
+      "CODEX_AUTH_JSON",
       "HOME",
       "CODEX_HOME",
     ].flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),

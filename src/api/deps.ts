@@ -79,6 +79,7 @@ export interface ServerDeps {
   baseModelDefault?: string;
   modelProviders?: ModelProviderAvailability;
   providerKeys?: ModelProviderAvailability;
+  nativeAuthHarnesses?: readonly string[];
   modelCredentials?: ModelCredentialStore;
   modelCredentialFetch?: typeof fetch;
   brandingDefault?: { accent?: string; mark?: string; selfLabel?: string };

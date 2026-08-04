@@ -307,15 +307,29 @@ test("HARNESS=pi can boot before an admin configures a model provider", () => {
   assert.doesNotThrow(() => loadConfig({ ...productionEnv, HARNESS: "pi", ANTHROPIC_API_KEY: "sk-ant" }));
 });
 
-test("HARNESS=codex requires OPENAI_API_KEY: its CLI cannot do browser OAuth in a container", () => {
-  assert.throws(() => loadConfig({ HARNESS: "codex" }), /missing or insecure required core secrets: OPENAI_API_KEY/);
-  assert.throws(() => loadConfig({ HARNESS: " codex " }), /missing or insecure required core secrets: OPENAI_API_KEY/);
+test("HARNESS=codex accepts API-key or native subscription authentication", () => {
+  assert.throws(
+    () => loadConfig({ HARNESS: "codex" }),
+    /missing or insecure required core secrets: CODEX_ACCESS_TOKEN/,
+  );
+  assert.throws(
+    () => loadConfig({ HARNESS: " codex " }),
+    /missing or insecure required core secrets: CODEX_ACCESS_TOKEN/,
+  );
   assert.doesNotThrow(() => loadConfig({ HARNESS: "codex", OPENAI_API_KEY: "sk-openai" }));
+  assert.doesNotThrow(() => loadConfig({ HARNESS: "codex", CODEX_ACCESS_TOKEN: "native-access-token" }));
+  assert.doesNotThrow(() =>
+    loadConfig({ HARNESS: "codex", CODEX_AUTH_JSON: JSON.stringify({ tokens: { access_token: "private" } }) }),
+  );
+  assert.throws(() => loadConfig({ HARNESS: "codex", CODEX_ACCESS_TOKEN: "{bad-json" }), /CODEX_ACCESS_TOKEN/);
   assert.throws(
     () => loadConfig({ ...productionEnv, HARNESS: "codex" }),
-    /missing or insecure required core secrets: OPENAI_API_KEY/,
+    /missing or insecure required core secrets: CODEX_ACCESS_TOKEN/,
   );
   assert.doesNotThrow(() => loadConfig({ ...productionEnv, HARNESS: "codex", OPENAI_API_KEY: "sk-openai" }));
+  assert.doesNotThrow(() =>
+    loadConfig({ ...productionEnv, HARNESS: "codex", CODEX_ACCESS_TOKEN: "native-access-token" }),
+  );
   assert.equal(
     loadConfig({ HARNESS: "codex", OPENAI_API_KEY: "sk-openai", CODEX_MODEL: "gpt-5.4" }).codexModel,
     "gpt-5.4",

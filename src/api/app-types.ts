@@ -502,6 +502,7 @@ export interface AppDeps {
   harnessId?: string;
   modelProviders?: ModelProviderAvailability;
   providerKeys?: ModelProviderAvailability;
+  nativeAuthHarnesses?: readonly string[];
   runtimeFallback?: RuntimeChoice;
 }
 

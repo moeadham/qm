@@ -214,10 +214,12 @@ export function modelProviderAvailabilityFor(
   harness: string,
   configKeys: ModelProviderAvailability,
   managedKeys: ModelProviderAvailability = configKeys,
+  nativeAuth = false,
 ): ModelProviderAvailability {
   if (harness === "pi") return managedKeys;
   if (harness === "opencode") return { ...configKeys, openrouter: false };
-  if (harness === "codex") return configKeys;
+  if (harness === "codex") return { ...configKeys, openai: configKeys.openai || nativeAuth };
+  if (harness === "claude") return { ...configKeys, anthropic: configKeys.anthropic || nativeAuth };
   return ALL_PROVIDERS_AVAILABLE;
 }
 

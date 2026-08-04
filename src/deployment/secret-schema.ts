@@ -1,8 +1,9 @@
 import { isStrongSigningSecret } from "../auth/source-auth.ts";
+import { codexNativeAuthPresent } from "../harness/codex-auth.ts";
 
 type SecretGate =
   | "production"
-  | "codex"
+  | "codex-native"
   | "postgres"
   | "sprites"
   | "fly-sandbox"
@@ -26,7 +27,8 @@ export const CORE_SECRET_SPECS: readonly RuntimeSecretSpec[] = [
   { name: "CORE_SIGNING_SECRET", requiredWhen: "production" },
   { name: "PORTAL_IDENTITY_SECRET", requiredWhen: "production" },
   { name: "SKILL_SIGNING_SECRET", requiredWhen: "production" },
-  { name: "OPENAI_API_KEY", requiredWhen: ["codex", "model-openai"] },
+  { name: "OPENAI_API_KEY", requiredWhen: "model-openai" },
+  { name: "CODEX_ACCESS_TOKEN", requiredWhen: "codex-native" },
   { name: "ANTHROPIC_API_KEY", requiredWhen: "model-anthropic" },
   { name: "OPENROUTER_API_KEY", requiredWhen: "model-openrouter" },
   { name: "DATABASE_URL", requiredWhen: "postgres" },
@@ -41,7 +43,10 @@ export const CORE_SECRET_SPECS: readonly RuntimeSecretSpec[] = [
 
 const GATE_PREDICATES: Readonly<Record<SecretGate, (env: NodeJS.ProcessEnv) => boolean>> = {
   production: (env) => env.NODE_ENV === "production",
-  codex: (env) => env.HARNESS?.trim() === "codex",
+  "codex-native": (env) =>
+    env.HARNESS?.trim() === "codex" &&
+    env.MODEL_PROVIDER?.trim() !== "openai" &&
+    isInvalidSecret("OPENAI_API_KEY", env.OPENAI_API_KEY),
   postgres: (env) => env.SESSION_STORE === "postgres" || env.RUN_STORE === "postgres",
   sprites: (env) => env.SANDBOX_BACKEND === "sprites" || env.SANDBOX_SECONDARY_BACKEND === "sprites",
   "fly-sandbox": (env) => env.SANDBOX_BACKEND === "fly",
@@ -60,9 +65,11 @@ export function validateCoreSecretEnv(env: NodeJS.ProcessEnv): string[] {
     const gates = typeof spec.requiredWhen === "string" ? [spec.requiredWhen] : spec.requiredWhen;
     return gates.some((gate) => GATE_PREDICATES[gate](env));
   };
-  return CORE_SECRET_SPECS.filter((spec) => enabled(spec) && isInvalidSecret(spec.name, env[spec.name])).map(
-    (spec) => spec.name,
-  );
+  return CORE_SECRET_SPECS.filter(
+    (spec) =>
+      enabled(spec) &&
+      (spec.name === "CODEX_ACCESS_TOKEN" ? !codexNativeAuthPresent(env) : isInvalidSecret(spec.name, env[spec.name])),
+  ).map((spec) => spec.name);
 }
 
 function isInvalidSecret(name: string, value: string | undefined): boolean {

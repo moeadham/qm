@@ -159,9 +159,15 @@ export function createTurnMethods(
             runtime.harnessId,
             configuredKeys,
             await deps.modelCredentials.availability(),
+            deps.nativeAuthHarnesses?.includes(runtime.harnessId),
           );
         } else if (deps.providerKeys) {
-          providers = modelProviderAvailabilityFor(runtime.harnessId, configuredKeys);
+          providers = modelProviderAvailabilityFor(
+            runtime.harnessId,
+            configuredKeys,
+            configuredKeys,
+            deps.nativeAuthHarnesses?.includes(runtime.harnessId),
+          );
         }
         if (providers && !modelServiceable(runtime.modelId, providers)) {
           return {

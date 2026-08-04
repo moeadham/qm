@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { CONFIG_FILENAME, loadConfigAt } from "../src/config.ts";
 import {
   adminGrantEmails,
+  codexAuthValue,
   mintSigningJwk,
   pendingSecrets,
   playbookFor,
@@ -78,6 +79,35 @@ test("pendingSecrets keeps a malformed administrator seed pending", () => {
   );
 });
 
+test("Codex auth collection reads a multiline file and stores one validated line", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-auth-"));
+  try {
+    const path = join(dir, "auth.json");
+    const auth = { auth_mode: "chatgpt", tokens: { access_token: "access", refresh_token: "refresh" } };
+    const pretty = JSON.stringify(auth, null, 2);
+    writeFileSync(path, pretty);
+    const fromPath = codexAuthValue(path);
+    assert.deepEqual(JSON.parse(fromPath), auth);
+    assert.doesNotMatch(fromPath, /\n/);
+    assert.throws(() => codexAuthValue(pretty), /Paste is not supported/);
+    for (const invalid of ["{}", JSON.stringify({ tokens: {} }), "placeholder"]) {
+      writeFileSync(path, invalid);
+      assert.throws(() => codexAuthValue(path), /Codex auth/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pendingSecrets rejects malformed Codex auth before deployment", () => {
+  const config = configFor(["core"], "", `{ "core": { "HARNESS": "codex" } }`);
+  const malformed = pendingSecrets(config, new Map([["CODEX_AUTH_JSON", "{"]]));
+  assert.ok(malformed.todo.some((secret) => secret.name === "CODEX_AUTH_JSON"));
+  const valid = JSON.stringify({ tokens: { access_token: "access" } });
+  const ready = pendingSecrets(config, new Map([["CODEX_AUTH_JSON", valid]]));
+  assert.ok(ready.done.some((secret) => secret.name === "CODEX_AUTH_JSON"));
+});
+
 test("updateEnvContent replaces blank and commented lines in place and appends new names", () => {
   const before = [
     "# Anthropic key (core)",
@@ -115,6 +145,7 @@ test("playbooks substitute the manifest names", () => {
   assert.ok(sso.includes(`${config.publicUrl}/auth/callback`));
   assert.doesNotMatch(sso, /Slack/);
   assert.match(playbookFor("ADMIN_GRANTS", config).join("\n"), /:org_admin/);
+  assert.match(playbookFor("CODEX_AUTH_JSON", config).join("\n"), /\.codex\/auth\.json/);
   assert.deepEqual(playbookFor("NO_SUCH_SECRET", config), []);
 });
 

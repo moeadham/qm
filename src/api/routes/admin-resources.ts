@@ -360,7 +360,16 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
       const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
       const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
       const unserviceable = (harness: string): { error: string } | null =>
-        modelId && !modelServiceable(modelId, modelProviderAvailabilityFor(harness, configuredKeys, managedKeys))
+        modelId &&
+        !modelServiceable(
+          modelId,
+          modelProviderAvailabilityFor(
+            harness,
+            configuredKeys,
+            managedKeys,
+            ctx.deps.nativeAuthHarnesses?.includes(harness),
+          ),
+        )
           ? {
               error: `model ${modelId} isn't serviceable on this deployment: its provider key is not configured for the ${harness} harness`,
             }
@@ -408,7 +417,17 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
       if (typeof modelId !== "string" || !modelSupportedByHarness(modelId, harnessId))
         return { error: `model ${String(modelId)} is not supported by ${harnessId}` };
       const runtimeKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
-      if (!modelServiceable(modelId, modelProviderAvailabilityFor(harnessId, runtimeKeys)))
+      if (
+        !modelServiceable(
+          modelId,
+          modelProviderAvailabilityFor(
+            harnessId,
+            runtimeKeys,
+            runtimeKeys,
+            ctx.deps.nativeAuthHarnesses?.includes(harnessId),
+          ),
+        )
+      )
         return {
           error: `model ${modelId} isn't serviceable on this deployment: its provider key is not configured for the ${harnessId} harness`,
         };
@@ -564,7 +583,13 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
       if (modelId && !resolveModel(modelId)) return { error: `unknown model id: ${modelId}` };
       const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
       const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
-      const providers = modelProviderAvailabilityFor(ctx.deps.harnessId ?? "pi", configuredKeys, managedKeys);
+      const harnessId = ctx.deps.harnessId ?? "pi";
+      const providers = modelProviderAvailabilityFor(
+        harnessId,
+        configuredKeys,
+        managedKeys,
+        ctx.deps.nativeAuthHarnesses?.includes(harnessId),
+      );
       if (modelId && !modelServiceable(modelId, providers)) {
         return { error: `model ${modelId} isn't serviceable on this deployment: its provider key is not configured` };
       }

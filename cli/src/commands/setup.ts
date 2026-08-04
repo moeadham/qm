@@ -1,13 +1,14 @@
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { CONFIG_FILENAME, configPathInDir, loadConfigAt, validOrgId, type Target, type QmConfig } from "../config.ts";
-import { bold, die, dim, header, note, ok, warn } from "../log.ts";
+import { bold, CliError, die, dim, header, note, ok, warn } from "../log.ts";
 import { HOSTING_PROVIDER_IDS, isTarget } from "../providers.ts";
 import { computedSecrets, MINT_JWK, MINT_LOCALLY, type ComputedSecret } from "../secrets.ts";
-import { isInvalidSecret, readEnvFile } from "../util.ts";
+import { isInvalidSecret, normalizeCodexAuthJson, readEnvFile } from "../util.ts";
 import { runInit } from "./init.ts";
 
 export function adminGrantEmails(adminGrants: string | undefined): string {
@@ -27,6 +28,35 @@ export function mintSigningJwk(): string {
   return JSON.stringify(generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "jwk" }));
 }
 
+export function codexAuthValue(input: string, defaultPath = join(homedir(), ".codex", "auth.json")): string {
+  const candidate = input.trim();
+  if (candidate.startsWith("{")) {
+    throw new CliError("Paste is not supported for Codex auth; enter the path to auth.json instead");
+  }
+  let path = defaultPath;
+  if (candidate) {
+    let expanded = candidate;
+    if (candidate === "~") expanded = homedir();
+    else if (candidate.startsWith("~/")) expanded = join(homedir(), candidate.slice(2));
+    path = resolve(expanded);
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    throw new CliError(`Codex auth file is not readable: ${path}`);
+  }
+  const normalized = normalizeCodexAuthJson(raw);
+  if (!normalized) throw new CliError("Codex auth must be valid JSON containing a usable access or refresh credential");
+  return normalized;
+}
+
+async function collectCodexAuth(ask: (question: string) => Promise<string>): Promise<string> {
+  const defaultPath = join(homedir(), ".codex", "auth.json");
+  const input = await ask(`  CODEX_AUTH_JSON path [${defaultPath}]: `);
+  return codexAuthValue(input, defaultPath);
+}
+
 const PLAYBOOKS: Readonly<Record<string, readonly string[]>> = {
   ANTHROPIC_API_KEY: [
     "Create an API key at https://console.anthropic.com/settings/keys",
@@ -37,6 +67,10 @@ const PLAYBOOKS: Readonly<Record<string, readonly string[]>> = {
     "Create an API key at https://platform.openai.com/api-keys",
     "(the key starts with sk-).",
     "Only one provider key is needed — set the one whose model you want as the base model.",
+  ],
+  CODEX_AUTH_JSON: [
+    "Run codex login first. Press Enter to read ~/.codex/auth.json, enter another",
+    "auth.json path. Paste is not accepted because auth.json is normally multiline.",
   ],
   OPENROUTER_API_KEY: [
     "Create an API key at https://openrouter.ai/settings/keys",
@@ -262,6 +296,17 @@ export async function runSetup(opts: { dir: string }): Promise<void> {
           ok(`  derived from ADMIN_GRANTS: ${derived}\n`);
           continue;
         }
+      }
+
+      if (secret.name === "CODEX_AUTH_JSON") {
+        try {
+          collected.set(secret.name, await collectCodexAuth(ask));
+          ok("  saved\n");
+        } catch (error) {
+          skipped.push(secret.name);
+          warn(`  ${error instanceof Error ? error.message : String(error)} — skipped; re-run setup to try again\n`);
+        }
+        continue;
       }
 
       let value = "";

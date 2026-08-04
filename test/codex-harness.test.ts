@@ -277,6 +277,7 @@ test("Codex child environment excludes core credentials and user homes", () => {
       ANTHROPIC_API_KEY: "anthropic-secret",
       OPENAI_API_KEY: "openai-needed-by-provider",
       CODEX_ACCESS_TOKEN: "codex-access-token",
+      CODEX_AUTH_JSON: JSON.stringify({ tokens: { access_token: "private" } }),
     },
     "/tmp/control-jail",
   );
@@ -302,6 +303,23 @@ test("Codex materializes API-key auth into its isolated home, and never an ambie
   const bare = mkdtempSync(join(tmpdir(), "qm-codex-auth-bare-"));
   t.after(() => rmSync(bare, { recursive: true, force: true }));
   assert.equal(existsSync(join(prepareCodexHome({ HOME: homedir() }, bare), "auth.json")), false);
+});
+
+test("Codex materializes subscription auth into its isolated home without forwarding the source JSON", (t) => {
+  const jail = mkdtempSync(join(tmpdir(), "qm-codex-subscription-auth-test-"));
+  t.after(() => rmSync(jail, { recursive: true, force: true }));
+  const auth = { tokens: { access_token: "access", refresh_token: "refresh" }, last_refresh: "2026-08-04" };
+  const source = { CODEX_ACCESS_TOKEN: JSON.stringify(auth) };
+  const home = prepareCodexHome(source, jail);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "auth.json"), "utf8")), auth);
+  assert.equal(codexChildEnv(source, jail).CODEX_ACCESS_TOKEN, undefined);
+  assert.throws(() => prepareCodexHome({ CODEX_AUTH_JSON: "not-json" }, jail), /valid JSON/);
+  assert.throws(() => prepareCodexHome({ CODEX_AUTH_JSON: "[]" }, jail), /JSON object/);
+  assert.throws(() => prepareCodexHome({ CODEX_AUTH_JSON: "{}" }, jail), /usable access or refresh credential/);
+  assert.throws(
+    () => prepareCodexHome({ CODEX_AUTH_JSON: JSON.stringify({ tokens: {} }) }, jail),
+    /usable access or refresh credential/,
+  );
 });
 
 test("Codex children cannot use parent surface, control, or terminal tools", () => {

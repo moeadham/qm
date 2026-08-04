@@ -12,7 +12,8 @@ type SecretCondition =
   | { kind: "all"; conditions: SecretCondition[] }
   | { kind: "any"; conditions: SecretCondition[] }
   | { kind: "target"; target: QmConfig["target"] }
-  | { kind: "model-provider"; provider: ModelProvider };
+  | { kind: "model-provider"; provider: ModelProvider }
+  | { kind: "model-provider-absent" };
 
 export interface SecretSpec {
   name: string;
@@ -56,17 +57,24 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
   {
     name: "OPENAI_API_KEY",
     service: "core",
+    required: { when: { kind: "model-provider", provider: "openai" }, optionalOtherwise: true },
+    description:
+      'OpenAI API key: bills the base model when modelProvider is "openai", an optional deployment fallback otherwise.',
+  },
+  {
+    name: "CODEX_AUTH_JSON",
+    service: "core",
+    envName: "CODEX_ACCESS_TOKEN",
     required: {
       when: {
-        kind: "any",
+        kind: "all",
         conditions: [
           { kind: "env-equals", service: "core", name: "HARNESS", value: "codex" },
-          { kind: "model-provider", provider: "openai" },
+          { kind: "model-provider-absent" },
         ],
       },
     },
-    description:
-      'OpenAI API key: the Codex harness needs it (its CLI cannot do browser OAuth in a container), and it bills the base model when modelProvider is "openai".',
+    description: "Codex subscription authentication copied from the operator's trusted local Codex login.",
   },
   {
     name: "PUBLIC_API_URL",
@@ -373,6 +381,7 @@ function conditionMatches(config: QmConfig, condition: SecretCondition): boolean
   if (condition.kind === "any") return condition.conditions.some((nested) => conditionMatches(config, nested));
   if (condition.kind === "target") return config.target === condition.target;
   if (condition.kind === "model-provider") return config.modelProvider === condition.provider;
+  if (condition.kind === "model-provider-absent") return config.modelProvider === undefined;
   if (condition.kind === "env-all-absent") {
     return condition.names.every((name) => !config.env[condition.service]?.[name]?.trim());
   }
@@ -568,6 +577,7 @@ function conditionClause(condition: SecretCondition): string {
   if (condition.kind === "env-in")
     return `env.${condition.service}.${condition.name} is one of ${condition.values.map((value) => JSON.stringify(value)).join(", ")}`;
   if (condition.kind === "model-provider") return `modelProvider is ${JSON.stringify(condition.provider)}`;
+  if (condition.kind === "model-provider-absent") return "modelProvider is not set";
   return `env.${condition.service}.${condition.name} is ${JSON.stringify(condition.value)}`;
 }
 
