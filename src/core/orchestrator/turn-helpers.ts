@@ -4,7 +4,6 @@ import type {
   Destination,
   EgressPolicy,
   Principal,
-  Resolution,
   ScopeId,
   SessionEntry,
   TurnRequest,
@@ -15,7 +14,6 @@ import { turnOriginRequestFields } from "../turn-origin.ts";
 import type { DirectoryStore } from "../../directory/directory-store.ts";
 import { isOverheardEntry } from "../../sessions/session-store.ts";
 import type { DeliveryStore } from "../../delivery/delivery-store.ts";
-import { writableMemoryScope } from "../../memory/policy.ts";
 import { collectBytes } from "../../util/bytes.ts";
 import type { SkillBundle, SkillBundleStore } from "../../skills/skill-bundle-store.ts";
 import type { SkillResolution } from "../../skills/skill-store.ts";
@@ -92,14 +90,6 @@ export async function loadTapeImage(
   return { data: bytes.data.toString("base64"), mimeType: artifact.mimetype, sizeBytes: bytes.sizeBytes };
 }
 
-export function visibleSkillScopes(resolution: Resolution, scopeId: ScopeId): ScopeId[] {
-  const memoryScopeId = writableMemoryScope(resolution.layers, scopeId);
-  const teamScopes = resolution.layers
-    .filter((l) => l.mode === "ro" && l.scopeId !== resolution.orgScopeId)
-    .map((l) => l.scopeId);
-  return [memoryScopeId, ...teamScopes, resolution.orgScopeId];
-}
-
 const CONNECTOR_SKILL_PROVIDERS: Readonly<Record<string, string>> = {
   dropbox: "dropbox",
   "email-draft-in-voice": "google",
@@ -168,12 +158,18 @@ export function stripTurnBoilerplate(text: string): string {
   return kept || text.trim();
 }
 
+export function visibleTitleEntryText(entry: SessionEntry): string | undefined {
+  const payload = entry.payload as { text?: unknown; display?: unknown } | null;
+  const value = entry.type === "user" && typeof payload?.display === "string" ? payload.display : payload?.text;
+  return typeof value === "string" ? value.trim() || undefined : undefined;
+}
+
 export function renderTitleTranscript(entries: SessionEntry[]): string {
   const lines: string[] = [];
   for (const e of entries) {
     if (e.type !== "user" && e.type !== "assistant") continue;
     if (isOverheardEntry(e)) continue;
-    const raw = (e.payload as { text?: string } | null)?.text?.trim();
+    const raw = visibleTitleEntryText(e);
     if (!raw) continue;
     const text = e.type === "user" ? stripTurnBoilerplate(raw) : raw;
     if (!text) continue;

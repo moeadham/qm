@@ -534,7 +534,7 @@ function startLoops(): void {
       }
       if ((slackHealth.numConnections ?? 1) > 1 && (lastSlackHealth?.numConnections ?? 1) <= 1) {
         log(
-          `DEGRADED: num_connections=${slackHealth.numConnections} -- another connection to this Slack app is stealing events (host: ${slackHealth.helloHost ?? "?"})`,
+          `DEGRADED: num_connections=${slackHealth.numConnections} at last hello -- Slack socket exclusivity is unverified (Slack server: ${slackHealth.helloHost ?? "?"}, not a client host)`,
         );
       }
       lastSlackHealth = slackHealth;
@@ -621,12 +621,13 @@ function serveApi(): Server {
         return;
       }
       const body = await readBody(req);
-      if (req.method === "POST") lastControlAt = nowEpoch();
       if (req.method === "POST" && req.url === "/reload") {
+        lastControlAt = nowEpoch();
         respond(200, await reload(body));
         return;
       }
       if (req.method === "POST" && req.url === "/restart") {
+        lastControlAt = nowEpoch();
         const names = (body.children as ChildName[] | undefined) ?? [...children.keys()];
         const results: Record<string, unknown> = {};
         for (const name of CHILD_ORDER.filter((n) => names.includes(n))) {

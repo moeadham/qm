@@ -5205,6 +5205,10 @@
                   <span class="k">Autonomy</span><span class="v">Loading</span
                   ><span class="detail">Security posture</span>
                 </div>
+                <div class="governance-status" id="governance-status-sharing">
+                  <span class="k">Sharing</span><span class="v">Loading</span
+                  ><span class="detail">Cross-context reads</span>
+                </div>
                 <div class="governance-status" id="governance-status-egress">
                   <span class="k">Network</span><span class="v">Loading</span
                   ><span class="detail">Outbound enforcement</span>
@@ -5456,6 +5460,54 @@
                   <h2>Data boundaries</h2>
                   <p>What can leave a scope, which audiences can see it, and how deployment authority is carried.</p>
                 </div>
+                <section class="card sv-governance setting-row hidden" id="card-sharing-posture">
+                  <div class="head">
+                    <h2>Sharing posture</h2>
+                    <p>
+                      The organization is a ceiling. Personal and room scopes can opt out, and Isolated always wins.
+                    </p>
+                  </div>
+                  <div class="body">
+                    <p id="sharing-posture-effective"></p>
+                    <select id="sharing-posture" data-choice-state hidden>
+                      <option value="isolated">Isolated</option>
+                      <option value="open">Open</option>
+                    </select>
+                    <div class="choice-stack">
+                      <label class="posture-choice"
+                        ><input
+                          type="radio"
+                          name="sharing-posture-choice"
+                          value="isolated"
+                          data-choice-for="sharing-posture"
+                        /><span
+                          ><strong>Isolated</strong
+                          ><small>Resources stay in their own scope unless explicitly shared.</small></span
+                        ></label
+                      >
+                      <label class="posture-choice"
+                        ><input
+                          type="radio"
+                          name="sharing-posture-choice"
+                          value="open"
+                          data-choice-for="sharing-posture"
+                        /><span
+                          ><strong>Open</strong
+                          ><small
+                            >QM can use your saved memories, files, and skills across conversations when you ask it for
+                            help. In a group conversation, this could risk revealing private information to
+                            others.</small
+                          ></span
+                        ></label
+                      >
+                    </div>
+                  </div>
+                  <div class="foot">
+                    <button class="primary" data-save="sharing-posture">Apply</button>
+                    <button type="button" id="sharing-posture-inherit" hidden>Follow organization</button>
+                    <span class="status" id="st-sharing-posture"></span>
+                  </div>
+                </section>
                 <section class="card sv-governance" id="card-egress">
                   <div class="head">
                     <h2>Egress policy</h2>
@@ -5536,6 +5588,33 @@
                   <div class="foot">
                     <button class="primary" data-save="external-slack-participants">Apply</button
                     ><span class="status" id="st-external-slack-participants"></span>
+                  </div>
+                </section>
+                <section class="card sv-governance setting-row hidden" id="card-internal-member-overrides">
+                  <div class="head">
+                    <h2 id="internal-member-overrides-title">Internal member overrides</h2>
+                    <p id="internal-member-overrides-help">
+                      Treat listed Slack users as internal members, including guests and people missing from the
+                      directory. This grants internal-member access, not just permission to mention the agent. Rooms
+                      containing only internal members may use organization credentials. Add only trusted colleagues.
+                      Enter one Slack user ID or Slack-profile email per line (commas also accepted).
+                    </p>
+                  </div>
+                  <div class="body">
+                    <textarea
+                      id="internal-member-overrides"
+                      rows="4"
+                      aria-labelledby="internal-member-overrides-title"
+                      aria-describedby="internal-member-overrides-help internal-member-overrides-count"
+                      spellcheck="false"
+                      placeholder="contractor@example.com&#10;U0123ABCDE"
+                      style="width: 100%; max-width: 560px; font-family: var(--mono, monospace)"
+                    ></textarea>
+                    <small class="muted" id="internal-member-overrides-count"></small>
+                  </div>
+                  <div class="foot">
+                    <button class="primary" data-save="internal-member-overrides">Apply</button
+                    ><span class="status" id="st-internal-member-overrides"></span>
                   </div>
                 </section>
                 <section class="card sv-customize setting-row hidden" id="card-org-ambient">
@@ -6290,8 +6369,10 @@
         [
           $("card-security-posture"),
           $("card-auto-flagger"),
+          $("card-sharing-posture"),
           governanceAmbient,
           $("card-external-slack"),
+          $("card-internal-member-overrides"),
           $("card-command-policy"),
           $("card-egress"),
         ].forEach((card) => content.appendChild(card));
@@ -7760,6 +7841,13 @@
         if (posture === "dangerous") postureTone = "danger";
         else if (posture === "auto") postureTone = "warn";
         setGovernanceStatus("governance-status-posture", titleCase(posture), "Effective security posture", postureTone);
+        const sharingPosture = data.sharingPosture || "isolated";
+        setGovernanceStatus(
+          "governance-status-sharing",
+          titleCase(sharingPosture),
+          "Effective sharing posture",
+          sharingPosture === "open" ? "danger" : "ok",
+        );
         const allowCount = (data.egress?.allowedHosts || []).length;
         const denyCount = (data.egress?.deniedHosts || []).length;
         const enforcement = data.egressEnforcement || {
@@ -7921,6 +8009,9 @@
           syncAutoFlaggerModels();
           $("auto-flagger-rubric").value = current.rubric;
         }
+        const showSharingPosture = "sharingPosture" in (r.data || {});
+        $("card-sharing-posture").classList.toggle("hidden", !showSharingPosture);
+        if (showSharingPosture) renderSharingPosture(r.data);
         const showGrantModes = "approvalGrantModes" in (r.data || {});
         $("card-approval-grant-modes").classList.toggle("hidden", !showGrantModes);
         if (showGrantModes) {
@@ -7947,6 +8038,15 @@
           document
             .querySelectorAll('[data-checkbox-for="external-slack-participants"]')
             .forEach((input) => (input.checked = input.value === (r.data.externalSlackParticipants ? "on" : "off")));
+        }
+        const showInternalOverrides = scope.startsWith("org:") && "internalMemberOverrides" in r.data;
+        $("card-internal-member-overrides").classList.toggle("hidden", !showInternalOverrides);
+        if (showInternalOverrides) {
+          const members = Array.isArray(r.data.internalMemberOverrides) ? r.data.internalMemberOverrides : [];
+          $("internal-member-overrides").value = members.join("\n");
+          $("internal-member-overrides-count").textContent = members.length
+            ? members.length + " override" + (members.length === 1 ? "" : "s")
+            : "No overrides configured.";
         }
         const showOrgAmbient = scope.startsWith("org:") && "orgAmbient" in r.data;
         $("card-org-ambient").classList.toggle("hidden", !showOrgAmbient);
@@ -10559,6 +10659,7 @@
           rubric: $("auto-flagger-rubric").value,
         }),
 
+        "sharing-posture": () => ({ posture: $("sharing-posture").value }),
         "approval-grant-modes": () => ({
           session: $("approval-grant-session").checked,
           always: $("approval-grant-always").checked,
@@ -10568,6 +10669,16 @@
         "ambient-policy": () => collectAmbientPolicy(),
         egress: () => collectEgress(),
         "external-slack-participants": () => ({ on: $("external-slack-participants").checked }),
+        "internal-member-overrides": () => ({
+          members: [
+            ...new Set(
+              $("internal-member-overrides")
+                .value.split(/[\n,]/)
+                .map((m) => m.trim().toLowerCase())
+                .filter(Boolean),
+            ),
+          ],
+        }),
         "org-ambient": () => ({ on: $("org-ambient").checked }),
         "channel-header-pin-default": () => ({ on: $("channel-header-pin-default").checked }),
         runtime: () => ({
@@ -10591,12 +10702,14 @@
       const SAVE_ST = {
         "security-posture": "st-security-posture",
         "auto-flagger": "st-auto-flagger",
+        "sharing-posture": "st-sharing-posture",
         "approval-grant-modes": "st-approval-grant-modes",
         "command-policy": "st-policy",
         soul: "st-soul",
         "ambient-policy": "st-ambient-policy",
         egress: "st-egress",
         "external-slack-participants": "st-external-slack-participants",
+        "internal-member-overrides": "st-internal-member-overrides",
         "org-ambient": "st-org-ambient",
         "channel-header-pin-default": "st-channel-header-pin-default",
         runtime: "st-runtime",
@@ -10607,6 +10720,7 @@
         branding: "st-branding",
       };
       const SAVE_RELOADS = new Set([
+        "internal-member-overrides",
         "auto-flagger",
         "soul",
         "external-slack-participants",
@@ -10697,6 +10811,24 @@
             danger: dangerous,
           });
         }
+        if (key === "sharing-posture") {
+          const before = JSON.parse(sectionSnapshots.get(key) || "{}").posture || "isolated";
+          const open = body.posture === "open";
+          return reviewGovernanceChange({
+            title: open ? "Enable Open sharing?" : "Return to Isolated sharing?",
+            subtitle: "This applies to future live human turns in the selected scope.",
+            facts: [
+              ["Scope", governanceScopeName()],
+              ["Current", titleCase(before)],
+              ["Proposed", titleCase(body.posture)],
+            ],
+            warning: open
+              ? "Open can reveal a speaker's private information in shared replies. It does not carry credentials, history, writes, automation, or another person's resources. Organization, personal, and room policy must all allow it."
+              : "Cross-context resources will again require explicit shares or grants.",
+            confirmLabel: open ? "Enable Open" : "Use Isolated",
+            danger: open,
+          });
+        }
         if (key === "external-slack-participants") {
           const before = !!JSON.parse(sectionSnapshots.get(key) || "{}").on;
           return reviewGovernanceChange({
@@ -10714,8 +10846,71 @@
             danger: !!body.on,
           });
         }
+        if (key === "internal-member-overrides") {
+          const norm = (list) => [
+            ...new Set((Array.isArray(list) ? list : []).map((m) => String(m).trim().toLowerCase()).filter(Boolean)),
+          ];
+          const before = norm(JSON.parse(sectionSnapshots.get(key) || "{}").members);
+          const after = norm(body.members);
+          const added = after.filter((m) => !before.includes(m));
+          const removed = before.filter((m) => !after.includes(m));
+          if (!added.length && !removed.length) return Promise.resolve(true);
+          const show = (list) => (list.length ? list.join(", ") : "none");
+          return reviewGovernanceChange({
+            title: "Change internal member overrides?",
+            subtitle: "These users count as internal members throughout the organization, not just for mentions.",
+            facts: [
+              ["Scope", governanceScopeName()],
+              ["Adding", show(added)],
+              ["Removing", show(removed)],
+              ["Total after", String(after.length)],
+            ],
+            warning: added.length
+              ? "These users receive internal-member access. Rooms containing only internal members may use organization credentials, and replies are visible to everyone there. Only add trusted colleagues."
+              : "Removed users without another source of internal membership return to external treatment after the directory refreshes.",
+            confirmLabel: "Apply overrides",
+            danger: added.length > 0,
+          });
+        }
         return Promise.resolve(true);
       }
+      function renderSharingPosture(data) {
+        const effective = data.sharingPosture || "isolated";
+        $("sharing-posture").value = effective;
+        $("sharing-posture-inherit").hidden = scope.startsWith("org:") || data.sharingPostureOverride == null;
+        $("sharing-posture-effective").textContent =
+          (data.sharingPostureOverride == null
+            ? scope.startsWith("org:")
+              ? "Default"
+              : "Following organization"
+            : "Configured: " + titleCase(data.sharingPostureOverride)) +
+          " · Effective: " +
+          titleCase(effective);
+        document
+          .querySelectorAll('[data-choice-for="sharing-posture"]')
+          .forEach((input) => (input.checked = input.value === effective));
+      }
+      $("sharing-posture-inherit").onclick = async () => {
+        const requestedScope = scope;
+        if (
+          !(await reviewGovernanceChange({
+            title: "Follow organization sharing?",
+            subtitle: "Remove this scope's sharing override.",
+            facts: [["Scope", governanceScopeName()]],
+            warning:
+              "The organization's sharing setting will apply. A personal or room Isolated override still takes precedence.",
+            confirmLabel: "Follow organization",
+          })) ||
+          requestedScope !== scope
+        )
+          return;
+        const result = await api("PUT", "/api/scopes/" + encodeURIComponent(requestedScope) + "/sharing-posture", {
+          inherit: true,
+        });
+        if (requestedScope !== scope) return;
+        if (result.ok) await loadScope();
+        setStatus("st-sharing-posture", result.ok ? "Saved" : "Could not reset sharing.", result.ok ? "ok" : "err");
+      };
       let governanceSaveSeq = 0;
       $("auto-flagger-test").onclick = async () => {
         const requestedScope = scope;
@@ -10788,7 +10983,7 @@
           }
           if (btn.dataset.saveRequest === saveRequest) delete btn.dataset.saveRequest;
           if (r.ok) {
-            if (key === "security-posture" || key === "ambient-policy") {
+            if (key === "security-posture" || key === "sharing-posture" || key === "ambient-policy") {
               const fresh = await api("GET", "/api/scopes/" + encodeURIComponent(scope));
               if (!fresh.ok) {
                 updateSectionDirty(key);
@@ -10797,6 +10992,7 @@
               }
               renderGovernanceOverview(fresh.data);
               if (key === "security-posture") $("security-posture").value = fresh.data.securityPosture || "auto";
+              else if (key === "sharing-posture") renderSharingPosture(fresh.data);
               else renderAmbientPolicy(fresh.data.ambientPolicy);
               captureSection(key);
             } else if (key === "branding") {
@@ -14456,7 +14652,7 @@
           drow.className = "who";
           const dlabel = document.createElement("span");
           dlabel.className = "entry-label important";
-          dlabel.textContent = delivery.shadow ? "Shadow delivery" : "Slack delivery";
+          dlabel.textContent = deliveryLabel(delivery);
           drow.appendChild(dlabel);
           if (delivery.shadow) {
             const sb = document.createElement("span");
@@ -14465,7 +14661,7 @@
             sb.textContent = "not sent";
             drow.appendChild(sb);
           }
-          drow.appendChild(badge(delivery.destination?.type === "principal" ? "Slack DM" : "Slack", "info"));
+          drow.appendChild(badge(deliverySurfaceLabel(delivery), "info"));
           const mirror = slackMirrorRef(delivery);
           if (mirror) {
             const ml = navLink("View in Slack mirror ↗", { view: "slack", container: mirror.container, ts: mirror.ts });
@@ -15211,6 +15407,7 @@
                     : "default",
                 ],
                 ["Security posture", cfg.securityPosture || "auto"],
+                ["Sharing posture", cfg.sharingPosture || "isolated"],
                 ["Egress overrides", allowN || denyN ? allowN + " allow · " + denyN + " deny" : "none"],
                 ["Base model", cfg.baseModel || "org default"],
                 ["Connectors linked", String((cfg.connectors || []).length)],
@@ -16012,6 +16209,19 @@
         } else {
           requestAnimationFrame(() => window.scrollTo({ top: document.body.scrollHeight }));
         }
+      }
+
+      function deliverySurfaceLabel(event) {
+        const type = event?.destination?.type;
+        if (type === "principal") return "Slack DM";
+        if (type === "slack") return "Slack";
+        if (type === "web") return "Web";
+        return type || "Unknown surface";
+      }
+
+      function deliveryLabel(event) {
+        if (event.shadow) return "Shadow delivery";
+        return `${deliverySurfaceLabel(event)} delivery`;
       }
 
       function slackMirrorRef(event) {
@@ -16905,19 +17115,16 @@
             const who = document.createElement("div");
             who.className = "who";
             const outbound = event.type === "outbound_delivery";
-            const slackDelivery = outbound || event.type === "principal_delivery";
+            const isDelivery = outbound || event.type === "principal_delivery";
             const label = document.createElement("span");
             label.className = "entry-label important";
-            let deliveryLabel = "Delivery event";
-            if (event.shadow) deliveryLabel = "Shadow delivery";
-            else if (slackDelivery) deliveryLabel = "Slack delivery";
-            label.textContent = deliveryLabel;
+            label.textContent = event.shadow || isDelivery ? deliveryLabel(event) : "Delivery event";
             const when = document.createElement("span");
             when.className = "when";
             let deliveryState = "delivery";
             if (event.shadow) deliveryState = "shadow";
             else if (event.expiredAt) deliveryState = "dropped";
-            else if (slackDelivery) deliveryState = "delivered";
+            else if (isDelivery) deliveryState = "delivered";
             when.textContent = `${deliveryState} · ${fmtTime(event.createdAt)}`;
             const text = event.text || "";
             who.append(label);
@@ -16934,8 +17141,7 @@
               xb.textContent = "never sent";
               who.append(xb);
             }
-            if (slackDelivery)
-              who.appendChild(badge(event.destination?.type === "principal" ? "Slack DM" : "Slack", "info"));
+            if (isDelivery) who.appendChild(badge(deliverySurfaceLabel(event), "info"));
             const provenanceLink = originNodeForDeliveryEvent(event);
             if (!outbound && provenanceLink) who.appendChild(provenanceLink);
             const originLink = cronLinkForDeliveryEvent(event);
