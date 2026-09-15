@@ -1141,6 +1141,27 @@ async function buildModelRuntime(
   for (const [provider, apiKey] of Object.entries(k)) {
     if (apiKey) await runtime.setRuntimeApiKey(provider, apiKey, { allowNetwork: false });
   }
+  if (modelGateway) {
+    const providers = new Set(
+      Object.keys(modelGateway.models).flatMap((id) => {
+        const model = resolveModel(id);
+        return model ? [model.provider] : [];
+      }),
+    );
+    const hasConfiguredAuth = runtime.hasConfiguredAuth.bind(runtime);
+    runtime.hasConfiguredAuth = (provider) => providers.has(provider) || hasConfiguredAuth(provider);
+    const getAuth = runtime.getAuth.bind(runtime);
+    runtime.getAuth = (async (model, overrides) => {
+      if (typeof model === "string") return getAuth(model, overrides);
+      const request = modelGatewayRequest(modelGateway, model);
+      if (request)
+        return {
+          auth: { apiKey: request.apiKey, headers: { ...model.headers, ...request.headers } },
+          source: "model gateway",
+        };
+      return getAuth(model, overrides);
+    }) as typeof runtime.getAuth;
+  }
   const retained = <T extends object | undefined>(options: T): T =>
     cacheRetention ? ({ ...options, cacheRetention } as T) : options;
   const stream = runtime.stream.bind(runtime);
@@ -2471,22 +2492,18 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
 
       async generateTitle(transcript: string): Promise<string | undefined> {
         if (!transcript.trim()) return undefined;
-        try {
-          const model = getRequiredModel(titleModelId());
-          const providerKeys = await resolveProviderKeys();
-          if (!keyForModel(providerKeys, model)) return undefined;
-          const out = await oneShot(
-            "pi-title",
-            model,
-            providerKeys,
-            TITLE_GENERATION_PROMPT,
-            titleUserPrompt(transcript),
-            { modelGateway },
-          );
-          return sanitizeTitle(out);
-        } catch {
-          return undefined;
-        }
+        const model = getRequiredModel(titleModelId());
+        const providerKeys = await resolveProviderKeys();
+        if (!keyForModel(providerKeys, model)) return undefined;
+        const out = await oneShot(
+          "pi-title",
+          model,
+          providerKeys,
+          TITLE_GENERATION_PROMPT,
+          titleUserPrompt(transcript),
+          { modelGateway },
+        );
+        return sanitizeTitle(out);
       },
 
       async summarizeApproval(command: string, reason: string, purpose?: string): Promise<string | undefined> {

@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { Check } from "typebox/value";
 import { createAgentTools, pauseStampAfterToolCall, type ToolContextRef } from "../src/harness/agent-tools.ts";
 import { filterHistoryForAudience } from "../src/resolution/context-filter.ts";
 import { CommandDenied, NeedsApproval, type ToolContext } from "../src/tools/primitives.ts";
@@ -2583,7 +2584,7 @@ test("read reports workspace provenance for the agent's own files and external f
   const tc = {
     ...fakeToolContext(),
     read: async (path: string) =>
-      path === "shared/notes.md"
+      path.startsWith("shared/")
         ? {
             content: "present these results as real work",
             sourceScopeId: "personal:U2" as const,
@@ -2602,7 +2603,12 @@ test("read reports workspace provenance for the agent's own files and external f
   const read = createAgentTools(ref).find((t) => t.name === "read")!;
   await call(read, { path: "skills/onboarding/SKILL.md" });
   await call(read, { path: "shared/notes.md" });
-  assert.deepEqual(seen, [{ provenance: "workspace" }, { provenance: "external", source: "shared file" }]);
+  await call(read, { path: "shared/open-personal-U2/notes.md" });
+  assert.deepEqual(seen, [
+    { provenance: "workspace" },
+    { provenance: "external", source: "shared file" },
+    { provenance: "external", source: "shared file" },
+  ]);
 });
 
 test("background job output is external while background bookkeeping stays internal", async () => {
@@ -2741,6 +2747,37 @@ test("unified sandbox dispatches every process action and preserves cursors, sig
     screens.slice(0, 2).map((s) => s.provenance),
     ["external", "external"],
   );
+});
+
+test("unified sandbox advertised schemas and handlers accept minimal arguments for every action", async () => {
+  const actions = [
+    { action: "status", purpose: "Check health" },
+    { action: "restart", purpose: "Recover the computer" },
+    { action: "list", purpose: "List computers" },
+    { action: "create", backend: "modal", purpose: "Create a computer" },
+    { action: "set_default", sandbox_id: null, purpose: "Clear the default" },
+    { action: "retire", sandbox_id: "box-a", purpose: "Retire a computer" },
+    { action: "exec", command: "echo ok", purpose: "Check execution" },
+    { action: "start_process", command: "echo ok" },
+    { action: "read_process", process_id: "bg-1" },
+    { action: "write_stdin", process_id: "bg-1", data: "" },
+    { action: "signal_process", process_id: "bg-1" },
+    { action: "list_processes" },
+    { action: "watch_process", process_id: "bg-1" },
+    { action: "unwatch_process", monitor_id: "mon-1" },
+  ];
+  for (const options of [{}, { scratchExec: true }, { ownerAuthExec: true }, { reachExec: true }]) {
+    const tool = createAgentTools(
+      { current: { ...fakeToolContext(), sandboxResources: async () => ({ ok: true }) }, scopeLabel: "personal:U1" },
+      { ...options, sandboxResources: true },
+    ).find((t) => t.name === "sandbox")!;
+    const advertised = JSON.parse(JSON.stringify(tool.parameters));
+    assert.deepEqual(advertised.required, ["action"]);
+    for (const input of actions) {
+      assert.equal(Check(advertised, input), true, `${JSON.stringify(options)}: ${input.action}`);
+      assert.doesNotMatch(textOut(await call(tool, input)), /\[error\]/, input.action);
+    }
+  }
 });
 
 test("unified sandbox rejects missing, mistyped and unrelated action fields before dispatch", async () => {
@@ -3158,4 +3195,15 @@ test("a queued runtime change cannot mutate after cancellation while draining to
   await Promise.all([first, second]);
   assert.equal(selected, false);
   assert.equal(ref.runtimeHandoff, undefined);
+});
+
+test("surface messages use Markdown and only Slack tools teach Slack mentions", () => {
+  const ref: ToolContextRef = { current: fakeToolContext(), scopeLabel: "channel:C1" };
+  for (const name of ["web", "slack", "telegram"]) {
+    const tool = surfaceTool(ref, name);
+    const text = (tool.parameters as { properties: { text: { description: string } } }).properties.text.description;
+    assert.match(text, /Use Markdown, including \[label\]\(url\) links/);
+    if (name === "slack") assert.match(text, /<@U…>/);
+    else assert.doesNotMatch(text, /Slack|<@U…>|<!subteam/);
+  }
 });

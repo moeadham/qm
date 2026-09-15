@@ -19,6 +19,7 @@ import type { OrgBranding } from "./resolution/config-store.ts";
 import { validateCoreSecretEnv } from "./deployment/secret-schema.ts";
 import { DEFAULT_CAPTURE_QUIET_MS } from "./memory/strategies/per-turn.ts";
 import { parseSecurityPosture, type SecurityPosture } from "./security/security-posture.ts";
+import { parseSharingPosture, type SharingPosture } from "./resolution/sharing-posture.ts";
 import { slackPluginConfigFromEnv, type SlackPluginConfig } from "./slack/config.ts";
 import { codexAuthFileForEnv, readCodexOAuthAuthFile } from "./harness/codex-auth-file.ts";
 import {
@@ -40,9 +41,14 @@ export interface Config {
   databaseUrl?: string;
   databaseCaCert?: string;
   databaseCaCertFile?: string;
+  databasePoolUrl?: string;
+  databasePoolCaCert?: string;
+  databasePoolMax?: number;
+  databaseDirectPoolMax?: number;
   harness: "mock" | "pi" | "opencode" | "codex" | "claude";
   securityPosture: SecurityPosture;
   sandboxResourcesEnabled: boolean;
+  sharingPosture: SharingPosture;
   sandboxBackend: "aws" | "local" | "sprites" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37";
   sandboxSecondaryBackend?: "aws" | "local" | "sprites" | "smolmachines" | "e2b" | "modal" | "porter" | "agent37";
   deployProvider: "docker" | "aws" | "fly" | "porter";
@@ -893,6 +899,15 @@ function securityPostureEnvStrict(value: string | undefined): SecurityPosture {
   );
 }
 
+function sharingPostureEnvStrict(value: string | undefined): SharingPosture {
+  if (value === undefined || value.trim() === "") return "isolated";
+  const posture = parseSharingPosture(value);
+  if (posture) return posture;
+  throw new Error(
+    `HARNESS_SHARING_POSTURE=${JSON.stringify(value)} is not recognized — use isolated or open, or unset it.`,
+  );
+}
+
 function securityScreenBackendEnvStrict(value: string | undefined): Config["securityScreenBackend"] {
   if (value === undefined || value.trim() === "") return "model";
   const backend = value.trim().toLowerCase();
@@ -1192,10 +1207,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     orgId: env.ORG_ID ?? DEFAULT_ORG_ID,
     sessionStore: env.SESSION_STORE === "postgres" ? "postgres" : "memory",
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),
+    ...(env.DATABASE_POOL_URL ? { databasePoolUrl: env.DATABASE_POOL_URL } : {}),
+    ...(env.DATABASE_POOL_CA_CERT ? { databasePoolCaCert: env.DATABASE_POOL_CA_CERT } : {}),
+    ...(env.DATABASE_POOL_MAX ? { databasePoolMax: numEnvStrict("DATABASE_POOL_MAX", env.DATABASE_POOL_MAX) } : {}),
+    ...(env.DATABASE_DIRECT_POOL_MAX
+      ? { databaseDirectPoolMax: numEnvStrict("DATABASE_DIRECT_POOL_MAX", env.DATABASE_DIRECT_POOL_MAX) }
+      : {}),
     ...(env.DATABASE_CA_CERT ? { databaseCaCert: env.DATABASE_CA_CERT } : {}),
     ...(env.DATABASE_CA_CERT_FILE ? { databaseCaCertFile: env.DATABASE_CA_CERT_FILE } : {}),
     harness,
     securityPosture: securityPostureEnvStrict(env.HARNESS_SECURITY_POSTURE),
+    sharingPosture: sharingPostureEnvStrict(env.HARNESS_SHARING_POSTURE),
     securityScreenBackend,
     ...(securityScreenBackend === "proxy"
       ? {
