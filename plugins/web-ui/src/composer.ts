@@ -323,8 +323,8 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
   }
 
   function syncRuntimeSelection(agent?: Agent): void {
-    if (agent && (!ctx.chat.state.threadRef || !threadModelPicks.has(ctx.chat.state.threadRef)))
-      if (currentModelOption()) agent.state.model = currentModelOption()!.model;
+    const selected = currentModelOption();
+    if (agent && selected) agent.state.model = selected.model;
     ctx.chat.drawActiveChat(agent);
     if (pendingComposerFocus) focusComposerEnd();
   }

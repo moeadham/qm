@@ -34,6 +34,8 @@ test("runtime defaults are shared while pane choices and editor drafts remain lo
   for (const [key, value] of Object.entries(globals))
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
 
+  localStorage.setItem("web-ui:model-picks", JSON.stringify([["thread-2", "pi:model"]]));
+
   const originalFetch = globalThis.fetch;
   const configs = new Map(
     ["personal:owner", "channel:other"].map((scope) => [scope, runtimeConfig(scope, { fastModeModelIds: ["model"] })]),
@@ -91,6 +93,12 @@ test("runtime defaults are shared while pane choices and editor drafts remain lo
       await composer.refreshRuntimeSelection(scopeId, agent);
       panes.push({ composer, ctx, agent, host });
     }
+    assert.equal(panes[2]!.composer.currentModelOption()?.model.id, "model");
+    assert.equal(
+      panes[2]!.agent.state.model?.id,
+      "model",
+      "restored pick hydrates the sending model after runtime loads",
+    );
     await loadContextModel("personal:owner", () => {});
     assert.equal(gets, 1, "boot data hydrates both personal panes and settings without another fetch");
     panes[1]!.composer.state.effortLevel = "auto"; // Explicitly equal to the old default is still a choice.
