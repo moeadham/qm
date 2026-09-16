@@ -18,7 +18,7 @@ function isTurnRequest(body: unknown): body is TurnRequest {
 
 function publicOrigin(origin: TurnOrigin | undefined): TurnOrigin | undefined {
   if (origin?.kind !== "automation") return origin;
-  const { useOwnerKeychain: _internalOnly, ...safe } = origin;
+  const { useOwnerKeychain: _internalOnly, useOwnerModelAuth: _modelAuth, ...safe } = origin;
   return safe;
 }
 

@@ -564,7 +564,13 @@ export interface OverheardMessage {
 export type TurnOrigin =
   | { kind: "human"; messageTs?: string; entryTs?: string }
   | { kind: "ambient"; entryTs?: string; live?: boolean }
-  | { kind: "automation"; screenData?: string; destination?: Destination; useOwnerKeychain?: boolean }
+  | {
+      kind: "automation";
+      screenData?: string;
+      destination?: Destination;
+      useOwnerKeychain?: boolean;
+      useOwnerModelAuth?: boolean;
+    }
   | { kind: "direct" };
 
 export interface TurnRequest {

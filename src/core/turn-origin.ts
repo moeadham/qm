@@ -32,6 +32,7 @@ export function resolveTurnOrigin(input: Partial<LegacyTurnOrigin> & { origin?: 
       ...(screenData !== undefined ? { screenData } : {}),
       ...((typed.destination ?? legacy.destination) ? { destination: typed.destination ?? legacy.destination! } : {}),
       ...(typed.useOwnerKeychain || legacy.useOwnerKeychain ? { useOwnerKeychain: true } : {}),
+      ...(typed.useOwnerModelAuth ? { useOwnerModelAuth: true } : {}),
     };
   }
   if (typed.kind === "human" && legacy.kind === "human") {

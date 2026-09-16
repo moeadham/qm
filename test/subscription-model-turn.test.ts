@@ -70,3 +70,51 @@ test("web Astra selection reaches Codex with personal OAuth through app and orch
     await built.runtime.stop();
   }
 });
+
+for (const connected of [true, false]) {
+  test(`owner-authenticated automation ${connected ? "uses the scoped Codex subscription" : "fails closed without the owner's connection"}`, async () => {
+    const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+    const start = seen.length;
+    try {
+      built.config.setIndividualModelAuth(true);
+      built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+      await built.config.flushScope("org:default-org");
+      await built.config.setRuntimeSelectionLatest("org:default-org", {
+        harnessId: "claude",
+        modelId: "claude-sonnet-5",
+      });
+      await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
+        harnessId: "codex",
+        modelId: "gpt-5.6-sol",
+      });
+      await built.userModelCredentials.setOAuth(connected ? "internal:alice" : "internal:bob", "openai", {
+        accessToken: "test-access",
+        idToken: "test-id",
+        accountId: "owner-account",
+        expiresAt: Date.now() + 3600000,
+      });
+      const pending = built.app.turn({
+        surface: "cron",
+        triggered: true,
+        origin: { kind: "automation", useOwnerModelAuth: true },
+        actor: { externalId: "internal:alice" },
+        conversation: { kind: "dm", threadRef: `cron-subscription-${connected}` },
+        text: "Return a diagnostic reply",
+        skipMemory: true,
+      });
+      if (connected) {
+        const result = await pending;
+        assert.equal(result.status, "ok", JSON.stringify(result));
+        assert.equal(seen.length, start + 1);
+        assert.equal(seen[start]?.runtime?.modelId, "gpt-5.6-sol");
+        assert.equal(seen[start]?.codexAuth?.accountId, "owner-account");
+        assert.equal(seen[start]?.runtimeActorId, "internal:alice");
+      } else {
+        await assert.rejects(pending, /owner to connect/);
+        assert.equal(seen.length, start);
+      }
+    } finally {
+      await built.runtime.stop();
+    }
+  });
+}

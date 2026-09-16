@@ -97,7 +97,7 @@ test("POST /v1/turns strips nested owner-keychain union from typed automation or
       audience: [{ externalId: "internal:owner" }],
     },
     text: "x",
-    origin: { kind: "automation", screenData: "external event", useOwnerKeychain: true },
+    origin: { kind: "automation", screenData: "external event", useOwnerKeychain: true, useOwnerModelAuth: true },
     async: true,
   });
   const r = await fetch(`${base}/v1/turns`, {

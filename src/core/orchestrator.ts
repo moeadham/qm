@@ -1,3 +1,4 @@
+import { resolveRuntimeChoiceDurable } from "../harness/harness-router.ts";
 import { recoveredRuntime } from "../harness/runtime-recovery.ts";
 import { evaluateCommandWithLayer } from "../policy/command-policy.ts";
 import { createSecretValueMasker } from "../security/secret-masking.ts";
@@ -159,7 +160,7 @@ import { randomUUID } from "node:crypto";
 import { LRUCache } from "lru-cache";
 import type { SkillResolution } from "../skills/skill-store.ts";
 import type { Orchestrator, OrchestratorDeps, OrchestratorInput } from "./orchestrator/types.ts";
-import { isHarnessId, resolveModel, CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
+import { defaultModelForHarness, isHarnessId, resolveModel, CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
 import type { ProviderKeys } from "../harness/pi-harness.ts";
 import type { CodexTurnAuth } from "../harness/harness.ts";
 import { resolveIndividualAuthRouting } from "./individual-auth-routing.ts";
@@ -2679,6 +2680,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const wantsOrgFastMode =
           typeof input.fastMode !== "boolean" && humanTurn && (await deps.config?.getInteractiveFastModeDurable());
         const effectiveFastMode = resolveTurnFastMode(input.fastMode, humanTurn, wantsOrgFastMode === true);
+        const ownerModelAuth = input.origin.kind === "automation" && input.origin.useOwnerModelAuth === true;
         const loadRuntimeAuth = async (runtime: Partial<RuntimeChoice>) => {
           let userProviderKeys: ProviderKeys | undefined;
           let userModelOverride: string | undefined;
@@ -2686,7 +2688,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           let claudeOauthToken: string | undefined;
           let codexTurnAuth: CodexTurnAuth | undefined;
           const userCredStore = deps.userModelCredentials;
-          if (userCredStore && humanTurn && (await deps.config?.getIndividualModelAuthDurable())) {
+          if (userCredStore && (humanTurn || ownerModelAuth) && (await deps.config?.getIndividualModelAuthDurable())) {
+            if (ownerModelAuth && deps.config) {
+              const fallbackHarness = isHarnessId(deps.defaultHarness) ? deps.defaultHarness : "claude";
+              runtime = await resolveRuntimeChoiceDurable(
+                deps.config,
+                resolution.orgScopeId,
+                scopeId,
+                { harnessId: fallbackHarness, modelId: defaultModelForHarness(fallbackHarness) },
+                runtime,
+              );
+            }
             const [anthCred, oaiCred] = await Promise.all([
               userCredStore.get(actor.id, "anthropic"),
               userCredStore.get(actor.id, "openai"),
@@ -2737,7 +2749,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             }
             if (!userHarnessOverride) {
               throw new NonRetryableTurnError(
-                "This organization has each person chat on their own AI account, and yours isn't connected yet. Open the web app and connect Claude or ChatGPT from the AI account panel, then try again.",
+                ownerModelAuth
+                  ? "This scheduled job needs its owner to connect an AI account compatible with the selected model. Open the web app and connect Claude or ChatGPT from the AI account panel, then retry the job."
+                  : "This organization has each person chat on their own AI account, and yours isn't connected yet. Open the web app and connect Claude or ChatGPT from the AI account panel, then try again.",
               );
             }
           }

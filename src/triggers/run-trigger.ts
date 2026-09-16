@@ -300,6 +300,9 @@ export async function runTrigger(deps: TriggerDeps, spec: TriggerSpec): Promise<
         text: spec.input,
         ...(spec.securityScreenData !== undefined ? { securityScreenData: spec.securityScreenData } : {}),
         triggered: true,
+        ...(spec.surface === "cron" && !isScopeFloor
+          ? { origin: { kind: "automation" as const, useOwnerModelAuth: true } }
+          : {}),
         ...(!isScopeFloor && !isScopeShared && spec.unattendedGrants
           ? { unattendedGrants: spec.unattendedGrants }
           : {}),
