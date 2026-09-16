@@ -1,36 +1,20 @@
 import { escapeHtml } from "../api/http.ts";
+import { mailerFor, type Mailer } from "../../plugins/chassis/src/email.ts";
+import type { EmailConfig } from "../../plugins/chassis/src/email-config.ts";
 
-export interface InviteMailer {
-  send(message: { to: string; subject: string; text: string; html: string }): Promise<string>;
-}
+export type InviteMailer = Pick<Mailer, "send">;
 
 export const INVITE_EMAIL_NOT_CONFIGURED =
-  "invitation emails are not configured — set RESEND_API_KEY and AUTH_EMAIL_FROM on core (the same Resend key and verified sender the sign-in broker uses)";
+  "invitation emails are not configured — configure AUTH_EMAIL_TRANSPORT and AUTH_EMAIL_FROM on core, with SMTP_HOST/SMTP_USERNAME/SMTP_PASSWORD for SMTP or RESEND_API_KEY for Resend";
 
-const RESEND_ENDPOINT = "https://api.resend.com/emails";
-const RESEND_TIMEOUT_MS = 15_000;
-
-export function createResendMailer(apiKey: string, from: string, fetchImpl: typeof fetch = fetch): InviteMailer {
-  return {
-    async send(message) {
-      const r = await fetchImpl(RESEND_ENDPOINT, {
-        method: "POST",
-        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          from,
-          to: [message.to],
-          subject: message.subject,
-          text: message.text,
-          html: message.html,
-        }),
-        signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
-      });
-      const body = (await r.json().catch(() => ({}))) as { id?: string; message?: string; name?: string };
-      if (!r.ok)
-        throw new Error(`Resend rejected the message: HTTP ${r.status} ${body.message ?? body.name ?? ""}`.trim());
-      return body.id ?? "accepted";
-    },
-  };
+export function createInviteMailer(config?: EmailConfig, production = false): InviteMailer | null {
+  const mailer = config ? mailerFor(config) : null;
+  if (mailer && config?.transport === "smtp") {
+    if (!Number.isInteger(config.smtp.port) || config.smtp.port < 1 || config.smtp.port > 65535)
+      throw new Error("SMTP_PORT must be a TCP port number");
+    if (production && config.smtp.tls === "none") throw new Error("SMTP_TLS=none may not be used in production");
+  }
+  return mailer;
 }
 
 export function renderInviteEmail(a: {

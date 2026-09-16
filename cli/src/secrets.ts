@@ -1,4 +1,4 @@
-import { serviceHost, type DeclaredServiceName } from "./services.ts";
+import { EMAIL_ENV_NAMES, hostedServiceEnv, serviceHost, type DeclaredServiceName } from "./services.ts";
 import { effectiveModelProvider, type ModelProvider, type QmConfig } from "./config.ts";
 import { TARGET_ENV_DEFAULTS } from "./target-env-defaults.ts";
 import { deploymentSecretValue } from "./util.ts";
@@ -458,6 +458,33 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
   },
   {
     name: "SMTP_HOST",
+    service: "core",
+    required: {
+      when: { kind: "env-equals", service: "core", name: "AUTH_EMAIL_TRANSPORT", value: "smtp" },
+      optional: true,
+    },
+    description: "SMTP invitation mail transport setting, shared with the sign-in broker.",
+  },
+  {
+    name: "SMTP_USERNAME",
+    service: "core",
+    required: {
+      when: { kind: "env-equals", service: "core", name: "AUTH_EMAIL_TRANSPORT", value: "smtp" },
+      optional: true,
+    },
+    description: "SMTP invitation mail transport setting, shared with the sign-in broker.",
+  },
+  {
+    name: "SMTP_PASSWORD",
+    service: "core",
+    required: {
+      when: { kind: "env-equals", service: "core", name: "AUTH_EMAIL_TRANSPORT", value: "smtp" },
+      optional: true,
+    },
+    description: "SMTP invitation mail transport setting, shared with the sign-in broker.",
+  },
+  {
+    name: "SMTP_HOST",
     service: "auth",
     required: {
       when: { kind: "env-equals", service: "auth", name: "AUTH_EMAIL_TRANSPORT", value: "smtp" },
@@ -498,7 +525,7 @@ function conditionMatches(config: QmConfig, condition: SecretCondition): boolean
   const configuredSandboxBackend =
     condition.service === "core" && condition.name === "SANDBOX_BACKEND" ? config.sandbox?.backend : undefined;
   const value = (
-    config.env[condition.service]?.[condition.name] ??
+    hostedServiceEnv(config.services, config.env, condition.service)[condition.name] ??
     configuredSandboxBackend ??
     targetEnvDefault(config, condition.service, condition.name)
   )?.trim();
@@ -530,7 +557,15 @@ export function emailSecretNames(config: QmConfig): string[] {
 
 export function computedSecrets(config: QmConfig): ComputedSecret[] {
   const byName = new Map<string, ComputedSecret>();
-  for (const spec of FIRST_PARTY_SECRET_SPECS) {
+  for (const original of FIRST_PARTY_SECRET_SPECS) {
+    const email = EMAIL_ENV_NAMES.some((name) => name === original.name);
+    const source = email
+      ? (config.secretEnv?.[original.service]?.[original.name] ??
+        (original.service === "core" && config.services.includes("auth")
+          ? config.secretEnv?.auth?.[original.name]
+          : undefined))
+      : undefined;
+    const spec = source && source !== original.name ? { ...original, name: source, envName: original.name } : original;
     if (!config.services.includes(spec.service)) continue;
     const required = requirementFor(config, spec);
     if (required === null) continue;
@@ -689,7 +724,7 @@ export function serviceSecretValue(
   name: string,
   values: ReadonlyMap<string, string>,
 ): string | undefined {
-  let value = config.env[service]?.[name];
+  let value = hostedServiceEnv(config.services, config.env, service)[name];
   for (const secret of validatedSecrets(config)) {
     if (!runtimeSecretNames(service, secret).includes(name)) continue;
     const supplied = deploymentSecretValue(secret.name, values.get(secret.name));
@@ -703,9 +738,13 @@ function requiresOtherEmailTransport(config: QmConfig, condition: SecretConditio
     return condition.conditions.some((nested) => requiresOtherEmailTransport(config, nested));
   if (condition.kind === "any")
     return condition.conditions.every((nested) => requiresOtherEmailTransport(config, nested));
-  if (condition.kind !== "env-equals" || condition.service !== "auth" || condition.name !== "AUTH_EMAIL_TRANSPORT")
+  if (
+    condition.kind !== "env-equals" ||
+    !["auth", "core"].includes(condition.service) ||
+    condition.name !== "AUTH_EMAIL_TRANSPORT"
+  )
     return false;
-  const configured = config.env.auth?.AUTH_EMAIL_TRANSPORT?.trim();
+  const configured = hostedServiceEnv(config.services, config.env, condition.service).AUTH_EMAIL_TRANSPORT?.trim();
   return configured !== undefined && configured !== "" && configured !== condition.value;
 }
 

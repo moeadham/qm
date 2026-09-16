@@ -1,3 +1,4 @@
+import { readEmailConfig, type EmailConfig } from "../plugins/chassis/src/email-config.ts";
 import { existsSync, readdirSync } from "node:fs";
 import {
   parseProviderBaseUrl,
@@ -82,8 +83,7 @@ export interface Config {
   adminGrants?: string;
   emailAuthPrincipals?: string[];
   emailAuthDomain?: string;
-  resendApiKey?: string;
-  emailFrom?: string;
+  email?: EmailConfig;
   rateLimitPerWindow: number;
   rateLimitWindowMs: number;
   budgetUsdPerWindow?: number;
@@ -1275,8 +1275,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.AUTH_ALLOWED_EMAIL_DOMAIN?.trim()
       ? { emailAuthDomain: env.AUTH_ALLOWED_EMAIL_DOMAIN.trim().toLowerCase() }
       : {}),
-    ...(env.RESEND_API_KEY?.trim() ? { resendApiKey: env.RESEND_API_KEY.trim() } : {}),
-    ...(env.AUTH_EMAIL_FROM?.trim() ? { emailFrom: env.AUTH_EMAIL_FROM.trim() } : {}),
+    email: readEmailConfig(env),
     piCaptureRequests: boolEnvStrict("PI_CAPTURE_REQUESTS", env.PI_CAPTURE_REQUESTS) ?? true,
     piSystemCacheSplit: boolEnvStrict("PI_SYSTEM_CACHE_SPLIT", env.PI_SYSTEM_CACHE_SPLIT) ?? false,
     sessionTapeMode: env.SESSION_TAPE_MODE === "shadow" ? "shadow" : "serve",

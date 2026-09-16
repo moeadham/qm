@@ -286,7 +286,7 @@ export async function emailTransportPreflight(
     if (stray.length) {
       warn(
         `${stray.join(", ")} ${stray.length === 1 ? "is" : "are"} set but env.auth.AUTH_EMAIL_TRANSPORT is "resend" — ` +
-          `the value${stray.length === 1 ? " is" : "s are"} unused; remove ${stray.length === 1 ? "it" : "them"} or set the transport to "smtp"`,
+          `the value${stray.length === 1 ? " is" : "s are"} unused by the sign-in broker; remove ${stray.length === 1 ? "it" : "them"} or set the transport to "smtp"`,
       );
     }
     return;
@@ -294,7 +294,7 @@ export async function emailTransportPreflight(
   if (value("RESEND_API_KEY")) {
     step(
       'RESEND_API_KEY is set but env.auth.AUTH_EMAIL_TRANSPORT is "smtp" — the sign-in broker ignores it; ' +
-        "core still uses it to email external-user invitations",
+        `external-user invitations use ${serviceSecretValue(config, "core", "AUTH_EMAIL_TRANSPORT", secrets) === "smtp" ? "SMTP" : "Resend"} on core`,
     );
   }
   if (!configured) return;

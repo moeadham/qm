@@ -1,3 +1,5 @@
+import { fakeSmtp } from "../plugins/chassis/test/smtp-fixture.ts";
+import { readEmailConfig } from "../plugins/chassis/src/email-config.ts";
 import "./support/auto-fake-sprites.ts";
 
 import { test } from "node:test";
@@ -8,7 +10,12 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { createInsecureTestServer, createServer } from "../src/api/server.ts";
 import { buildApp } from "../src/wiring.ts";
-import { INVITE_EMAIL_NOT_CONFIGURED, renderInviteEmail, type InviteMailer } from "../src/admin/invite-email.ts";
+import {
+  createInviteMailer,
+  INVITE_EMAIL_NOT_CONFIGURED,
+  renderInviteEmail,
+  type InviteMailer,
+} from "../src/admin/invite-email.ts";
 import { adminStatusFromGrants } from "../src/admin/admin-service.ts";
 import { coreEmailAllowed } from "../plugins/chassis/src/external-members.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS, CONTROL_PLANE_AUD } from "../src/auth/capability-token.ts";
@@ -561,5 +568,36 @@ test("directory sync never deactivates an external member; manual deactivation s
     assert.equal(s.built.identity.classify("live@partner.example").type, "guest");
   } finally {
     await s.close();
+  }
+});
+
+test("the admin invitation endpoint delivers through SMTP and reports provider failures", async () => {
+  for (const rejectRecipient of [false, true]) {
+    const smtp = await fakeSmtp({ rejectRecipient });
+    const mailer = createInviteMailer(
+      readEmailConfig({
+        AUTH_EMAIL_TRANSPORT: "smtp",
+        AUTH_EMAIL_FROM: "QM <sender@example.test>",
+        SMTP_HOST: "127.0.0.1",
+        SMTP_PORT: String(smtp.port),
+        SMTP_TLS: "none",
+        SMTP_USERNAME: "user",
+        SMTP_PASSWORD: "password",
+      }),
+    )!;
+    const s = start({ mailer });
+    try {
+      const response = await invite(s.base, { email: "guest@partner.example", expiresAt: Date.now() + DAY_MS });
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as { emailSent: boolean; emailProblem?: string };
+      assert.equal(body.emailSent, !rejectRecipient);
+      assert.equal(smtp.messages.length, rejectRecipient ? 0 : 1);
+      if (rejectRecipient) assert.match(body.emailProblem!, /550/);
+      else assert.equal(body.emailProblem, undefined);
+      assert.ok(s.built.identity.externalMember("guest@partner.example"));
+    } finally {
+      await s.close();
+      await smtp.close();
+    }
   }
 });

@@ -34,7 +34,7 @@ import {
   type IdentityService,
 } from "./identity/identity-service.ts";
 import type { ExternalMember } from "./identity/external-members.ts";
-import { createResendMailer } from "./admin/invite-email.ts";
+import { createInviteMailer } from "./admin/invite-email.ts";
 import {
   createMemoryConfigStore,
   type ScopedConfigStore,
@@ -2214,9 +2214,7 @@ export function serverDeps(
     admin: built.admin,
     ...(config.emailAuthPrincipals ? { emailAuthPrincipals: config.emailAuthPrincipals } : {}),
     ...(config.emailAuthDomain ? { emailAuthDomain: config.emailAuthDomain } : {}),
-    ...(config.resendApiKey && config.emailFrom
-      ? { inviteMailer: createResendMailer(config.resendApiKey, config.emailFrom) }
-      : {}),
+    ...(config.email ? { inviteMailer: createInviteMailer(config.email, config.production) ?? undefined } : {}),
     rateLimiter: built.rateLimiter,
     acl: built.acl,
     credentialUsage: built.credentialUsage,

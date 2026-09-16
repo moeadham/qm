@@ -21,12 +21,31 @@ export function serviceHost(name: string): string {
 export const runnableServices = (names: readonly DeclaredServiceName[]): ServiceName[] =>
   [...new Set(names.map(serviceHost))].filter(isServiceName);
 
+export const EMAIL_ENV_NAMES = [
+  "AUTH_EMAIL_TRANSPORT",
+  "AUTH_EMAIL_FROM",
+  "RESEND_API_KEY",
+  "SMTP_HOST",
+  "SMTP_PORT",
+  "SMTP_TLS",
+  "SMTP_USERNAME",
+  "SMTP_PASSWORD",
+] as const;
+
 export function hostedServiceEnv(
   services: readonly DeclaredServiceName[],
   env: Partial<Record<DeclaredServiceName, Record<string, string>>>,
   host: string,
 ): Record<string, string> {
-  if (host === "core" || serviceHost(host) !== host) return { ...env[host as DeclaredServiceName] };
+  if (host === "core") {
+    const email = services.includes("auth")
+      ? Object.fromEntries(
+          Object.entries(env.auth ?? {}).filter(([name]) => EMAIL_ENV_NAMES.some((key) => key === name)),
+        )
+      : {};
+    return { ...email, ...env.core };
+  }
+  if (serviceHost(host) !== host) return { ...env[host as DeclaredServiceName] };
   const out: Record<string, string> =
     host === "web-ui" ? { ADMIN_ENABLED: services.includes("admin") ? "1" : "0" } : {};
   for (const service of services.filter((name) => serviceHost(name) === host)) {

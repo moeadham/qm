@@ -389,3 +389,23 @@ test("combined auth rejects two source secrets for the same environment name", (
     /would receive env RESEND_API_KEY from both/,
   );
 });
+
+test("invitation SMTP secrets reach core and auth, including configured secret-store aliases", () => {
+  const config = makeConfig({
+    services: ["core", "portal", "auth"],
+    env: { auth: { AUTH_EMAIL_TRANSPORT: "smtp" } },
+    secretEnv: { auth: { SMTP_PASSWORD: "MAIL_PASSWORD" } },
+  });
+  for (const name of ["AUTH_EMAIL_FROM", "SMTP_HOST", "SMTP_USERNAME"]) {
+    const destinations = secretDestinations(secretByName(config, name));
+    assert.ok(destinations.get("core")?.has(name));
+    assert.ok(destinations.get("portal")?.has(name));
+  }
+  const destinations = secretDestinations(secretByName(config, "MAIL_PASSWORD"));
+  assert.ok(destinations.get("core")?.has("SMTP_PASSWORD"));
+  assert.ok(destinations.get("portal")?.has("SMTP_PASSWORD"));
+  assert.equal(
+    serviceSecretValue(config, "core", "SMTP_PASSWORD", new Map([["MAIL_PASSWORD", "test-password"]])),
+    "test-password",
+  );
+});

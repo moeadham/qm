@@ -87,6 +87,15 @@ email delivery disabled. Fully supplied but invalid configuration is refused at 
 | `resend`  | `RESEND_API_KEY`                                                                      | A key with send access from <https://resend.com/api-keys>. The sending domain must be verified under Domains, which needs DNS records; an unverified domain fails at delivery, not at boot.                                                             |
 | `smtp`    | `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and optionally `SMTP_PORT`, `SMTP_TLS` | Any relay. `SMTP_PORT` defaults to `587`. `SMTP_TLS` defaults to `implicit` on port `465` and `starttls` otherwise; `none` is refused in production, and a relay that does not advertise STARTTLS is refused rather than sent credentials in cleartext. |
 
+Core sends external-user invitations through the same SMTP/Resend implementation.
+The CLI carries `env.auth` email settings and SMTP credentials to core; explicit
+`env.core` and `secretEnv.core` overrides take precedence. Authentication-only
+secrets remain on portal. For manual deployments, supply `AUTH_EMAIL_TRANSPORT`,
+`AUTH_EMAIL_FROM`, and the selected transport's credentials to core too. SMTP
+invitations need no Resend account. Existing Resend setups retain the default
+transport. Both services must run the updated images, and existing deployments
+must push secrets and redeploy with the updated CLI to activate this wiring.
+
 `qm doctor` proves the Resend key is accepted, or that the SMTP relay is
 reachable and answers. Neither proves deliverability — the first real sign-in
 link does that.

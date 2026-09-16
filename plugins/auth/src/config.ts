@@ -1,16 +1,7 @@
-import type { SmtpTlsMode } from "./smtp.ts";
+import { readEmailConfig, emailConfigured, senderAddress, type EmailConfig } from "../../chassis/src/email-config.ts";
+export { emailConfigured, senderAddress } from "../../chassis/src/email-config.ts";
 
-type EmailTransportKind = "resend" | "smtp";
-
-interface SmtpSettings {
-  host: string;
-  port: number;
-  username: string;
-  password: string;
-  tls: SmtpTlsMode;
-}
-
-export interface AuthConfig {
+export interface AuthConfig extends EmailConfig {
   issuer: string;
   publicPath: string;
   clientId: string;
@@ -20,11 +11,7 @@ export interface AuthConfig {
   tokenSecret: string;
   allowedEmails: readonly string[];
   allowedEmailDomain: string | undefined;
-  emailFrom: string;
   brandName: string;
-  transport: EmailTransportKind;
-  resendApiKey: string;
-  smtp: SmtpSettings;
   sessionIdleS: number;
   sessionAbsoluteS: number;
   linkTtlS: number;
@@ -66,12 +53,6 @@ function issuerPath(issuer: string): string {
   }
 }
 
-function smtpTlsFrom(mode: string | undefined, port: string | undefined): SmtpTlsMode {
-  const declared = mode?.trim();
-  if (declared === "implicit" || declared === "none" || declared === "starttls") return declared;
-  return port?.trim() === "465" ? "implicit" : "starttls";
-}
-
 function parseJwk(raw: string | undefined): Record<string, unknown> | null {
   if (!raw?.trim()) return null;
   try {
@@ -85,7 +66,6 @@ function parseJwk(raw: string | undefined): Record<string, unknown> | null {
 export function readConfig(env: NodeJS.ProcessEnv): AuthConfig {
   const issuer = (env.AUTH_ISSUER ?? `http://localhost:${env.PORT ?? 8099}`).replace(/\/$/, "");
   const publicPath = issuerPath(issuer);
-  const transport: EmailTransportKind = env.AUTH_EMAIL_TRANSPORT?.trim() === "smtp" ? "smtp" : "resend";
   return {
     issuer,
     publicPath,
@@ -96,17 +76,8 @@ export function readConfig(env: NodeJS.ProcessEnv): AuthConfig {
     tokenSecret: env.AUTH_TOKEN_SECRET ?? "",
     allowedEmails: listFrom(env.AUTH_ALLOWED_EMAILS),
     allowedEmailDomain: env.AUTH_ALLOWED_EMAIL_DOMAIN?.trim().toLowerCase() || undefined,
-    emailFrom: env.AUTH_EMAIL_FROM?.trim() ?? "",
+    ...readEmailConfig(env),
     brandName: env.AUTH_BRAND_NAME?.trim() || "qm",
-    transport,
-    resendApiKey: env.RESEND_API_KEY ?? "",
-    smtp: {
-      host: env.SMTP_HOST?.trim() ?? "",
-      port: numberFrom(env.SMTP_PORT, 587),
-      username: env.SMTP_USERNAME ?? "",
-      password: env.SMTP_PASSWORD ?? "",
-      tls: smtpTlsFrom(env.SMTP_TLS, env.SMTP_PORT),
-    },
     sessionIdleS: numberFrom(env.AUTH_SESSION_IDLE_S, 30 * 86400),
     sessionAbsoluteS: numberFrom(env.AUTH_SESSION_ABSOLUTE_S, 90 * 86400),
     linkTtlS: numberFrom(env.AUTH_LINK_TTL_S, 900),
@@ -132,12 +103,6 @@ function validEmailDomain(value: string): boolean {
 
 export function validEmail(value: string): boolean {
   return value.length <= 254 && /^[^@\s,;<>"]+@[^@\s,;<>"]+\.[^@\s,;<>"]+$/.test(value);
-}
-
-export function emailConfigured(cfg: AuthConfig): boolean {
-  const credentials =
-    cfg.transport === "resend" ? [cfg.resendApiKey] : [cfg.smtp.host, cfg.smtp.username, cfg.smtp.password];
-  return [cfg.emailFrom, ...credentials].every((value) => Boolean(value.trim()));
 }
 
 function httpsUrlProblem(label: string, value: string, requireHttps: boolean): string | null {
@@ -247,9 +212,4 @@ export function bootProblems(cfg: AuthConfig, isProd: boolean): string[] {
       "AUTH_SESSION_IDLE_S and AUTH_SESSION_ABSOLUTE_S must be whole seconds with idle <= absolute <= 90 days",
     );
   return problems;
-}
-
-export function senderAddress(from: string): string {
-  const angled = /<([^>]+)>\s*$/.exec(from.trim());
-  return (angled?.[1] ?? from).trim();
 }

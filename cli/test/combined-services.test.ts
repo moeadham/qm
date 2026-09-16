@@ -46,3 +46,21 @@ test("broker client secret keeps both required names on portal", () => {
   });
   assert.deepEqual([...destinations], [["portal", new Set(["AUTH_CLIENT_SECRET", "OIDC_CLIENT_SECRET"])]]);
 });
+
+test("core inherits only mail settings from auth and preserves explicit overrides", () => {
+  const env = {
+    auth: {
+      AUTH_EMAIL_TRANSPORT: "smtp",
+      SMTP_PORT: "465",
+      SMTP_TLS: "implicit",
+      AUTH_TOKEN_SECRET: "private-auth-key",
+    },
+    core: { SMTP_PORT: "587" },
+  };
+  assert.deepEqual(hostedServiceEnv(["core", "auth", "portal"], env, "core"), {
+    AUTH_EMAIL_TRANSPORT: "smtp",
+    SMTP_PORT: "587",
+    SMTP_TLS: "implicit",
+  });
+  assert.deepEqual(hostedServiceEnv(["core"], env, "core"), { SMTP_PORT: "587" });
+});
