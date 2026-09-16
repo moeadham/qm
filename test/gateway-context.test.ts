@@ -28,12 +28,10 @@ test("gateway only (no surface-provided context) still names the gateway", () =>
   assert.doesNotMatch(out, /Identifiers for this conversation/);
 });
 
-test("web gateway warns scheduled notifications need an external destination", () => {
+test("web gateway does not override the cron tool delivery capabilities", () => {
   const out = renderGatewayContext("web");
   assert.match(out, /over web\./);
-  assert.match(out, /web UI cannot receive future external notifications/);
-  assert.match(out, /use `recipient` for a Slack DM/);
-  assert.match(out, /Do not put "deliver to Slack" only inside `action`/);
+  assert.doesNotMatch(out, /cannot receive|Slack DM|real platform destination/);
 });
 
 test("surface-supplied instructions are appended verbatim (and alone are enough to render)", () => {
@@ -91,18 +89,18 @@ test("no gateway context: prompt names the surface but adds no identifier lines"
   assert.doesNotMatch(res.reply ?? "", /Identifiers for this conversation/);
 });
 
-test("web prompt tells cron creators to use a real notification destination", async () => {
+test("web prompt permits the current conversation as the scheduled destination", async () => {
   const { app } = freshApp();
   const res = await app.turn({
     surface: "web",
     actor: { externalId: "U3" },
     conversation: { kind: "dm", threadRef: "web:U3:t1" },
+    deliveryTarget: "web:U3:t1",
     text: "!sysprompt",
   });
   assert.equal(res.status, "ok");
-  assert.match(res.reply ?? "", /web UI cannot receive future external notifications/);
-  assert.match(res.reply ?? "", /recipient.*Slack DM/s);
-  assert.match(res.reply ?? "", /Do not put "deliver to Slack" only inside `action`/);
+  assert.match(res.reply ?? "", /over web/);
+  assert.doesNotMatch(res.reply ?? "", /web UI cannot receive|real platform destination/);
 });
 
 test("triggered destination turns tell the agent to return the deliverable, not self-send it", async () => {
