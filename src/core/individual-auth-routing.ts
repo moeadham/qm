@@ -1,4 +1,5 @@
 import {
+  codexProviderModelId,
   codexSubscriptionModelId,
   CODEX_SUBSCRIPTION_PROVIDER,
   DEFAULT_AGENT_MODEL_ID,
@@ -87,7 +88,7 @@ export function resolveIndividualAuthRouting(
       harness: "codex",
       model:
         requestedModel && requestedProvider === "openai"
-          ? requestedModel.replace(/^codex\//, "")
+          ? codexProviderModelId(requestedModel)
           : defaultModelForHarness("codex", DEFAULT_CODEX_MODEL_ID),
     };
   }

@@ -65,3 +65,15 @@ test("disconnecting ChatGPT removes its models even when deployment keys are ava
   ctx.deps.providerKeys = { anthropic: true, openai: true, openrouter: true };
   assert.deepEqual((await runtimeConfigBody(ctx, "personal:alice", "alice")).approvedHarnesses, []);
 });
+
+test("provider-specific personal access filters the picker even with company access as the default", async () => {
+  const { config, ctx, userModelCredentials } = await setup();
+  config.setIndividualModelAuth(false);
+  await config.flushScope("org:default-org");
+  await config.setPersonalModelAuth("alice", true, "openai");
+  await userModelCredentials.setOAuth("alice", "anthropic", { accessToken: "test-claude" });
+  const result = await runtimeConfigBody(ctx, "personal:alice", "alice");
+  assert.deepEqual(result.approvedHarnesses, ["codex"]);
+  assert.ok(result.modelsByHarness.codex?.includes("gpt-6-astra"));
+  assert.deepEqual(result.modelsByHarness.claude, []);
+});

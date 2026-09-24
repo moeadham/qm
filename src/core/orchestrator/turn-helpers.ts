@@ -232,6 +232,7 @@ export function replayableRequest(input: OrchestratorInput): TurnRequest {
   const c = input.conversation;
   return {
     surface: input.surface ?? "unknown",
+    ...(input.sessionSenderId ? { sessionSenderId: input.sessionSenderId } : {}),
     ...(input.scopeVersion ? { scopeVersion: input.scopeVersion } : {}),
     ...(input.deliveryTarget ? { deliveryTarget: input.deliveryTarget } : {}),
     ...(input.deliveryCandidates?.length ? { deliveryCandidates: input.deliveryCandidates } : {}),
@@ -248,6 +249,8 @@ export function replayableRequest(input: OrchestratorInput): TurnRequest {
     },
     text: input.text,
     ...(input.gatewayContext ? { gatewayContext: input.gatewayContext } : {}),
+    ...(input.analyticsSuppressed ? { analyticsSuppressed: true } : {}),
+    ...(input.proactiveOpener ? { proactiveOpener: true } : {}),
     ...turnOriginRequestFields(input.origin),
     ...(input.conversationHeader ? { conversationHeader: input.conversationHeader } : {}),
     ...(input.priorTurns?.length ? { priorTurns: input.priorTurns } : {}),
@@ -260,6 +263,9 @@ export function replayableRequest(input: OrchestratorInput): TurnRequest {
     ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
     ...(input.fastMode !== undefined ? { fastMode: input.fastMode } : {}),
     ...(input.readOnly ? { readOnly: true } : {}),
+    ...(input.privateSessionMessage
+      ? { privateSessionMessage: true as const, sessionMessageDepth: input.sessionMessageDepth }
+      : {}),
     ...(input.skipMemory ? { skipMemory: true } : {}),
     ...(input.surfaceTools ? { surfaceTools: true } : {}),
     ...(input.addressed ? { addressed: true } : {}),

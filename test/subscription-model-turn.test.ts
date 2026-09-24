@@ -76,7 +76,7 @@ for (const connected of [true, false]) {
     const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
     const start = seen.length;
     try {
-      built.config.setIndividualModelAuth(true);
+      await built.config.setPersonalModelAuth("internal:alice", true, "openai");
       built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
       await built.config.flushScope("org:default-org");
       await built.config.setRuntimeSelectionLatest("org:default-org", {

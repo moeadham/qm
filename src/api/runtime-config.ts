@@ -1,6 +1,7 @@
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import type { ModelCredentialStore } from "../model/model-credential-store.ts";
 import type { UserModelCredentialStore } from "../model/user-model-credential-store.ts";
+import { gatewayModelCatalog } from "../model/gateway-models.ts";
 import type { ScopeId } from "../types.ts";
 import { orgScope } from "../config.ts";
 import {
@@ -16,6 +17,7 @@ import {
   modelUnavailableReason,
   thinkingLevelsForHarness,
   harnessSupportsFastMode,
+  codexProviderModelId,
   type HarnessId,
   type ModelProviderAvailability,
 } from "../model/pi-models.ts";
@@ -36,16 +38,21 @@ export interface RuntimeDeps {
 
 export function runtimeFallback(ctx: { deps: RuntimeDeps }): { harnessId: HarnessId; modelId: string } {
   const harnessId = isHarnessId(ctx.deps.harnessId) ? ctx.deps.harnessId : "pi";
-  return { harnessId, modelId: ctx.deps.baseModelDefault ?? defaultModelForHarness(harnessId) };
+  const gatewayIds = gatewayModelCatalog(true).map((model) => model.id);
+  const providers =
+    gatewayIds.length && ctx.deps.providerKeys
+      ? { ...ctx.deps.providerKeys, modelIds: new Set(gatewayIds) }
+      : undefined;
+  return { harnessId, modelId: ctx.deps.baseModelDefault ?? defaultModelForHarness(harnessId, undefined, providers) };
 }
 
 export async function runtimeConfigBody(ctx: { deps: RuntimeDeps }, scope: ScopeId, principalId?: string) {
   const config = ctx.deps.config!;
+  const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
+  const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
   const fallback = runtimeFallback(ctx);
   const org = orgScope();
   const approvedHarnesses = ((await config.getApprovedHarnessesDurable()) ?? [fallback.harnessId]).filter(isHarnessId);
-  const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
-  const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
   const providersFor = (harnessId: string) => modelProviderAvailabilityFor(harnessId, configuredKeys, managedKeys);
   const catalog =
     ctx.deps.modelCredentials && managedKeys.openrouter
@@ -91,13 +98,13 @@ export async function runtimeConfigBody(ctx: { deps: RuntimeDeps }, scope: Scope
   } else if (legacyModel) {
     scopeOverride = { harnessId: fallback.harnessId, modelId: legacyModel, orgRevision: 0 };
   }
-  const individualAuth = Boolean(
-    principalId && ctx.deps.userModelCredentials && (await config.getIndividualModelAuthDurable()),
-  );
+  const account =
+    principalId && ctx.deps.userModelCredentials ? await config.getModelAccountDurable(principalId) : "company";
+  const individualAuth = account !== "company";
   const [anthCred, oaiCred] = individualAuth
     ? await Promise.all([
-        ctx.deps.userModelCredentials!.get(principalId!, "anthropic"),
-        ctx.deps.userModelCredentials!.get(principalId!, "openai"),
+        account === "openai" ? null : ctx.deps.userModelCredentials!.get(principalId!, "anthropic"),
+        account === "anthropic" ? null : ctx.deps.userModelCredentials!.get(principalId!, "openai"),
       ])
     : [null, null];
   let effective = scopeOverride ?? orgDefault;
@@ -184,7 +191,7 @@ export function validateRuntimeChoice(choice: RuntimeChoice): string | null {
 }
 
 export async function webuiModelEnabled(ctx: { deps: RuntimeDeps }, modelId: string): Promise<boolean> {
-  modelId = modelId.replace(/^codex\//, "");
+  modelId = codexProviderModelId(modelId);
   const config = ctx.deps.config!;
   const picker = await config.getWebuiModelsDurable(orgScope());
   if (picker == null || picker.includes(modelId)) return true;

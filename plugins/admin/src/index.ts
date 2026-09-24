@@ -1,3 +1,5 @@
+import { reportBackendError } from "../../chassis/src/error-reporting.ts";
+import "./instrument.ts";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Readable } from "node:stream";
@@ -28,12 +30,17 @@ function signedHeaders(method: string, corePath: string, rawBody: string): Recor
   return signedRequestHeaders(CORE_SIGNING_SECRET, method, corePath, rawBody, { "content-type": "application/json" });
 }
 
-const BASE_HTML = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "../public/index.html"),
-  "utf8",
-).replaceAll("__ADMIN_BASE__", () => ADMIN_BASE_PATH);
+const BASE_HTML = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../public/index.html"), "utf8")
+  .replaceAll("__ADMIN_BASE__", () => ADMIN_BASE_PATH)
+  .replace(
+    "<style data-admin-components></style>",
+    () =>
+      "<style data-admin-components>" +
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../public/admin-components.css"), "utf8") +
+      "</style>",
+  );
 const BRAND_MARK = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../public/brand-mark.svg"));
-const ADMIN_SCRIPT = BASE_HTML.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? "";
+const ADMIN_SCRIPT = BASE_HTML.match(/<script>([\s\S]*?)<\/script>/i)?.[1] ?? "";
 const ADMIN_CSP = [
   "default-src 'self'",
   `script-src 'sha256-${createHash("sha256").update(ADMIN_SCRIPT).digest("base64")}'`,
@@ -42,7 +49,7 @@ const ADMIN_CSP = [
   "connect-src 'self'",
   "frame-ancestors 'none'",
   "base-uri 'none'",
-  "form-action 'self'",
+  `form-action 'self'${process.env.QM_SLACK_SERVICE_URL ? ` ${new URL(process.env.QM_SLACK_SERVICE_URL).origin} https://slack.com` : ""}`,
   "object-src 'none'",
 ].join("; ");
 
@@ -121,6 +128,8 @@ async function forward(
       },
       ...(body ? { body } : {}),
     });
+    const timing = r.headers.get("server-timing");
+    if (timing) res.setHeader("server-timing", timing);
     if (r.body && gzipAccepted(req)) {
       res.writeHead(r.status, {
         "content-type": "application/json",
@@ -143,6 +152,7 @@ async function forward(
     res.writeHead(r.status, { "content-type": "application/json", vary: "accept-encoding" });
     pipeBody(res, r.body);
   } catch (err) {
+    reportBackendError(err);
     console.error("[admin] core request failed:", String(err));
     json(res, 502, { error: "core_unreachable", message: "core unavailable" });
   }
@@ -178,6 +188,7 @@ async function forwardDownload(res: ServerResponse, principal: string, corePath:
     res.writeHead(r.status, headers);
     pipeBody(res, r.body);
   } catch (err) {
+    reportBackendError(err);
     console.error("[admin] core download failed:", String(err));
     json(res, 502, { error: "core_unreachable", message: "core unavailable" });
   }
@@ -238,6 +249,7 @@ async function uploadFileFromRequest(
     });
     return forward(req, res, principal, "POST", corePath, body);
   } catch (err) {
+    reportBackendError(err);
     console.error("[admin] upload failed:", String(err));
     return json(res, 502, { error: "core_unreachable", message: "core unavailable" });
   }
@@ -286,7 +298,7 @@ const WRITES = new Map<string, string[]>([
   ["skills", ["DELETE"]],
   ["skill-packs", ["POST", "PATCH", "DELETE"]],
   ["users", ["PUT", "POST"]],
-  ["slack-installation", ["PUT", "DELETE"]],
+  ["slack-installation", ["POST", "PUT", "DELETE"]],
   ["model-providers", ["PUT", "DELETE"]],
   ["model-registry", ["POST", "PUT", "DELETE"]],
   ["custom-providers", ["PUT", "DELETE"]],
@@ -325,6 +337,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse): Promis
   await portalTokenStore
     .run(token, () => handle(req, res))
     .catch((err: unknown) => {
+      reportBackendError(err);
       console.error("[admin] unhandled request error:", String(err));
       json(res, 500, { error: "internal_error", message: "internal server error" });
     });
@@ -345,6 +358,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const method = req.method ?? "GET";
 
   const serveShell = async (): Promise<void> => {
+    if (process.env.QM_SLACK_SERVICE_URL) res.setHeader("referrer-policy", "strict-origin");
     const shell = brandedShell(await brandCache.forRender());
     const gz = gzipAccepted(req);
     const etag = gz ? shell.gzipEtag : shell.etag;
@@ -402,18 +416,19 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (!principal) return json(res, 401, { error: "signed_out" });
     const rest = pathname.slice("/api/scopes/".length);
     if (method === "GET") {
-      if (rest.endsWith("/export")) {
-        const scopeId = decodeURIComponent(rest.slice(0, -"/export".length));
+      const suffix = ["/export", "/credential-usage"].find((suffix) => rest.endsWith(suffix));
+      if (suffix) {
+        const scopeId = decodeURIComponent(rest.slice(0, -suffix.length));
         return forward(
           req,
           res,
           principal,
           "GET",
-          `/v1/admin/scopes/${encodeURIComponent(scopeId)}/export${url.search}`,
+          `/v1/admin/scopes/${encodeURIComponent(scopeId)}${suffix}${url.search}`,
         );
       }
       const scopeId = decodeURIComponent(rest);
-      return forward(req, res, principal, "GET", `/v1/admin/scopes/${encodeURIComponent(scopeId)}`);
+      return forward(req, res, principal, "GET", `/v1/admin/scopes/${encodeURIComponent(scopeId)}${url.search}`);
     }
     if (method === "POST" && rest.endsWith("/auto-flagger/test")) {
       const scope = decodeURIComponent(rest.slice(0, -"/auto-flagger/test".length));
@@ -443,6 +458,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         res.writeHead(r.status, { "content-type": "application/json" });
         res.end(text);
       } catch (err) {
+        reportBackendError(err);
         console.error("[admin] core request failed:", String(err));
         json(res, 502, { error: "core_unreachable", message: "core unavailable" });
       }

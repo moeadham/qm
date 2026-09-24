@@ -1,3 +1,4 @@
+import { reportBackendError } from "../../chassis/src/error-reporting.ts";
 import { createHmac } from "node:crypto";
 import { coreRememberedSessions, type RememberedSessions, type RememberedSession } from "./sessions.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -24,6 +25,7 @@ export interface AuthDeps {
   sessions?: RememberedSessions;
   mailer: Mailer | null;
   brandName?: () => string;
+  trustedSignInLabel?: string;
   emailAllowed?: (email: string) => Promise<boolean>;
   now?: () => number;
   onBackgroundTask?: (task: Promise<void>) => void;
@@ -138,7 +140,17 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
   };
 
   const problem = (res: ServerResponse, status: number, heading: string, msg: string, detail?: string): void =>
-    sendHtml(res, status, problemPage({ brandName: brandName(), heading, msg, ...(detail ? { detail } : {}) }));
+    sendHtml(
+      res,
+      status,
+      problemPage({
+        brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
+        heading,
+        msg,
+        ...(detail ? { detail } : {}),
+      }),
+    );
 
   const emailUnavailable = (res: ServerResponse): void =>
     problem(
@@ -162,6 +174,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       400,
       problemPage({
         brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
         heading: "This sign-in link no longer works",
         msg: "Sign-in links work once and expire quickly. Request a fresh one and open it right away.",
         ...(signInUrl ? { retryUrl: signInUrl } : {}),
@@ -259,7 +272,12 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     return sendHtml(
       res,
       200,
-      emailFormPage({ brandName: brandName(), action: formAction, requestToken: sealed.token }),
+      emailFormPage({
+        brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
+        action: formAction,
+        requestToken: sealed.token,
+      }),
     );
   }
 
@@ -282,6 +300,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       }
     } catch (e) {
       if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+      reportBackendError(e);
       console.error(
         "[auth] sign-in link suppressed: core is unreachable, so rate limits cannot be enforced — sign-in fails closed until core is healthy (this is a core outage, not a rate limit)",
       );
@@ -295,6 +314,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       );
       console.log(`[auth] sign-in link sent to ${email} (${receipt})`);
     } catch (e) {
+      reportBackendError(e);
       console.error(`[auth] sign-in link to ${email} could not be delivered: ${errMessage(e)}`);
     }
   }
@@ -327,6 +347,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
         400,
         emailFormPage({
           brandName: brandName(),
+          trustedSignInLabel: deps.trustedSignInLabel,
           action: formAction,
           requestToken: sealed.token,
           problem: "That doesn't look like an email address.",
@@ -334,7 +355,16 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       );
     }
     const ip = clientIpOf(req);
-    sendHtml(res, 200, linkSentPage({ brandName: brandName(), email, ttlMinutes: linkTtlMinutes }));
+    sendHtml(
+      res,
+      200,
+      linkSentPage({
+        brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
+        email,
+        ttlMinutes: linkTtlMinutes,
+      }),
+    );
     background(() => sendLink(request, email, ip, mailer));
   }
 
@@ -342,7 +372,11 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     return sendHtml(
       res,
       200,
-      confirmSignInPage({ brandName: brandName(), action: `${cfg.publicPath}/verify` }),
+      confirmSignInPage({
+        brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
+        action: `${cfg.publicPath}/verify`,
+      }),
       CONFIRM_PAGE_CSP,
     );
   }
@@ -361,6 +395,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       linkClaimed = await claimOnce(claims, `link:${opened.jti}`, opened.expiresAtMs);
     } catch (e) {
       if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+      reportBackendError(e);
       return problem(
         res,
         503,
@@ -427,6 +462,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       codeClaimed = await claimOnce(claims, `code:${opened.jti}`, opened.expiresAtMs);
     } catch (e) {
       if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+      reportBackendError(e);
       return sendJson(res, 503, { error: "temporarily_unavailable" });
     }
     if (!codeClaimed) return sendJson(res, 400, { error: "invalid_grant" });
