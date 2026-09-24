@@ -63,7 +63,7 @@
     "*": "prettier --write --ignore-unknown"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.273",
+    "@anthropic-ai/claude-agent-sdk": "0.3.281",
     "@anthropic-ai/tokenizer": "^0.0.4",
     "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-ecs": "3.1096.0",
@@ -75,7 +75,7 @@
     "@earendil-works/pi-ai": "0.82.0",
     "@earendil-works/pi-coding-agent": "https://github.com/yc-software/pi/releases/download/qm-pi-coding-agent-0.82.0-security.3/earendil-works-pi-coding-agent-0.82.0-qm-security.3.tgz",
     "@fly/sprites": "0.0.1",
-    "@openai/codex": "0.153.4",
+    "@openai/codex": "0.156.1",
     "@opencode-ai/plugin": "1.17.18",
     "@opencode-ai/sdk": "1.17.18",
     "@sentry/node": "10.75.0",
