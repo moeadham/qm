@@ -118,3 +118,113 @@ for (const connected of [true, false]) {
     }
   });
 }
+
+for (const connected of [true, false]) {
+  test(`delegated Codex override ${connected ? "uses owner OAuth over the Claude scope default" : "fails closed after disconnect"}`, async () => {
+    const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+    const start = seen.length;
+    try {
+      await built.config.setPersonalModelAuth("internal:alice", true);
+      built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+      await built.config.flushScope("org:default-org");
+      await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
+        harnessId: "claude",
+        modelId: "claude-opus-5-5",
+      });
+      await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+        accessToken: "test-access",
+        idToken: "test-id",
+        accountId: "owner-account",
+        expiresAt: Date.now() + 3600000,
+      });
+      if (!connected) await built.userModelCredentials.delete("internal:alice", "openai");
+      const pending = built.app.turn({
+        surface: "web",
+        triggered: true,
+        origin: { kind: "automation", useOwnerModelAuth: true },
+        actor: { externalId: "internal:alice" },
+        conversation: { kind: "dm", threadRef: `delegated-override-${connected}` },
+        text: "Review this change",
+        skipMemory: true,
+        harness: "codex",
+        model: "gpt-6-astra",
+      });
+      if (connected) {
+        const result = await pending;
+        assert.equal(result.status, "ok", JSON.stringify(result));
+        assert.equal(seen.length, start + 1);
+        assert.equal(seen[start]?.runtime?.modelId, "gpt-6-astra");
+        assert.equal(seen[start]?.codexAuth?.accountId, "owner-account");
+      } else {
+        assert.equal((await pending).status, "refused");
+        assert.equal(seen.length, start);
+      }
+    } finally {
+      await built.runtime.stop();
+    }
+  });
+}
+
+for (const account of ["personal", "company", "disconnected"] as const) {
+  test(`queued subagent preserves ${account} credential selection`, async () => {
+    const built = buildApp(testConfig({ harness: "mock", seedSkills: false, openaiApiKey: "company-test-key" }));
+    const start = seen.length;
+    try {
+      await built.config.setPersonalModelAuth("internal:alice", account !== "company");
+      built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+      await built.config.flushScope("org:default-org");
+      await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
+        harnessId: "claude",
+        modelId: "claude-opus-5-5",
+      });
+      await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+        accessToken: "test-access",
+        idToken: "test-id",
+        accountId: "owner-account",
+        expiresAt: Date.now() + 3600000,
+      });
+      const actor = { id: "internal:alice", type: "internal" as const };
+      const threadRef = `agent:main:subagent:account-${account}`;
+      const session = await built.sessions.getOrCreateByThread(threadRef, "dm", "personal:internal:alice");
+      await built.sessions.addParticipant(session.id, actor.id);
+      await built.sessions.setSpawnMeta(session.id, {
+        surface: "web",
+        actor,
+        conversation: { kind: "dm", threadRef, audience: [actor] },
+      });
+
+      const { run } = await built.runs.enqueue({
+        sessionId: threadRef,
+        request: {
+          surface: "web",
+          actor,
+          conversation: { kind: "dm", threadRef, audience: [actor] },
+          origin: { kind: "automation", useOwnerModelAuth: true },
+          text: "Review",
+          skipMemory: true,
+          harness: "codex",
+          model: "gpt-6-astra",
+        },
+      });
+      if (account === "disconnected") await built.userModelCredentials.delete(actor.id, "openai");
+      built.runtime.startBackground();
+      let latest = await built.runs.get(run.id);
+      for (let i = 0; i < 100 && (latest?.status === "pending" || latest?.status === "running"); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        latest = await built.runs.get(run.id);
+      }
+      if (account === "disconnected") {
+        assert.equal(latest?.status, "failed");
+        assert.equal(seen.length, start);
+        return;
+      }
+      assert.equal(latest?.status, "done", JSON.stringify(latest?.result));
+      assert.equal(latest?.result?.status, "ok", JSON.stringify(latest?.result));
+      assert.equal(seen.length, start + 1);
+      assert.equal(seen[start]?.runtime?.modelId, "gpt-6-astra");
+      assert.equal(seen[start]?.codexAuth?.accountId, account === "personal" ? "owner-account" : undefined);
+    } finally {
+      await built.runtime.stop();
+    }
+  });
+}

@@ -216,7 +216,7 @@ function childRunRequest(child: Session, meta: SpawnMeta, text: string, displayT
     surface: meta.surface,
     actor: meta.actor,
     conversation: { ...meta.conversation, threadRef: child.threadRef },
-    origin: { kind: "automation", screenData: text },
+    origin: { kind: "automation", screenData: text, useOwnerModelAuth: true },
     text,
     displayText,
     envelopeWrapped: true,
@@ -576,7 +576,7 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
                   return { ok: true, sessionId: target.id, title, delivered: "queued_turn" };
                 }
               }
-              request.origin = { kind: "automation", screenData: stamped };
+              request.origin = { kind: "automation", screenData: stamped, useOwnerModelAuth: true };
               request.sessionSenderId = binding.session.id;
               if (
                 (await sessionTreeRunCount(deps.sessions, deps.runs, await sessionTreeRoot(deps.sessions, target))) >=
@@ -712,7 +712,7 @@ export async function deliverSubagentMail(deps: SubagentMailDeps, run: Run): Pro
     surface: meta.surface,
     actor: meta.actor,
     conversation: { ...meta.conversation, threadRef: parent.threadRef },
-    origin: { kind: "automation", screenData: text },
+    origin: { kind: "automation", screenData: text, useOwnerModelAuth: true },
     ...(meta.deliveryTarget ? { deliveryTarget: meta.deliveryTarget } : {}),
     ...(meta.scopeVersion ? { scopeVersion: meta.scopeVersion } : {}),
     ...(meta.sessionParticipantIds ? { sessionParticipantIds: meta.sessionParticipantIds } : {}),

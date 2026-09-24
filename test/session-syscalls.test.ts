@@ -88,6 +88,8 @@ test("open creates a child session with parent pointer, spawn meta, and a queued
   const request = inFlight[0]!.request;
   assert.equal(request.conversation.threadRef, child.threadRef);
   assert.equal(request.deliveryTarget, undefined);
+  assert.equal(request.origin.kind, "automation");
+  assert.equal(request.origin.kind === "automation" && request.origin.useOwnerModelAuth, true);
   assert.match(request.text, /subagent-task/);
   assert.match(request.text, /build a personal website/);
   assert.equal(out.liveRunsRemaining, SUBAGENT_TREE_RUN_CAP - 1);
@@ -131,6 +133,7 @@ test("write queues separately from a running child and interrupts explicitly", a
   assert.equal(pending.length, 0);
   const followup = (await r.runs.inFlightForThread(child.threadRef)).find((run) => run.id !== queued.id)!;
   assert.equal(followup.request.origin.kind, "automation");
+  assert.equal(followup.request.origin.kind === "automation" && followup.request.origin.useOwnerModelAuth, true);
   assert.match(followup.request.text, /focus on the canary/);
 
   const interrupted = await syscalls.write({ target: opened.sessionId, interrupt: true });
@@ -798,4 +801,45 @@ test("queued results recheck source-entry visibility after participant tenure ch
   assert.equal((await r.sessions.visibleEntries(child.id, other.id)).length, 0);
   assert.deepEqual(await api.receive!(), []);
   assert.equal((await r.mailbox.pending(shared.id)).length, 1);
+});
+
+test("Codex child completion retains the Claude parent's runtime and owner identity", async () => {
+  const r = await rig();
+  await r.runs.enqueue({
+    sessionId: r.room.threadRef,
+    request: {
+      actor,
+      conversation,
+      origin: { kind: "human" },
+      text: "implement",
+      harness: "claude",
+      model: "claude-opus-5-5",
+    },
+  });
+  const opened = await r
+    .syscallsFor(r.room)
+    .open({ task: "review", harness: "codex", model: "gpt-6-astra", readOnly: true });
+  assert.ok(opened.ok);
+  const child = await freshSession(r.sessions, opened.sessionId);
+  const [run] = await r.runs.inFlightForThread(child.threadRef);
+  assert.equal(run!.request.harness, "codex");
+  assert.equal(run!.request.model, "gpt-6-astra");
+  assert.equal(run!.request.readOnly, true);
+  const prepared: OrchestratorInput[] = [];
+  await deliverSubagentMail(
+    {
+      ...r,
+      maxAttempts: 3,
+      prepareRequest: async (request) => {
+        prepared.push(request);
+        return request;
+      },
+    },
+    { ...run!, status: "done", result: { status: "ok", reply: "found defect" } },
+  );
+  assert.equal(prepared[0]?.actor.id, actor.id);
+  assert.equal(prepared[0]?.harness, "claude");
+  assert.equal(prepared[0]?.model, "claude-opus-5-5");
+  const [message] = await r.mailbox.pending(r.room.id);
+  assert.match(message!.text, /found defect/);
 });

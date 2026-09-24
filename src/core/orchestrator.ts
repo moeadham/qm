@@ -3011,7 +3011,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             if (!userHarnessOverride) {
               throw new NonRetryableTurnError(
                 ownerModelAuth
-                  ? "This scheduled job needs its owner to connect an AI account compatible with the selected model. Open the web app and connect Claude or ChatGPT from the AI account panel, then retry the job."
+                  ? "This automated task needs its owner to connect an AI account compatible with the selected model. Open the web app and connect Claude or ChatGPT from the AI account panel, then retry the task."
                   : "Your personal AI account is unavailable. Open Settings → AI access to reconnect Claude or ChatGPT / Codex, or choose company access. The chat cannot continue on company access.",
               );
             }
@@ -3019,7 +3019,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           return { userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken, codexTurnAuth };
         };
         let { userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken, codexTurnAuth } =
-          await loadRuntimeAuth({});
+          await loadRuntimeAuth({
+            ...(input.harness && isHarnessId(input.harness) ? { harnessId: input.harness } : {}),
+            ...(input.model ? { modelId: input.model } : {}),
+          });
         const effectiveModel = userModelOverride ?? input.model;
         const effectiveHarness = userHarnessOverride ?? input.harness;
         if (userHarnessOverride) {
