@@ -106,6 +106,7 @@ test("the curated catalog contains only current model families", () => {
     [
       "claude-fable-5-1",
       "claude-fable-5",
+      "claude-opus-5-5",
       "claude-opus-5",
       "claude-opus-4-8",
       "claude-sonnet-5",
@@ -114,6 +115,8 @@ test("the curated catalog contains only current model families", () => {
       "gpt-5.6-terra",
       "gpt-5.6-luna",
       "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
       "openrouter/auto",
     ],
   );

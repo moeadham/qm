@@ -77,3 +77,20 @@ test("provider-specific personal access filters the picker even with company acc
   assert.ok(result.modelsByHarness.codex?.includes("gpt-6-astra"));
   assert.deepEqual(result.modelsByHarness.claude, []);
 });
+
+test("current Claude and Codex models remain selectable through subscription credentials", async () => {
+  const { config, ctx, userModelCredentials } = await setup();
+  await userModelCredentials.setOAuth("alice", "anthropic", { accessToken: "test-claude" });
+  for (const [harnessId, modelId] of [
+    ["claude", "claude-opus-5-5"],
+    ["codex", "gpt-6-sol"],
+    ["codex", "gpt-6-luna"],
+  ] as const) {
+    await config.setRuntimeSelectionLatest("personal:alice", { harnessId, modelId });
+    const result = await runtimeConfigBody(ctx, "personal:alice", "alice");
+    assert.ok(result.modelsByHarness[harnessId]?.includes(modelId));
+    assert.equal(result.effective.harnessId, harnessId);
+    assert.equal(result.effective.modelId, modelId);
+    assert.ok(result.modelCatalog[modelId]);
+  }
+});
