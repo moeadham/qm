@@ -19,6 +19,7 @@ type SecretGate =
   | "google-oauth"
   | "dropbox-oauth"
   | "linear-oauth"
+  | "smtp"
   | "email-auth"
   | "model-anthropic"
   | "model-openai"
@@ -37,6 +38,9 @@ export const CORE_SECRET_SPECS: readonly RuntimeSecretSpec[] = [
   { name: "PORTAL_IDENTITY_SECRET", requiredWhen: "production" },
   { name: "SKILL_SIGNING_SECRET", requiredWhen: "production" },
   { name: "AUTH_ALLOWED_EMAILS", requiredWhen: "email-auth" },
+  { name: "SMTP_HOST", requiredWhen: "smtp" },
+  { name: "SMTP_USERNAME", requiredWhen: "smtp" },
+  { name: "SMTP_PASSWORD", requiredWhen: "smtp" },
   { name: "OPENAI_API_KEY", requiredWhen: ["codex", "model-openai"] },
   { name: "ANTHROPIC_API_KEY", requiredWhen: "model-anthropic" },
   { name: "OPENROUTER_API_KEY", requiredWhen: "model-openrouter" },
@@ -84,6 +88,7 @@ const GATE_PREDICATES: Readonly<Record<SecretGate, (env: NodeJS.ProcessEnv) => b
   "google-oauth": (env) => Boolean(env.GOOGLE_OAUTH_CLIENT_ID),
   "dropbox-oauth": (env) => Boolean(env.DROPBOX_OAUTH_CLIENT_ID),
   "linear-oauth": (env) => Boolean(env.LINEAR_OAUTH_CLIENT_ID),
+  smtp: (env) => env.AUTH_EMAIL_TRANSPORT?.trim() === "smtp",
   "email-auth": (env) => env.AUTH_ALLOWED_EMAILS !== undefined,
   "model-anthropic": (env) => env.MODEL_PROVIDER?.trim() === "anthropic",
   "model-openai": (env) =>
