@@ -1,3 +1,16 @@
+# Moe’s QM fork
+
+I try to keep this fork up to date with [upstream](https://github.com/yc-software/qm).
+The [patched version](https://github.com/moeadham/qm/tree/upgrade/v0.1.12-staging) currently adds:
+
+- **Models:** refreshed Claude/Codex runtimes and model lists, including Opus 5.5 and GPT-6.
+- **Subscriptions:** Codex model selection and reliable saved chat selections.
+- **Automation:** subscription authentication for scheduled tasks and Claude ↔ Codex subagents.
+- **Web schedules:** removes incorrect instructions blocking scheduled replies in web chats.
+- **Email:** invitations use the configured SMTP or Resend transport.
+
+---
+
 # qm
 
 A multiplayer agent harness for work. In Slack and on the web.
