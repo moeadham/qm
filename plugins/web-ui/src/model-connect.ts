@@ -202,7 +202,7 @@ function friendly(e: unknown): string {
   return raw;
 }
 
-async function afterConnect(provider: "anthropic" | "openai"): Promise<void> {
+async function afterConnect(): Promise<void> {
   const state = s;
   resetFlow();
   s.open = null;
@@ -213,12 +213,12 @@ async function afterConnect(provider: "anthropic" | "openai"): Promise<void> {
     paint();
     return;
   }
-  if (s.intent || s.mode === "gate") {
-    await switchAccount("personal", provider);
+  if (s.personal || s.intent || s.mode === "gate") {
+    await switchAccount("personal");
     if (current(state) && !s.error && s.mode === "manager") closeManager();
     return;
   }
-  s.notice = "Account connected. Choose Use account to use it for your chats.";
+  s.notice = "Account connected. Choose Use personal accounts to use your connected accounts.";
   paint();
 }
 
@@ -302,7 +302,7 @@ async function finishClaude(): Promise<void> {
       signal: state.controller.signal,
     });
     if (!current(state, revision)) return;
-    return afterConnect("anthropic");
+    return afterConnect();
   } catch (e) {
     if (!current(state, revision)) return;
     s.busy = false;
@@ -332,7 +332,7 @@ async function pollChatGPT(): Promise<void> {
       body: JSON.stringify({ deviceAuthId: device.deviceAuthId, userCode: device.userCode }),
     });
     if (!current(state, revision)) return;
-    if (r.status === "connected") return afterConnect("openai");
+    if (r.status === "connected") return afterConnect();
     s.saving = false;
     paint();
   } catch (e) {
@@ -361,7 +361,7 @@ async function saveKey(p: ProviderMeta): Promise<void> {
       signal: state.controller.signal,
     });
     if (!current(state, revision)) return;
-    return afterConnect(p.apiName);
+    return afterConnect();
   } catch (e) {
     if (!current(state, revision)) return;
     s.busy = false;
@@ -393,7 +393,7 @@ async function disconnect(p: ProviderMeta): Promise<void> {
     if (!current(state)) return;
     s.saving = false;
     s.notice =
-      s.account === p.apiName
+      s.personal && !Object.values(s.connections).some(Boolean)
         ? "Account disconnected. Reconnect it or choose company access to continue chatting."
         : "Account disconnected.";
     paint();
@@ -558,10 +558,10 @@ function providerRow(p: ProviderMeta): TemplateResult {
   if (kind) {
     action = html`<button
         class="btn"
-        ?disabled=${s.busy || s.saving || s.account === p.apiName}
-        @click=${() => switchAccount("personal", p.apiName)}
+        ?disabled=${s.busy || s.saving || s.account === "personal"}
+        @click=${() => switchAccount("personal")}
       >
-        ${s.account === p.apiName ? "In use" : "Use account"}</button
+        ${s.account === "personal" ? "In use" : "Use personal accounts"}</button
       ><button class="btn mc-quiet-danger" ?disabled=${s.busy || s.saving} @click=${() => disconnect(p)}>
         ${s.busy ? "…" : "Disconnect"}
       </button>`;
@@ -606,8 +606,8 @@ function providerRow(p: ProviderMeta): TemplateResult {
   `;
 }
 
-async function switchAccount(account: "personal" | "company", provider?: "anthropic" | "openai"): Promise<void> {
-  if (s.busy || (account === "company" && !s.personal) || (account === "personal" && provider === s.account)) return;
+async function switchAccount(account: "personal" | "company"): Promise<void> {
+  if (s.busy || (account === "company" && !s.personal) || (account === "personal" && s.account === "personal")) return;
   resetFlow();
   s.open = null;
   const state = s;
@@ -618,7 +618,7 @@ async function switchAccount(account: "personal" | "company", provider?: "anthro
   try {
     const status = await api<StatusResponse>("/api/user-model-auth/account", {
       method: "POST",
-      body: JSON.stringify({ account, provider }),
+      body: JSON.stringify({ account }),
       signal: state.controller.signal,
     });
     if (!current(state, revision)) return;
@@ -626,7 +626,7 @@ async function switchAccount(account: "personal" | "company", provider?: "anthro
     s.notice =
       account === "company"
         ? "New chats will use company access."
-        : `New chats will use your ${provider === "anthropic" ? "Claude" : "ChatGPT / Codex"} account.`;
+        : "Your connected personal accounts are available. Choose a model in each chat.";
   } catch (e) {
     if (!current(state, revision)) return;
     s.error = friendly(e);
@@ -666,7 +666,7 @@ function view(): TemplateResult {
         },
       )}
       <p class="mc-account-hint">
-        ${s.personal ? "Using a personal account. Choose a connected provider below." : "Or use your own account. Connect a provider, then choose Use account."}
+        ${s.account === "personal" ? "All connected personal accounts are available. Choose a model in each chat." : "Or connect your own accounts, then choose Use personal accounts."}
       </p>
       ${PROVIDERS.map((p) => providerRow(p))}
     </div>`;
@@ -683,9 +683,7 @@ function view(): TemplateResult {
     s.method === "apikey"
       ? "New chats will be billed to this API key."
       : `Use your ${s.intent?.subscription} subscription for new chats.`;
-  const subCopy = s.intent
-    ? personalCopy
-    : "Choose who provides access for your chats on the web and in Slack. Background tasks continue using company access.";
+  const subCopy = s.intent ? personalCopy : "Manage your AI accounts. Choose a model in each chat.";
   return html`
     <div class="signin">
       <div

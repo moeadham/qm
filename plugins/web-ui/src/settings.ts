@@ -279,15 +279,11 @@ async function loadAiStatus(): Promise<void> {
   drawSettings();
 }
 
-async function chooseAiAccount(account: "company" | "anthropic" | "openai"): Promise<void> {
+async function chooseAiAccount(account: "company" | "personal"): Promise<void> {
   if (aiBusy || aiSaving) return;
-  if (
-    account === aiStatus?.account &&
-    (account === "company" || aiStatus.connections.some((c) => c.provider === account))
-  )
-    return;
-  if (account !== "company" && !aiStatus?.connections.some((c) => c.provider === account)) {
-    openModelConnectManager(account);
+  if (account === aiStatus?.account && (account === "company" || aiStatus.connections.length > 0)) return;
+  if (account === "personal" && !aiStatus?.connections.length) {
+    openModelConnectManager();
     return;
   }
   aiSaving = true;
@@ -297,8 +293,7 @@ async function chooseAiAccount(account: "company" | "anthropic" | "openai"): Pro
     const status = await api<StatusResponse>("/api/user-model-auth/account", {
       method: "POST",
       body: JSON.stringify({
-        account: account === "company" ? "company" : "personal",
-        provider: account === "company" ? undefined : account,
+        account,
       }),
     });
     acceptAiStatus(status);
@@ -315,7 +310,7 @@ function aiAccountsRow(): TemplateResult {
     <div class="settings-row">
       <div class="settings-row-copy">
         <div class="settings-row-title">AI access</div>
-        <div class="settings-row-note">Use company access or your own subscription.</div>
+        <div class="settings-row-note">Use all connected personal accounts. Choose a model in each chat.</div>
         ${aiError ? html`<div class="settings-row-error" role="alert">${aiError} <button class="settings-theme-link" ?disabled=${aiSaving} @click=${loadAiStatus}>Retry</button></div>` : nothing}
       </div>
       <div class="settings-ai-controls">
@@ -323,8 +318,7 @@ function aiAccountsRow(): TemplateResult {
           ${(
             [
               ["company", "Company"],
-              ["anthropic", "Claude"],
-              ["openai", "ChatGPT / Codex"],
+              ["personal", "Personal accounts"],
             ] as const
           ).map(
             ([value, label]) => html`
@@ -340,7 +334,9 @@ function aiAccountsRow(): TemplateResult {
             `,
           )}
         </div>
-        ${aiStatus?.account === "anthropic" || aiStatus?.account === "openai" ? html`<button class="settings-theme-link" ?disabled=${aiBusy || aiSaving} @click=${() => openModelConnectManager(aiStatus!.account as "anthropic" | "openai")}>Connection settings</button>` : nothing}
+        <button class="settings-theme-link" ?disabled=${aiBusy || aiSaving} @click=${() => openModelConnectManager()}>
+          Connection settings
+        </button>
       </div>
     </div>
   `;

@@ -243,7 +243,7 @@ test("AI account modal interactions", async (t) => {
           connected = true;
           return Response.json({ ok: true });
         }
-        if (path.endsWith("/account")) account = JSON.parse(String(init?.body)).provider;
+        if (path.endsWith("/account")) account = JSON.parse(String(init?.body)).account;
         if (path.endsWith("/disconnect")) {
           connected = false;
           return Response.json({ ok: true });
@@ -265,7 +265,7 @@ test("AI account modal interactions", async (t) => {
       await tick();
       assert.ok(provider("Claude").classList.contains("connected"));
       assert.equal(appState.me.individualModelAuth, false);
-      providerButton("Claude", "Use account");
+      providerButton("Claude", "Use personal accounts");
       await tick();
       providerButton("Claude", "Disconnect");
       await tick();
@@ -286,7 +286,7 @@ test("AI account modal interactions", async (t) => {
           })
         : Promise.resolve(Response.json(status("company", connections)));
     await open();
-    providerButton("ChatGPT / Codex", "Use account");
+    providerButton("ChatGPT / Codex", "Use personal accounts");
     assert.equal(button("Done").disabled, true);
     close();
     doc
@@ -294,7 +294,7 @@ test("AI account modal interactions", async (t) => {
       .dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     doc.querySelector<HTMLElement>(".mc-overlay .signin")!.click();
     assert.ok(doc.querySelector(".mc-overlay"));
-    resolveSave(Response.json(status("openai", connections)));
+    resolveSave(Response.json(status("personal", connections)));
     await tick();
     assert.equal(appState.me.individualModelAuth, true);
     assert.equal(button("Done").disabled, false);
@@ -348,7 +348,7 @@ test("AI account modal interactions", async (t) => {
         return Response.json({ ok: true });
       }
       if (path.endsWith("/account")) {
-        account = JSON.parse(String(init?.body)).provider;
+        account = JSON.parse(String(init?.body)).account;
         return Response.json(status(account, [{ provider: "anthropic", kind: "apikey" }]));
       }
       return base(path);
@@ -364,10 +364,51 @@ test("AI account modal interactions", async (t) => {
     input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
     button("Connect").click();
     await tick();
-    assert.equal(account, "anthropic");
+    assert.equal(account, "personal");
     assert.equal(appState.me.individualModelAuth, true);
     assert.equal(doc.querySelector(".mc-overlay"), null);
   });
+
+  for (const [existing, added, name] of [
+    ["anthropic", "openai", "ChatGPT / Codex"],
+    ["openai", "anthropic", "Claude"],
+  ]) {
+    await t.test(`connecting ${added} preserves access to ${existing}`, async () => {
+      let account = existing;
+      const connections = [{ provider: existing, kind: "oauth" }];
+      const writes: unknown[] = [];
+      fetcher = async (path, init) => {
+        if (path.endsWith("/api-key")) {
+          connections.push({ provider: added, kind: "apikey" });
+          return Response.json({ ok: true });
+        }
+        if (path.endsWith("/account")) {
+          const body = JSON.parse(String(init?.body));
+          writes.push(body);
+          account = body.account;
+        }
+        return Response.json(status(account, connections));
+      };
+      await open();
+      providerButton(name, "Connect");
+      providerButton(name, "Use an API key");
+      const input = doc.querySelector<HTMLInputElement>("input")!;
+      input.value = "test-only-key";
+      input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+      providerButton(name, "Connect");
+      await tick();
+      assert.deepEqual(writes, [{ account: "personal" }]);
+      await open();
+      assert.equal(doc.querySelectorAll(".mc-provider.connected").length, 2);
+      for (const label of ["Claude", "ChatGPT / Codex"])
+        assert.ok(
+          [...provider(label).querySelectorAll<HTMLButtonElement>("button")].some(
+            (b) => b.textContent?.trim() === "In use" && b.disabled,
+          ),
+        );
+      close();
+    });
+  }
 
   await t.test("expired device codes offer a new sign-in rather than polling forever", async () => {
     let polls = 0;
@@ -397,16 +438,20 @@ test("AI account modal interactions", async (t) => {
       if (path.endsWith("/account")) {
         const body = JSON.parse(String(init?.body));
         writes.push(body);
-        account = body.account === "company" ? "company" : body.provider;
+        account = body.account;
       }
       return Response.json(status(account, connections));
     };
     await open();
-    providerButton("ChatGPT / Codex", "Use account");
+    providerButton("ChatGPT / Codex", "Use personal accounts");
     await tick();
     assert.equal(appState.me.individualModelAuth, true);
     assert.ok(provider("ChatGPT / Codex").textContent?.includes("In use"));
-    assert.equal(doc.querySelector("[role=status]")?.textContent, "New chats will use your ChatGPT / Codex account.");
+    assert.ok(provider("Claude").textContent?.includes("In use"));
+    assert.equal(
+      doc.querySelector("[role=status]")?.textContent,
+      "Your connected personal accounts are available. Choose a model in each chat.",
+    );
     const company = [...doc.querySelectorAll<HTMLButtonElement>(".mc-method")].find((b) =>
       b.textContent?.includes("Company access"),
     )!;
@@ -433,7 +478,7 @@ test("AI account modal interactions", async (t) => {
         return Response.json({ ok: true });
       }
       if (path.endsWith("/account")) {
-        assert.deepEqual(JSON.parse(String(init?.body)), { account: "personal", provider: "openai" });
+        assert.deepEqual(JSON.parse(String(init?.body)), { account: "personal" });
         return new Promise((resolve) => {
           resolveSave = resolve;
         });
@@ -455,7 +500,7 @@ test("AI account modal interactions", async (t) => {
       );
     assert.ok(!startButton() || startButton()!.disabled);
     assert.equal(typeof resolveSave, "function");
-    account = "openai";
+    account = "personal";
     resolveSave(Response.json(status(account, connections())));
     await tick();
     assert.equal(appState.me.modelAuthConnected, true);
@@ -493,7 +538,7 @@ test("AI account modal interactions", async (t) => {
       [...doc.querySelectorAll<HTMLButtonElement>(".settings-ai-controls button")].find(
         (el) => el.textContent?.trim() === "Connection settings",
       )!;
-    choice("ChatGPT / Codex").click();
+    choice("Personal accounts").click();
     assert.equal(writes, 1);
     assert.equal(manage().disabled, true);
     manage().click();
@@ -503,10 +548,10 @@ test("AI account modal interactions", async (t) => {
     assert.equal(manage().disabled, true);
     choice("Company").click();
     assert.equal(writes, 1);
-    resolveSave(Response.json(status("openai", connections)));
+    resolveSave(Response.json(status("personal", connections)));
     await tick();
     assert.equal(choice("Company").disabled, false);
-    assert.equal(choice("ChatGPT / Codex").getAttribute("aria-pressed"), "true");
+    assert.equal(choice("Personal accounts").getAttribute("aria-pressed"), "true");
     assert.equal(manage().disabled, false);
     appState.currentView = "chats";
     appState.mainEl = null;
