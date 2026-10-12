@@ -60,6 +60,7 @@ describe("runTrigger: a monitor fire runs first-class live and delivers its own 
     assert.equal(req?.addressed, true, "and is addressed so it must reply-or-decline (shed fallback delivers)");
     assert.deepEqual(req?.triggerDestination, toChannel, "the post tool aims at the arming thread");
     assert.equal(req?.idempotencyKey, "monitor:m1:exit");
+    assert.deepEqual(req?.origin, { kind: "automation", useOwnerModelAuth: true });
     assert.equal((await d.deliveries.pending("slack")).length, 0);
   });
 

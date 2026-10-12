@@ -307,7 +307,7 @@ export async function runTrigger(deps: TriggerDeps, spec: TriggerSpec): Promise<
         text: spec.input,
         ...(spec.securityScreenData !== undefined ? { securityScreenData: spec.securityScreenData } : {}),
         triggered: true,
-        ...(spec.surface === "cron" && !isScopeFloor
+        ...((spec.surface === "cron" || spec.surface === "monitor") && !isScopeFloor
           ? { origin: { kind: "automation" as const, useOwnerModelAuth: true } }
           : {}),
         ...(!isScopeFloor && !isScopeShared && spec.unattendedGrants

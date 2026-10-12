@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { test, mock } from "node:test";
 import { createMockHarness } from "../src/harness/mock-harness.ts";
 import type { HarnessTurnInput } from "../src/harness/harness.ts";
+import { createIdempotencyStore } from "../src/idempotency/idempotency-store.ts";
+import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import { runTrigger } from "../src/triggers/run-trigger.ts";
 import { testConfig } from "./support/test-config.ts";
 
 const codex = await import("../src/harness/codex-harness.ts");
@@ -223,6 +226,56 @@ for (const account of ["personal", "company", "disconnected"] as const) {
       assert.equal(seen.length, start + 1);
       assert.equal(seen[start]?.runtime?.modelId, "gpt-6-astra");
       assert.equal(seen[start]?.codexAuth?.accountId, account === "personal" ? "owner-account" : undefined);
+    } finally {
+      await built.runtime.stop();
+    }
+  });
+}
+
+for (const connected of [true, false]) {
+  test(`background-command watch ${connected ? "uses the owner's Codex subscription" : "fails closed without borrowing another account"}`, async () => {
+    const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+    const start = seen.length;
+    try {
+      await built.config.setPersonalModelAuth("internal:alice", true);
+      built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+      await built.config.flushScope("org:default-org");
+      await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
+        harnessId: "codex",
+        modelId: "gpt-5.6-sol",
+      });
+      await built.userModelCredentials.setOAuth(connected ? "internal:alice" : "internal:bob", "openai", {
+        accessToken: "test-access",
+        idToken: "test-id",
+        accountId: "watch-owner-account",
+        expiresAt: Date.now() + 3600000,
+      });
+      const pending = runTrigger(
+        {
+          deliveries: built.deliveries,
+          idempotency: createIdempotencyStore(createMemoryMap()),
+          identity: built.identity,
+          run: (request) => built.app.turn({ ...request, skipMemory: true }),
+        },
+        {
+          owner: "internal:alice",
+          ownerScopeId: "personal:internal:alice",
+          input: "Report the command result",
+          securityScreenData: "REPORT_SAVED",
+          fireKey: `monitor:subscription:${connected}`,
+          surface: "monitor",
+          threadRef: `watch-subscription-${connected}`,
+        },
+      );
+      if (connected) {
+        const outcome = await pending;
+        assert.equal(outcome.status, "ok", JSON.stringify(outcome));
+        assert.equal(seen.length, start + 1);
+        assert.equal(seen[start]?.codexAuth?.accountId, "watch-owner-account");
+      } else {
+        await assert.rejects(pending, /owner to connect an AI account/);
+        assert.equal(seen.length, start);
+      }
     } finally {
       await built.runtime.stop();
     }
