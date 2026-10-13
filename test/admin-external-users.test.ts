@@ -11,12 +11,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { createInsecureTestServer, createServer } from "../src/api/server.ts";
 import { buildApp } from "../src/wiring.ts";
-import {
-  createInviteMailer,
-  INVITE_EMAIL_NOT_CONFIGURED,
-  renderInviteEmail,
-  type InviteMailer,
-} from "../src/admin/invite-email.ts";
+import { INVITE_EMAIL_NOT_CONFIGURED, renderInviteEmail, type InviteMailer } from "../src/admin/invite-email.ts";
 import { adminStatusFromGrants } from "../src/admin/admin-service.ts";
 import { coreEmailAdmission, coreEmailAllowed } from "../plugins/chassis/src/external-members.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS, CONTROL_PLANE_AUD } from "../src/auth/capability-token.ts";
