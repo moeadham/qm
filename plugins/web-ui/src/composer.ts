@@ -283,7 +283,6 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     pasteView: null as { id: string; text: string; initial: string; dirty: boolean } | null,
   };
 
-  let speechEnabled = false;
   let disposed = false;
   let speechThread: string | null = null;
   const speech = new SpeechInput({
@@ -313,13 +312,6 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         signal,
       }),
   });
-  void api<{ enabled: boolean }>("/api/speech")
-    .then((result) => {
-      if (disposed) return;
-      speechEnabled = result.enabled;
-      ctx.chat.drawActiveChat();
-    })
-    .catch(() => {});
   const cancelHiddenSpeech = () => {
     if (document.visibilityState === "hidden" && speech.state !== "idle") speech.cancel();
   };
@@ -374,8 +366,12 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     return composerState.fastMode === true;
   }
 
+  function speechEnabled(): boolean {
+    return appState.me?.speechEnabled === true;
+  }
+
   function speechTooltip(): string {
-    if (!speechEnabled) return "Speech input is not configured";
+    if (!speechEnabled()) return "Speech input is not configured";
     if (speech.state === "recording") return "Stop and transcribe";
     return "Dictate instruction";
   }
@@ -756,7 +752,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
               aria-label=${speech.state === "recording" ? "Stop recording" : "Dictate instruction"}
               aria-pressed=${speech.state === "recording" ? "true" : "false"}
               ${tip(speechTooltip())}
-              ?disabled=${inputBlocked || !speechEnabled || speech.state === "transcribing"}
+              ?disabled=${inputBlocked || !speechEnabled() || speech.state === "transcribing"}
               @click=${() => {
                 if (speech.state === "recording") speech.stop();
                 else if (speech.state === "starting") speech.cancel();

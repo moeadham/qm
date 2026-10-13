@@ -127,6 +127,7 @@ export class SpeechInput {
   }
 
   cancel(): void {
+    if (this.state === "idle") return;
     ++this.version;
     this.controller?.abort();
     this.controller = undefined;

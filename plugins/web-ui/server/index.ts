@@ -1394,6 +1394,7 @@ const apiRoutes: readonly WebRoute[] = [
       }
       return json(res, 200, {
         user,
+        speechEnabled: speechAllowed(user) && Boolean(speechConfig().apiKey),
         org: ORG,
         companyName: companyBranding.orgName?.trim() || null,
         ...(analyticsConfig && !resolveIdentity(req)?.impersonator ? { analytics: analyticsConfig } : {}),
