@@ -281,3 +281,72 @@ for (const connected of [true, false]) {
     }
   });
 }
+
+test("cron model defaults resolve with the owner's subscription before credential routing", async () => {
+  const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+  const start = seen.length;
+  try {
+    await built.config.setPersonalModelAuth("internal:alice", true);
+    built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+    await built.config.flushScope("org:default-org");
+    await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
+      harnessId: "claude",
+      modelId: "claude-opus-5-5",
+    });
+    await built.config.setPurposeRuntime("cron", { harnessId: "codex", modelId: "gpt-6-sol", effortLevel: "auto" });
+    await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+      accessToken: "test-access",
+      idToken: "test-id",
+      accountId: "cron-owner",
+      expiresAt: Date.now() + 3600000,
+    });
+    const result = await built.app.turn({
+      surface: "cron",
+      triggered: true,
+      origin: { kind: "automation", useOwnerModelAuth: true },
+      actor: { externalId: "internal:alice" },
+      conversation: { kind: "dm", threadRef: "owner-cron-purpose" },
+      text: "Return a diagnostic reply",
+      skipMemory: true,
+    });
+    assert.equal(result.status, "ok", JSON.stringify(result));
+    assert.equal(seen.length, start + 1);
+    assert.equal(seen[start]?.runtime?.modelId, "gpt-6-sol");
+    assert.equal(seen[start]?.codexAuth?.accountId, "cron-owner");
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
+test("creating and editing an explicit Codex cron validates the owner's subscription", async () => {
+  const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+  try {
+    built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+    await built.config.flushScope("org:default-org");
+    await built.config.setPersonalModelAuth("internal:alice", true);
+    await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+      accessToken: "test-access",
+      idToken: "test-id",
+      accountId: "test-account",
+      expiresAt: Date.now() + 3600000,
+    });
+    const input = {
+      owner: "internal:alice",
+      createdBy: "internal:alice",
+      ownerScopeId: "personal:internal:alice" as const,
+      schedule: { everyMs: 3600000 },
+      action: "Inspect the fixture",
+      runtime: { harnessId: "codex" as const, modelId: "gpt-6-sol" },
+    };
+    const cron = await built.app.createCron(input);
+    assert.equal(cron.runtime?.modelId, "gpt-6-sol");
+    await built.app.updateCron(cron.id, { runtime: { harnessId: "codex", modelId: "gpt-6-astra" } });
+    await built.userModelCredentials.delete("internal:alice", "openai");
+    await assert.rejects(
+      built.app.createCron({ ...input, action: "Disconnected check" }),
+      /runtime is no longer available/,
+    );
+  } finally {
+    await built.runtime.stop();
+  }
+});

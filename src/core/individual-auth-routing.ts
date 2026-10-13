@@ -9,6 +9,7 @@ import {
   resolveModel,
   isOverlayModel,
   modelUnavailableReason,
+  modelRequestOverrides,
   type ModelProvider,
 } from "../model/pi-models.ts";
 import type { UserModelCredential } from "../model/user-model-credential-store.ts";
@@ -38,6 +39,12 @@ export function resolveIndividualAuthRouting(
     return null;
   })();
   if (!pick) return null;
+  if (
+    requestedModel &&
+    modelRequestOverrides(requestedModel) &&
+    (pick.provider !== requestedProvider || pick.cred.kind !== "apikey")
+  )
+    return null;
   if (
     requestedModel &&
     isOverlayModel(requestedModel) &&

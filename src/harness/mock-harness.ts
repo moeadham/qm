@@ -21,9 +21,9 @@ const READ_ONLY_BLOCKED_PREFIXES = [
   "!preamble",
   "!speakpost ",
   "!run ",
+  "!execute ",
   "!scratch ",
   "!owner ",
-  "!credential ",
   "!reach ",
   "!paused-approval ",
   "!collect-approval ",
@@ -31,6 +31,8 @@ const READ_ONLY_BLOCKED_PREFIXES = [
   "!screened-run ",
   "!double-exec ",
   "!read ",
+  "!skill ",
+  "!skill-run ",
   "!write ",
   "!attach ",
   "!writeattach ",
@@ -320,25 +322,22 @@ export function createMockHarness(): Harness {
           await turn.emit({ type: "tool_result", payload: { tool: "post", ok: r.ok }, scopeLabel: turn.scopeLabel });
           usedTool = true;
           reply = r.ok ? "(posted)" : `[not sent] ${r.message ?? "failed"}`;
-        } else if (command0.startsWith("!staysilent")) {
-          const reason = cmd.slice(cmd.indexOf("!staysilent") + "!staysilent".length).trim() || "nothing to add";
-          await turn.emit({ type: "tool_call", payload: { tool: "stay_silent" }, scopeLabel: turn.scopeLabel });
-          const r = await turn.tools.staySilent(reason);
-          await turn.emit({
-            type: "tool_result",
-            payload: { tool: "stay_silent", ok: r.ok },
-            scopeLabel: turn.scopeLabel,
-          });
-          usedTool = true;
-          reply = r.message;
         } else if (command0 === "!finish-silent") {
           usedTool = true;
-          silent = turn.pollFire === true;
-          reply = turn.pollFire ? "" : "Nothing to report; ending silently.";
+          silent = turn.pollFire === true || turn.surfaceTools === true;
+          reply = silent ? "" : "Nothing to report; ending silently.";
+          if (silent) {
+            await turn.emit({ type: "tool_call", payload: { tool: "finish_silently" }, scopeLabel: turn.scopeLabel });
+            await turn.emit({
+              type: "tool_result",
+              payload: { tool: "finish_silently", silent: true },
+              scopeLabel: turn.scopeLabel,
+            });
+          }
         } else if (command0 === "!finish-silent-approval") {
           usedTool = true;
-          silent = turn.pollFire === true;
-          reply = turn.pollFire ? "" : "I couldn't finish one check, but nothing to report.";
+          silent = turn.pollFire === true || turn.surfaceTools === true;
+          reply = silent ? "" : "I couldn't finish one check, but nothing to report.";
           collected.push({ command: "gated-check", reason: "requires approval" });
         } else if (command0 === "!cachemiss") {
           reply = "re-prefilled the prefix";
@@ -363,18 +362,16 @@ export function createMockHarness(): Harness {
             scopeLabel: turn.scopeLabel,
           });
           reply = "thought about it";
-        } else if (command0.startsWith("!credential ")) {
-          const rest = command0.slice("!credential ".length);
-          const split = rest.indexOf(" ");
-          const service = split === -1 ? rest : rest.slice(0, split);
-          const args = split === -1 ? [] : (JSON.parse(rest.slice(split + 1)) as string[]);
-          if (!turn.tools.credentialExec) throw new Error("credential_exec unavailable");
-          await turn.emit({
-            type: "tool_call",
-            payload: { tool: "credential_exec", service, args },
-            scopeLabel: turn.scopeLabel,
+        } else if (command0.startsWith("!execute ")) {
+          const params = JSON.parse(cmd.slice(cmd.indexOf("!execute ") + 9)) as {
+            command: string;
+            credentials?: string[];
+            ownerAuth?: boolean;
+          };
+          const result = await turn.tools.execute(params.command, {
+            credentials: params.credentials,
+            ownerAuth: params.ownerAuth,
           });
-          const result = await turn.tools.credentialExec(service, args);
           await turn.emit({ type: "tool_result", payload: result, scopeLabel: turn.scopeLabel });
           turn.onProgress?.({ toolCalls: 1 });
           usedTool = true;
@@ -420,7 +417,7 @@ export function createMockHarness(): Harness {
                 .catch((): ToolResultScreen => ({ outcome: "unscreened" }))
             : ({ outcome: "allow" } as ToolResultScreen);
           if (screen.outcome === "quarantine") {
-            const stub = "[tool output quarantined by Auto security posture]";
+            const stub = "[tool output quarantined by the security screen]";
             await turn.emit({
               type: "tool_result",
               payload: {
@@ -471,7 +468,7 @@ export function createMockHarness(): Harness {
           reply = `about to run it`;
         } else if (command0 === "!finish-silent-paused") {
           usedTool = true;
-          silent = turn.pollFire === true;
+          silent = turn.pollFire === true || turn.surfaceTools === true;
           pausedOnApproval = true;
           collected.push({ command: "gated-check", reason: "requires approval" });
           reply = "";
@@ -499,6 +496,7 @@ export function createMockHarness(): Harness {
               kind: e.kind,
               matched: e.matched,
               ...(e.approvalKey ? { approvalKey: e.approvalKey } : {}),
+              ...(e.grantModes ? { grantModes: e.grantModes } : {}),
             });
             reply = `[blocked] ${e.approvalReason}`;
           }
@@ -520,6 +518,7 @@ export function createMockHarness(): Harness {
                 kind: e.kind,
                 matched: e.matched,
                 ...(e.approvalKey ? { approvalKey: e.approvalKey } : {}),
+                ...(e.grantModes ? { grantModes: e.grantModes } : {}),
               });
             }
           }
@@ -553,6 +552,39 @@ export function createMockHarness(): Harness {
           const added = await turn.tools.memoryRemember([fact]);
           usedTool = true;
           reply = added === null ? "(memory unavailable)" : `remembered ${added}`;
+        } else if (command0.startsWith("!skill-run ")) {
+          const rest = command0.slice(11).trim();
+          const sp = rest.indexOf(" ");
+          const name = sp === -1 ? rest : rest.slice(0, sp);
+          const r = await turn.tools.skill(name);
+          usedTool = true;
+          if (r.content == null) reply = `(no skill file: ${name}/SKILL.md)`;
+          else {
+            const command = rest
+              .slice(sp + 1)
+              .split("{dir}")
+              .join(r.dir ?? "");
+            const ran = await turn.tools.execute(command);
+            reply = (ran.stdout || ran.stderr).trim();
+          }
+        } else if (command0.startsWith("!skill ")) {
+          const [name, path] = command0.slice(7).trim().split(/\s+/);
+          const r = await turn.tools.skill(name!, path ? { path } : undefined);
+          await turn.emit({
+            type: "tool_result",
+            payload: { tool: "skill", name, found: r.content != null, ...(r.dir ? { dir: r.dir } : {}) },
+            scopeLabel: classifyScopeLabel({
+              type: "tool_result",
+              sessionScopeId: turn.scopeLabel,
+              orgScopeId: turn.orgScopeId,
+              sourceScopeId: r.sourceScopeId,
+            }),
+          });
+          usedTool = true;
+          reply =
+            r.content == null
+              ? `(no skill file: ${name}/${path ?? "SKILL.md"})`
+              : `${r.dir ? `${r.dir}\n` : ""}${r.content}`;
         } else if (command0.startsWith("!write ")) {
           const rest = command0.slice(7);
           const sp = rest.indexOf(" ");

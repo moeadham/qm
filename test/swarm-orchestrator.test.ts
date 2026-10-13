@@ -47,7 +47,13 @@ mock.module("../src/harness/mock-harness.ts", {
     },
   },
 });
-const { buildApp } = await import("../src/wiring.ts");
+const wiring = await import("../src/wiring.ts");
+const { orgId } = await import("../src/config.ts");
+const buildApp = (...args: Parameters<typeof wiring.buildApp>): ReturnType<typeof wiring.buildApp> => {
+  const built = wiring.buildApp(...args);
+  void built.featureFlags.setEnabled("swarms", `org:${orgId()}`, true, "test");
+  return built;
+};
 test.after(() => fake.cleanup());
 
 for (const kind of ["command", "security-screen"] as const) {
@@ -228,6 +234,23 @@ for (const storage of ["memory", "postgres"] as const) {
         }
       }
       let built = buildApp(config);
+      const tokenCommand = "printf '%s' \"$AGENT_API_TOKEN\"";
+      const issuedTokens = new Map<string, string>();
+      const captureIssuedTokens = () => {
+        const run = built.sandbox.run.bind(built.sandbox);
+        built.sandbox.run = async (handle, command, opts) => {
+          if (command === tokenCommand) {
+            const token = handle.env?.AGENT_API_TOKEN;
+            assert.ok(token, "the orchestrator supplies a capability to the sandbox");
+            const claims = await verifyCapabilityToken(token, config.capabilitySecret!);
+            assert.ok(claims?.sessionId);
+            assert.ok(claims?.runId);
+            issuedTokens.set(`${claims.sessionId}:${claims.runId}`, token);
+          }
+          return run(handle, command, opts);
+        };
+      };
+      captureIssuedTokens();
       const { serverDeps } = await import("../src/wiring.ts");
       let server = createServer(built.app, serverDeps(config, built));
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -237,9 +260,11 @@ for (const storage of ["memory", "postgres"] as const) {
       const issued: Array<{ sessionId: string; attempt: number }> = [];
       exerciseTurn = async (turn) => {
         if (turn.input !== "http-swarm-root" && !turn.input.includes("http-swarm-worker")) return;
-        const result = await turn.tools.execute("printf '%s' \"$AGENT_API_TOKEN\"");
+        const result = await turn.tools.execute(tokenCommand);
         assert.equal(result.code, 0, result.stderr);
-        const token = result.stdout.trim();
+        assert.equal(result.stdout, "<redacted:credential>");
+        const token = issuedTokens.get(`${turn.session.id}:${turn.runId}`);
+        assert.ok(token, "the HTTP fixture uses the actual issued capability, outside tool output");
         const claims = await verifyCapabilityToken(token, config.capabilitySecret!);
         assert.equal(claims?.sessionId, turn.session.id);
         assert.equal(claims?.runId, turn.runId);
@@ -328,6 +353,7 @@ for (const storage of ["memory", "postgres"] as const) {
           await new Promise<void>((resolve) => server.close(() => resolve()));
           await built.runtime.stop();
           built = buildApp(config);
+          captureIssuedTokens();
           server = createServer(built.app, serverDeps(config, built));
           await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
           base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -550,6 +576,19 @@ test("disabled swarms park queued notifications once without running the model o
     }
   } finally {
     exerciseTurn = undefined;
+    await built.runtime.stop();
+  }
+});
+
+test("swarms stay off for a person until the swarms flag names their personal scope", async () => {
+  const built = wiring.buildApp(testConfig());
+  try {
+    assert.ok(built.app.swarms);
+    assert.equal(await built.app.swarms.enabledFor("U1"), false);
+    await built.featureFlags.setEnabled("swarms", "personal:U1", true, "test");
+    assert.equal(await built.app.swarms.enabledFor("U1"), true);
+    assert.equal(await built.app.swarms.enabledFor("U2"), false);
+  } finally {
     await built.runtime.stop();
   }
 });

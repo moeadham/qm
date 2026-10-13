@@ -16,6 +16,7 @@ import {
   contextTokenBudgetForModel,
   codexProviderModelId,
   codexSubscriptionModelId,
+  modelSupportsFastMode,
 } from "../src/model/pi-models.ts";
 
 test("every selectable base model resolves against the pi-ai registry", () => {
@@ -104,17 +105,20 @@ test("the curated catalog contains only current model families", () => {
   assert.deepEqual(
     SELECTABLE_BASE_MODELS.map((model) => model.id),
     [
+      "claude-opus-5-5",
       "claude-fable-5-1",
       "claude-fable-5",
-      "claude-opus-5-5",
       "claude-opus-5",
       "claude-opus-4-8",
+      "claude-sonnet-5-5",
       "claude-sonnet-5",
       "claude-haiku-4-5",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
       "gpt-6-astra",
+      "gpt-6-astra-ultrafast",
+      "gpt-6.1-sol",
       "gpt-6-sol",
       "gpt-6-luna",
       "openrouter/auto",
@@ -122,6 +126,39 @@ test("the curated catalog contains only current model families", () => {
   );
   assert.equal(getRequiredModel("gpt-5.6-sol").contextWindow, 1_050_000);
   assert.equal(getRequiredModel("gpt-6-astra").contextWindow, 1_050_000);
+  assert.equal(getRequiredModel("gpt-6-sol").contextWindow, 1_050_000);
+  assert.equal(getRequiredModel("gpt-6-luna").contextWindow, 1_050_000);
+  const sol61 = getRequiredModel("gpt-6.1-sol");
+  assert.equal(sol61.contextWindow, 1_050_000);
+  assert.equal(sol61.maxTokens, 128_000);
+  assert.equal(String(sol61.provider), "openai");
+  assert.equal(sol61.api, "openai-responses");
+  assert.deepEqual(sol61.cost, {
+    input: 2,
+    output: 10,
+    cacheRead: 0.1,
+    cacheWrite: 2.5,
+    tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 }],
+  });
+  assert.equal(sol61.thinkingLevelMap?.off, null);
+  assert.equal(sol61.thinkingLevelMap?.minimal, null);
+  assert.equal(sol61.thinkingLevelMap?.max, "max");
+  assert.equal(modelSupportsFastMode("gpt-6.1-sol"), true);
+  assert.equal(contextTokenBudgetForModel("gpt-6.1-sol"), 150_000);
+  assert.deepEqual(getRequiredModel("gpt-6-sol").cost, {
+    input: 2,
+    output: 10,
+    cacheRead: 0.2,
+    cacheWrite: 2.5,
+    tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15, cacheRead: 0.4, cacheWrite: 5 }],
+  });
+  assert.deepEqual(getRequiredModel("gpt-6-luna").cost, {
+    input: 0.1,
+    output: 0.5,
+    cacheRead: 0.01,
+    cacheWrite: 0.125,
+    tiers: [{ inputTokensAbove: 272_000, input: 0.2, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25 }],
+  });
 });
 
 test("auxiliary models come from the configured base model's own provider", () => {
@@ -130,6 +167,7 @@ test("auxiliary models come from the configured base model's own provider", () =
     "claude-haiku-4-5",
     "the deployment default resolves an Anthropic auxiliary",
   );
+  assert.equal(auxiliaryModelFor("claude-opus-5-5"), "claude-haiku-4-5");
   assert.equal(auxiliaryModelFor("claude-opus-4-8"), "claude-haiku-4-5");
   assert.equal(auxiliaryModelFor("claude-fable-5-1"), "claude-haiku-4-5");
   assert.equal(auxiliaryModelFor("claude-fable-5"), "claude-haiku-4-5");
@@ -196,6 +234,16 @@ test("context token budget is half of each model's real input room", () => {
     tiers: undefined,
   });
   assert.equal(contextTokenBudgetForModel("claude-fable-5-1"), 150_000, "a 1M window is capped, not halved");
+  const opus55 = getRequiredModel("claude-opus-5-5");
+  assert.equal(opus55.contextWindow, 1_000_000);
+  assert.equal(opus55.maxTokens, 128_000);
+  assert.equal(String(opus55.provider), "anthropic");
+  assert.deepEqual(opus55.cost, { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5, tiers: undefined });
+  assert.equal(contextTokenBudgetForModel("claude-opus-5-5"), 150_000);
+  const sonnet55 = getRequiredModel("claude-sonnet-5-5");
+  assert.equal(sonnet55.contextWindow, 1_000_000);
+  assert.equal(sonnet55.maxTokens, 128_000);
+  assert.deepEqual(sonnet55.cost, { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5, tiers: undefined });
   assert.equal(getRequiredModel("claude-fable-5").contextWindow, 1_000_000);
   assert.equal(contextTokenBudgetForModel("claude-fable-5"), 150_000);
   assert.equal(contextTokenBudgetForModel("gpt-5.6-sol"), 150_000);
@@ -220,4 +268,20 @@ test("personal models retain canonical endpoints when org endpoints are overridd
   } finally {
     setProviderBaseUrls({});
   }
+});
+
+test("registered OpenAI clones retain exact model identity on the Codex subscription transport", () => {
+  for (const id of ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"]) {
+    const api = getRequiredModel(id);
+    const subscription = getRequiredModel(codexSubscriptionModelId(id));
+    assert.equal(subscription.id, `codex/${id}`);
+    assert.equal(subscription.provider, "openai-codex");
+    assert.equal(subscription.api, "openai-codex-responses");
+    assert.equal(subscription.baseUrl, getRequiredModel("codex/gpt-5.6-sol").baseUrl);
+    assert.equal(subscription.contextWindow, api.contextWindow);
+    assert.equal(subscription.maxTokens, api.maxTokens);
+    assert.deepEqual(subscription.cost, api.cost);
+  }
+  assert.equal(resolveModel("codex/claude-opus-5"), undefined);
+  assert.equal(resolveModel("codex/unregistered-model"), undefined);
 });

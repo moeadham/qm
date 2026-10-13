@@ -81,8 +81,10 @@ const STABLE_MS = 5000;
 export interface WaitOpts {
   timeoutMs?: number;
   match?: RegExp;
+  accept?: (message: SlackMessage) => boolean;
   afterTs?: string;
   onFrame?: (text: string) => void;
+  onMessages?: (messages: SlackMessage[]) => void;
   record?: (msgTs: string, text: string) => void;
 }
 
@@ -98,6 +100,7 @@ async function waitForFinalBotMessage(
   let lastSeen = "";
   while (Date.now() < deadline) {
     const messages = await fetchMessages();
+    opts.onMessages?.(messages);
     const fromBot = messages.filter((m) => m.user === botUserId && Number(m.ts) > Number(afterTs));
     for (const m of fromBot) {
       const text = m.text ?? "";
@@ -115,6 +118,7 @@ async function waitForFinalBotMessage(
       const text = m.text ?? "";
       if (isLiveStatusText(text)) continue;
       if (opts.match && !opts.match.test(text)) continue;
+      if (opts.accept && !opts.accept(m)) continue;
       const entry = seen.get(m.ts);
       if (entry && entry.text === text && Date.now() - entry.firstSeen >= STABLE_MS) return m;
     }
@@ -251,9 +255,16 @@ export class ChannelHandle {
     return ts;
   }
 
-  async waitForBotReply(rootTs: string, opts: WaitOpts = {}): Promise<SlackMessage> {
+  async waitForBotReply(rootTs: string, opts: WaitOpts & { includeChannel?: boolean } = {}): Promise<SlackMessage> {
     const msg = await waitForFinalBotMessage(
-      () => this.env.qa.replies(this.id, rootTs),
+      async () => {
+        const replies = await this.env.qa.replies(this.id, rootTs);
+        if (!opts.includeChannel) return replies;
+        const channel = await this.env.qa.history(this.id, rootTs);
+        return [...replies, ...channel.filter((m) => !m.thread_ts || m.thread_ts === m.ts)].sort(
+          (a, b) => Number(a.ts) - Number(b.ts),
+        );
+      },
       this.env.botUserId,
       opts.afterTs ?? rootTs,
       {

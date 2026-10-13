@@ -10,7 +10,7 @@ import { processIsGone } from "../sandbox/process-poll.ts";
 import { runTrigger, type TriggerDeps, type TriggerOutcome } from "../triggers/run-trigger.ts";
 import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-lease.ts";
 import { createSweeper } from "../util/sweeper.ts";
-import { errMessage } from "../util/errors.ts";
+import { errMessage, reportFailureAs } from "../util/errors.ts";
 import type { CurrentScopeMembers } from "../resolution/scope-membership.ts";
 import { compileMonitorPattern } from "./monitor-broker.ts";
 import { buildEventWakeEnvelope, capForEscaping } from "../core/wake-envelope.ts";
@@ -83,7 +83,7 @@ function replyGuidance(ev: MonitorEvent): string {
   if (ev.kind === "quiet") {
     return (
       "Act on this. The user can't see the job, but any final text you write WILL be posted to this conversation as a message — there is no private narration. " +
-      "End the turn with your silent turn-ender — `stay_silent` or `finish_silently`, whichever you have — putting your one-line status in its `reason` (recorded for the audit log, never delivered), unless something changed that they genuinely need to know. "
+      "End the turn with `finish_silently`, putting your one-line status in its `reason` (recorded for the audit log, never delivered), unless something changed that they genuinely need to know. "
     );
   }
   const lead =
@@ -314,11 +314,9 @@ export function createMonitorPoller(deps: MonitorPollerDeps): MonitorPoller {
     else await work();
   };
 
-  const sweeper = createSweeper(
-    () => tick().catch((e: unknown) => console.error("[monitor] tick failed:", errMessage(e))),
-    10_000,
-    { label: "monitor" },
-  );
+  const sweeper = createSweeper(() => tick().catch(reportFailureAs("monitor: tick", undefined)), 10_000, {
+    label: "monitor",
+  });
   return {
     tick,
     start(intervalMs) {
