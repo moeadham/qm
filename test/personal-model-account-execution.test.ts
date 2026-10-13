@@ -181,7 +181,7 @@ test("a queued web selection cannot fall back to another personal provider after
   try {
     const finished = await built.runs.waitFor(submitted.runId!, 5_000);
     assert.equal(finished.status, "failed");
-    assert.match(JSON.stringify(finished), /cannot serve this model/);
+    assert.match(JSON.stringify(finished), /cannot serve this model|personal AI account is unavailable/);
     assert.equal(turns.length, 0);
   } finally {
     await built.runtime.stop();

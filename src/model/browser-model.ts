@@ -1,3 +1,4 @@
+import { codexProviderModelId, resolveModel } from "./pi-models.ts";
 import { resolveIndividualAuthRouting } from "../core/individual-auth-routing.ts";
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import type { UserModelCredentialStore } from "./user-model-credential-store.ts";
@@ -20,6 +21,8 @@ export async function resolveBrowserModel(input: {
     account === "openai" ? null : input.credentials?.get(input.actorId, "anthropic"),
     account === "anthropic" ? null : input.credentials?.get(input.actorId, "openai"),
   ]);
-  const routing = resolveIndividualAuthRouting(anthropic ?? null, openai ?? null, requested, "pi");
+  const requestedProvider = requested ? resolveModel(codexProviderModelId(requested))?.provider : undefined;
+  const personalModel = account === "personal" || requestedProvider === account ? requested : undefined;
+  const routing = resolveIndividualAuthRouting(anthropic ?? null, openai ?? null, personalModel, "pi");
   return { account, model: routing?.model, routing };
 }
