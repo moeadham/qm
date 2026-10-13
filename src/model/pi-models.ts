@@ -24,19 +24,52 @@ export function codexSubscriptionModelId(id: string): string {
 export function codexProviderModelId(id: string): string {
   return id.startsWith(CODEX_SUBSCRIPTION_PREFIX) ? id.slice(CODEX_SUBSCRIPTION_PREFIX.length) : id;
 }
-export const THINKING_LEVELS = ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"] as const;
+export const THINKING_LEVELS = [
+  "auto",
+  "default",
+  "adaptive",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultracode",
+] as const;
 export const HARNESS_IDS = ["pi", "opencode", "codex", "claude", "mock"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
 
-export function thinkingLevelsForHarness(harnessId: HarnessId): readonly string[] {
-  if (harnessId === "pi") return THINKING_LEVELS;
-  if (harnessId === "claude") return THINKING_LEVELS.filter((level) => level !== "ultracode");
-  if (harnessId === "codex") return THINKING_LEVELS.filter((level) => level !== "max" && level !== "ultracode");
-  return ["auto"];
+export function modelSupportsAdaptiveThinking(model: Pick<Model<Api>, "api" | "reasoning" | "compat">): boolean {
+  return (
+    model.api === "anthropic-messages" &&
+    model.reasoning &&
+    (model.compat as { forceAdaptiveThinking?: boolean } | undefined)?.forceAdaptiveThinking === true
+  );
+}
+
+export function modelSupportsProviderDefault(model: Pick<Model<Api>, "api" | "compat">): boolean {
+  return (
+    ["anthropic-messages", "openai-responses", "openai-codex-responses"].includes(model.api) ||
+    (model.api === "openai-completions" &&
+      (model.compat as { thinkingFormat?: string } | undefined)?.thinkingFormat === "openai")
+  );
+}
+
+export function thinkingLevelsForHarness(harnessId: HarnessId, modelId?: string): readonly string[] {
+  const model = modelId ? resolveModel(modelId) : undefined;
+  return THINKING_LEVELS.filter((level) => {
+    if (level === "adaptive")
+      return harnessId === "pi" && (!modelId || (!!model && modelSupportsAdaptiveThinking(model)));
+    if (level === "default")
+      return harnessId === "pi" && (!modelId || (!!model && modelSupportsProviderDefault(model)));
+    if (harnessId === "pi") return true;
+    if (harnessId === "claude") return level !== "ultracode";
+    if (harnessId === "codex") return level !== "max" && level !== "ultracode";
+    return level === "auto";
+  });
 }
 
 export function harnessSupportsFastMode(harnessId: HarnessId): boolean {
-  return harnessId === "pi" || harnessId === "claude" || harnessId === "codex";
+  return harnessId === "pi" || harnessId === "claude" || harnessId === "codex" || harnessId === "opencode";
 }
 export const MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
 export type ModelProvider = (typeof MODEL_PROVIDERS)[number];
@@ -60,6 +93,7 @@ interface ModelEntry {
   webui: boolean;
   base: boolean;
   auxiliary?: boolean;
+  request?: { model: string; service_tier: "ultrafast" };
   clone?: {
     template: string;
     input: number;
@@ -68,6 +102,7 @@ interface ModelEntry {
     cacheWrite?: number;
     contextWindow: number;
     maxTokens: number;
+    thinkingLevelMap?: PiModel["thinkingLevelMap"];
 
     tiers?: ReadonlyArray<{
       inputTokensAbove: number;
@@ -79,9 +114,31 @@ interface ModelEntry {
   };
 }
 
-const GPT_56_CLONE = { template: "gpt-5.5", contextWindow: 1_050_000, maxTokens: 128_000 } as const;
+const GPT_56_CLONE = {
+  template: "gpt-5.5",
+  contextWindow: 1_050_000,
+  maxTokens: 128_000,
+  thinkingLevelMap: { max: "max" },
+} as const;
 
 export const MODEL_REGISTRY: readonly ModelEntry[] = [
+  {
+    id: "claude-opus-5-5",
+    name: "Claude Opus 5.5",
+    fastMode: true,
+    webui: true,
+    base: true,
+    clone: {
+      template: "claude-opus-4-8",
+      thinkingLevelMap: { off: null },
+      input: 4,
+      output: 20,
+      cacheRead: 0.2,
+      cacheWrite: 5,
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+  },
   {
     id: "claude-fable-5-1",
     name: "Claude Fable 5.1",
@@ -131,6 +188,23 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     },
   },
   { id: "claude-opus-4-8", name: "Claude Opus 4.8", fastMode: true, webui: true, base: true },
+  {
+    id: "claude-sonnet-5-5",
+    name: "Claude Sonnet 5.5",
+    fastMode: false,
+    webui: true,
+    base: true,
+    clone: {
+      template: "claude-opus-4-8",
+      thinkingLevelMap: { off: null },
+      input: 2,
+      output: 10,
+      cacheRead: 0.2,
+      cacheWrite: 2.5,
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+  },
   { id: "claude-sonnet-5", name: "Claude Sonnet 5", fastMode: false, webui: true, base: true },
   { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", fastMode: false, webui: true, base: true, auxiliary: true },
   {
@@ -188,11 +262,47 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     base: true,
     clone: {
       ...GPT_56_CLONE,
+      thinkingLevelMap: { ...GPT_56_CLONE.thinkingLevelMap, off: null },
       input: 10,
       output: 50,
       cacheRead: 1,
       cacheWrite: 12.5,
       tiers: [{ inputTokensAbove: 272_000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }],
+    },
+  },
+  {
+    id: "gpt-6-astra-ultrafast",
+    buttonLabel: "Astra Ultrafast",
+    name: "GPT-6 Astra · Ultrafast (6× cost)",
+    fastMode: false,
+    webui: true,
+    base: true,
+    request: { model: "gpt-6-astra", service_tier: "ultrafast" },
+    clone: {
+      ...GPT_56_CLONE,
+      thinkingLevelMap: { ...GPT_56_CLONE.thinkingLevelMap, off: null },
+      input: 60,
+      output: 300,
+      cacheRead: 6,
+      cacheWrite: 75,
+      tiers: [{ inputTokensAbove: 272_000, input: 120, output: 450, cacheRead: 12, cacheWrite: 150 }],
+    },
+  },
+  {
+    id: "gpt-6.1-sol",
+    buttonLabel: "6.1 Sol",
+    name: "GPT-6.1 Sol",
+    fastMode: true,
+    webui: true,
+    base: true,
+    clone: {
+      ...GPT_56_CLONE,
+      thinkingLevelMap: { off: null, minimal: null, max: "max" },
+      input: 2,
+      output: 10,
+      cacheRead: 0.1,
+      cacheWrite: 2.5,
+      tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 }],
     },
   },
   {
@@ -206,9 +316,8 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
       ...GPT_56_CLONE,
       input: 2,
       output: 10,
-      cacheRead: 0.2,
       cacheWrite: 2.5,
-      tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15.0, cacheRead: 0.4, cacheWrite: 5.0 }],
+      tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15, cacheRead: 0.4, cacheWrite: 5 }],
     },
   },
   {
@@ -222,7 +331,6 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
       ...GPT_56_CLONE,
       input: 0.1,
       output: 0.5,
-      cacheRead: 0.01,
       cacheWrite: 0.125,
       tiers: [{ inputTokensAbove: 272_000, input: 0.2, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25 }],
     },
@@ -383,7 +491,9 @@ function cloneModel(model: PiModel, id: string, name: string, overrides: Partial
     input: [...model.input],
     cost: structuredClone(overrides.cost ?? model.cost),
     ...(model.headers ? { headers: { ...model.headers } } : {}),
-    ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
+    ...(model.thinkingLevelMap || overrides.thinkingLevelMap
+      ? { thinkingLevelMap: { ...model.thinkingLevelMap, ...overrides.thinkingLevelMap } }
+      : {}),
     ...(model.compat ? { compat: { ...(model.compat as Record<string, unknown>) } as PiModel["compat"] } : {}),
   };
 }
@@ -419,10 +529,27 @@ export function registerOpenRouterCatalogModel(definition: OpenRouterCatalogMode
   return model;
 }
 
+export function modelRequestOverrides(id: string): ModelEntry["request"] {
+  const request = REGISTRY_BY_ID.get(id)?.request;
+  return request ? { ...request } : undefined;
+}
+
 export function resolveBuiltinModel(id: string): PiModel | undefined {
   if (id.startsWith(CODEX_SUBSCRIPTION_PREFIX)) {
-    const m = getModel(CODEX_SUBSCRIPTION_PROVIDER, codexProviderModelId(id));
-    return m ? { ...m, id } : undefined;
+    const providerId = codexProviderModelId(id);
+    if (modelRequestOverrides(providerId)) return undefined;
+    const m = getModel(CODEX_SUBSCRIPTION_PROVIDER, providerId);
+    if (m) return { ...m, id };
+    const entry = REGISTRY_BY_ID.get(providerId);
+    const template = entry?.clone ? getModel(CODEX_SUBSCRIPTION_PROVIDER, entry.clone.template) : undefined;
+    const native = entry?.clone ? resolveBuiltinModel(providerId) : undefined;
+    if (!template || !native || native.provider !== "openai") return undefined;
+    return cloneModel(template, id, native.name, {
+      contextWindow: native.contextWindow,
+      maxTokens: native.maxTokens,
+      cost: native.cost,
+      ...(native.thinkingLevelMap ? { thinkingLevelMap: native.thinkingLevelMap } : {}),
+    });
   }
   const entry = REGISTRY_BY_ID.get(id);
   if (entry?.clone) {
@@ -431,6 +558,7 @@ export function resolveBuiltinModel(id: string): PiModel | undefined {
       ? cloneModel(template, id, entry.name, {
           contextWindow: entry.clone.contextWindow,
           maxTokens: entry.clone.maxTokens,
+          ...(entry.clone.thinkingLevelMap ? { thinkingLevelMap: entry.clone.thinkingLevelMap } : {}),
           cost: {
             input: entry.clone.input,
             output: entry.clone.output,
@@ -500,6 +628,7 @@ export function contextTokenBudgetForModel(id: string): number | undefined {
 }
 
 export function modelSupportedByHarness(id: string | undefined, harness: string): boolean {
+  if (id && modelRequestOverrides(id)) return harness === "pi" || harness === "mock";
   if (id && isGatewayModelId(id)) return (harness === "pi" || harness === "mock") && Boolean(resolveGatewayModel(id));
   if (!id || unavailableOverlays.has(id)) return false;
   if (overlays.has(id)) return harness === "pi" || harness === "mock";
@@ -621,5 +750,8 @@ export function safeModelMetadata(id: string) {
     maxTokens: model.maxTokens,
     cost: structuredClone(model.cost),
     fastMode: modelSupportsFastMode(id),
+    effortLevelsByHarness: Object.fromEntries(
+      HARNESS_IDS.map((harness) => [harness, thinkingLevelsForHarness(harness, id)]),
+    ),
   };
 }

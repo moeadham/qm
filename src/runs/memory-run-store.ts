@@ -152,7 +152,7 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       const run = runs.get(runId);
       if (!run) return false;
       if (leaseToken !== null && run.leaseToken !== leaseToken) return false;
-      run.deliveryState = state;
+      run.deliveryState = { ...run.deliveryState, ...state };
       return true;
     },
 
@@ -169,11 +169,17 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       );
     },
     async pendingReturns(limit = 100, afterId = "") {
+      const now = Date.now();
       return [...runs.values()]
         .filter(
           (run) =>
             isTerminal(run.status) &&
-            !returned.has(run.id) &&
+            (retryAfter.get(run.id) ?? 0) <= now &&
+            (!returned.has(run.id) ||
+              (() => {
+                const wake = runs.get(byKey.get(`subagent-return:${run.id}`) ?? "");
+                return wake?.status === "pending" && wake.attempts === 0 && wake.turnUserSeq === null;
+              })()) &&
             run.id > afterId &&
             run.sessionId.startsWith("agent:main:subagent:"),
         )
@@ -182,6 +188,10 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
     },
     async markReturned(runId) {
       returned.add(runId);
+    },
+    async deferReturn(runId, delayMs) {
+      const run = runs.get(runId);
+      if (run && isTerminal(run.status)) retryAfter.set(runId, Date.now() + Math.max(0, delayMs));
     },
     onTerminal(listener) {
       terminalListeners.push(listener);
@@ -219,9 +229,10 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       return true;
     },
 
-    async withdraw(runId) {
+    async withdraw(runId, opts) {
       const run = runs.get(runId);
       if (!run || run.status !== "pending") return false;
+      if (opts?.unstartedOnly && (run.attempts !== 0 || run.turnUserSeq !== null)) return false;
       runs.delete(runId);
       retryAfter.delete(runId);
       if (run.dedupKey) byKey.delete(run.dedupKey);

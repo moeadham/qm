@@ -1,3 +1,4 @@
+import { memoryBoundedEntries } from "../memory/context-boundary.ts";
 import type { SessionEntry } from "../types.ts";
 import { contextSummaryPayload, entrySecurityTainted } from "../sessions/session-store.ts";
 import { headSlice, tailSlice } from "../util/text.ts";
@@ -19,10 +20,10 @@ export const INTERRUPTED_TOOL_RESULT =
   "[interrupted — the platform restarted while this tool call was running and its outcome was not recorded. Check what actually happened before redoing anything with side effects.]";
 
 export const CONTEXT_SUMMARY_HEADER =
-  "[Earlier conversation summary — an index of turns compacted out of your context. The full transcript is still stored: reopen any type#seq it cites with the history tool (seq parameter; a very long entry returns as head and tail), or search it (query).]";
+  "[Earlier conversation summary — an index of turns compacted out of your context. Conversation turns and tool calls can be reopened with the history tool (seq parameter; a very long entry returns as head and tail), or searched (query). Tool results are excluded.]";
 
 function modelReplayable(entries: SessionEntry[]): SessionEntry[] {
-  return entries.filter(
+  return memoryBoundedEntries(entries).filter(
     (e) =>
       e.type !== "thinking" &&
       e.type !== "text" &&
@@ -49,7 +50,9 @@ export function forModelContext(
 export function forSearchView(entries: SessionEntry[]): SessionEntry[] {
   const replayable = modelReplayable(entries);
   const latest = replayable.findLast((e) => contextSummaryPayload(e));
-  return replayable.filter((e) => !entrySecurityTainted(e) && (!contextSummaryPayload(e) || e === latest));
+  return replayable.filter(
+    (e) => e.type !== "tool_result" && !entrySecurityTainted(e) && (!contextSummaryPayload(e) || e === latest),
+  );
 }
 
 const entryTokenCache = new Map<string, number>();
@@ -127,7 +130,13 @@ export function compactTranscript(history: SessionEntry[]): string {
       : `${entry.type}#${entry.seq}${stamp}${author ? ` (${author})` : ""}`;
     if (text) push(`${label}: ${text}${ovFiles.length ? ` (files: ${ovFiles.join(", ")})` : ""}`);
     else if (ov && ovFiles.length) push(`${label}: (shared file) (files: ${ovFiles.join(", ")})`);
-    else if (!ov) push(`${label}:${op?.isError === true ? " [isError]" : ""} ${JSON.stringify(entry.payload ?? {})}`);
+    else if (!ov) {
+      const payload =
+        entry.type === "user" && entry.payload && typeof entry.payload === "object"
+          ? { ...entry.payload, memoryRecall: undefined }
+          : entry.payload;
+      push(`${label}:${op?.isError === true ? " [isError]" : ""} ${JSON.stringify(payload ?? {})}`);
+    }
     if (entry.type === "tool_call") {
       const cid = (entry.payload as { callId?: unknown } | null)?.callId;
       if (typeof cid === "string" && cid && !resultByCallId.has(cid)) {

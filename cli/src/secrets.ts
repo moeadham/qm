@@ -304,11 +304,23 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     generate: MINT_LOCALLY,
   },
   {
+    name: "INBOX_USERS",
+    service: "web-ui",
+    required: false,
+    description: "Comma-separated principals allowed to access Inbox, Calendar, and Design System.",
+  },
+  {
     name: "CORE_SIGNING_SECRET",
     service: "admin",
     required: true,
     description: "HMAC key shared by core and surface plugins.",
     generate: MINT_LOCALLY,
+  },
+  {
+    name: "INBOX_USERS",
+    service: "admin",
+    required: false,
+    description: "Comma-separated principals allowed to access Inbox, Calendar, and Design System.",
   },
   {
     name: "OIDC_CLIENT_ID",
@@ -455,6 +467,13 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
       },
     },
     description: "Email addresses allowed to sign in; the portal enforces the same list the broker does.",
+  },
+  {
+    name: "AUTH_PASSWORD_USERS",
+    service: "auth",
+    required: false,
+    description:
+      "Optional <email>:<scrypt-hash> entries that may sign in with a password while email or an identity provider is still being set up; each address must also be allowed to sign in.",
   },
   {
     name: "AUTH_EMAIL_FROM",

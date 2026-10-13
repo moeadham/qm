@@ -35,24 +35,59 @@ test("colored session actions keep their row hue at rest and on hover", () => {
   );
 });
 
-test("conversation colors use the refined spectrum palette on every list surface", () => {
+test("conversation colors use solid fills from the refined spectrum palette on every list surface", () => {
   assert.match(tsSource, /const SESSION_COLORS = \["#f43f5e", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ec4899"\]/);
   assert.equal(tsSource.match(/const color = displaySessionColor\(s\.color\);/g)?.length, 2);
   assert.match(tsSource, /const current = displaySessionColor\(s\.color\);/);
   assert.doesNotMatch(tsSource, /#d2664d|#b98a52|#7d884f|#5f8b83|#527d99|#8b5d52/);
   assert.match(shellCss, /conic-gradient\(#f43f5e, #f59e0b, #10b981, #3b82f6, #8b5cf6, #ec4899, #f43f5e\)/);
-  assert.match(shellCss, /\.session-row\.colored \.session \{[\s\S]*?linear-gradient\(/);
+  for (const rule of [
+    shellCss.match(/\.session-row\.colored \.session \{[^}]+\}/)?.[0] ?? "",
+    shellCss.match(
+      /\.session-row\.colored \.session:hover,\s*\.session-row\.colored\.menu-open \.session \{[^}]+\}/,
+    )?.[0] ?? "",
+    shellCss.match(/\.session-row\.colored\.active \.session \{[^}]+\}/)?.[0] ?? "",
+    shellCss.match(/\.list-row\.chat-row\.colored \{[^}]+\}/)?.[0] ?? "",
+    shellCss.match(/\.list-row\.chat-row\.colored:hover \{[^}]+\}/)?.[0] ?? "",
+  ]) {
+    assert.match(rule, /background:\s*color-mix\(/);
+    assert.doesNotMatch(rule, /gradient\(/);
+  }
   assert.doesNotMatch(shellCss, /\.session-row\.colored \.session::before/);
 });
 
-test("pinned conversations use the same header and child alignment as project conversations", () => {
+test("painted sidebar backgrounds align without moving conversation text", () => {
+  const extended =
+    shellCss.match(
+      /\.session-row:is\(\.colored, \.active, \.menu-open, \.selected, \.read-only, :hover\) \.session \{[^}]+\}/,
+    )?.[0] ?? "";
+  assert.match(extended, /width:\s*calc\(100% \+ 4px\);/);
+  assert.match(extended, /margin-left:\s*-4px;/);
+  assert.match(extended, /padding-left:\s*15px;/);
+  const nested =
+    shellCss.match(
+      /\.recent-project-children \.session-row:is\(\.colored, \.active, \.menu-open, \.selected, \.read-only, :hover\) \.session,[\s\S]*?\{[^}]+\}/,
+    )?.[0] ?? "";
+  assert.match(
+    nested,
+    /\.archived-children \.session-row:is\(\.colored, \.active, \.menu-open, \.selected, \.read-only, :hover\) \.session,/,
+  );
+  assert.match(
+    nested,
+    /\.pinned-children \.session-row:is\(\.colored, \.active, \.menu-open, \.selected, \.read-only, :hover\) \.session \{/,
+  );
+  assert.match(nested, /padding-left:\s*10px;/);
+});
+
+test("pinned conversations align with project conversations without a header-to-child gap", () => {
   assert.match(tsSource, /class="pinned-head-glyph"/);
   assert.match(tsSource, /class="pinned-children"/);
+  assert.match(shellCss, /\.recent-project \{[\s\S]*?margin:\s*3px 0 5px 4px;/);
   const header = shellCss.match(/\.recents-group\.pinned-head \{[^}]+\}/)?.[0] ?? "";
   assert.match(header, /min-height:\s*30px;/);
-  assert.match(header, /margin:\s*3px 0 5px 4px;/);
+  assert.match(header, /margin:\s*3px 0 0 4px;/);
   assert.match(header, /padding:\s*4px 3px 4px 2px;/);
-  assert.match(header, /font-size:\s*12\.5px;/);
+  assert.match(header, /font-size:\s*var\(--font-12-5\);/);
   assert.match(shellCss, /\.pinned-head-glyph \{[\s\S]*?flex: 0 0 14px;/);
   assert.match(shellCss, /\.pinned-children \{[\s\S]*?margin-left: 13px;/);
   assert.match(shellCss, /\.pinned-children \.session \{\s*padding-left: 6px;/);
@@ -73,8 +108,18 @@ test("every drop zone the canvas renders has a positioning rule in shell.css", (
   assert.deepEqual(missing, [], "drop zones rendered with no .zone-<edge> rule (they collapse to 0×0)");
 });
 
+test("expanded pins wrap their full text instead of truncating to one line", () => {
+  const item = shellCss.match(/\.pinned-item \{[^}]+\}/)?.[0] ?? "";
+  assert.match(item, /flex-direction:\s*column;/);
+  const text = shellCss.match(/\.pinned-item-text \{[^}]+\}/)?.[0] ?? "";
+  assert.match(text, /white-space:\s*pre-wrap;/);
+  assert.match(text, /overflow-wrap:\s*anywhere;/);
+  assert.doesNotMatch(text, /text-overflow|nowrap/);
+  assert.doesNotMatch(tsSource, /class="pinned-item" title=/);
+});
+
 test("chat shadows stay limited to elevated surfaces and subtle activity hover glow", () => {
-  const elevated = [".pinned-strip", ".message-stack .user-row.stuck > .user-bubble"];
+  const elevated = [".pinned-strip", ".message-stack .user-row.stuck > .user-bubble", ".attachment-peek"];
   const rules = shellCss.replace(/\/\*[\s\S]*?\*\//g, "");
   const painted = [...rules.matchAll(/([^{}]+)\{([^{}]*)\}/g)].flatMap((rule) =>
     [...rule[2].matchAll(/(box|text)-shadow\s*:\s*([^;}]+)/g)]
@@ -91,8 +136,9 @@ test("chat shadows stay limited to elevated surfaces and subtle activity hover g
         "0 0 12px color-mix(in srgb, var(--foreground) 12%, transparent)",
       ],
       [".composer-wrap", "box", "0 2px 5px rgb(0 0 0 / 0.05), 0 8px 24px rgb(0 0 0 / 0.06)"],
+      [".qm-tooltip", "box", "var(--chat-surface-shadow)"],
     ],
-    "pinned surfaces and the composer retain their shadows; activity glow appears only on hover",
+    "pinned surfaces, the composer, and tooltips retain their shadows; activity glow appears only on hover",
   );
   const inlineShadows = [...tsSource.matchAll(/(?:box|text)-shadow\s*:\s*([^;}]+)/g)]
     .map((m) => m[1].trim())
@@ -125,5 +171,40 @@ test("every modal scrim dims through --scrim, which each theme points away from 
     const value = block.match(/--scrim:\s*oklch\(([\d.]+)/)?.[1];
     assert.ok(value, `${name} must define --scrim`);
     assert.ok(Number(value) < 0.2, `${name} --scrim must be dark enough to dim, got L=${value}`);
+  }
+});
+
+test("desktop density tokens keep original touch sizes and a 12px floor", () => {
+  const root = shellCss.match(/:root \{([^}]+)\}/)?.[1] ?? "";
+  const desktop = shellCss.match(/@media \(min-width: 861px\) and \(hover: hover\) \{\s*:root \{([^}]+)\}/)?.[1] ?? "";
+  const tokens = (block: string) => new Map([...block.matchAll(/(--[\w-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2]]));
+  const before = tokens(root);
+  const after = tokens(desktop);
+  assert.equal(before.get("--text-scale"), "1");
+  assert.equal(after.get("--text-scale"), "0.9");
+  for (const [name, value] of before) {
+    if (!name.startsWith("--font-")) continue;
+    const original = Number.parseFloat(value);
+    assert.equal(after.get(name), `${Math.max(12, Math.round(original * 90) / 100)}px`, name);
+  }
+  for (const [name, original, compact] of [
+    ["--content-w", "820px", "740px"],
+    ["--chat-pad", "16px", "14.4px"],
+    ["--meta-lane", "24px", "21.6px"],
+    ["--session-title-size", "13.5px", "12.5px"],
+  ]) {
+    assert.equal(before.get(name), original);
+    assert.equal(after.get(name), compact);
+  }
+  const scaled = (offset: string) =>
+    `font-size: max(min(12px, calc(var(--chat-font-size) - ${offset})), calc((var(--chat-font-size) - ${offset}) * var(--text-scale)));`;
+  for (const [selector, offset] of [
+    [".thinking", "2px"],
+    [".thinking-summary", "1px"],
+    [".thinking-body", "1px"],
+    [".work-message", "1px"],
+  ]) {
+    const block = shellCss.match(new RegExp(`\\n${selector.replace(".", "\\.")} \\{([^}]*)\\}`))?.[1] ?? "";
+    assert.ok(block.includes(scaled(offset)), selector);
   }
 });

@@ -1,3 +1,4 @@
+import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import type { DeliveryProvenance, Destination, OutgoingAttachment } from "../types.ts";
 import type { Run, RunStore } from "../runs/run-store.ts";
 import { turnDeliveryProvenance, type DeliveryStore } from "./delivery-store.ts";
@@ -14,7 +15,7 @@ import {
   type TranscriptAppendSessions,
 } from "../sessions/session-store.ts";
 import { turnRecordedFailure } from "./web-transcript-delivery.ts";
-import { errMessage } from "../util/errors.ts";
+import { reportFailureAs } from "../util/errors.ts";
 
 export interface RunResultDelivery {
   destination: Destination;
@@ -39,7 +40,7 @@ export function runResultDelivery(
   taskList: Task[] = [],
   adminUrlFor?: AdminUrlFor,
 ): RunResultDelivery | null {
-  if (run.request.swarm || run.request.privateSessionMessage) return null;
+  if (isSubagentThreadRef(run.sessionId) || run.request.swarm || run.request.privateSessionMessage) return null;
   const target = run.request.deliveryTarget;
   const surface = run.request.surface;
   if (!target || !surface) return null;
@@ -50,6 +51,9 @@ export function runResultDelivery(
   const destination: Destination = {
     type: surface,
     target,
+    ...(run.request.slackSource
+      ? { slackAccountId: run.request.slackSource.accountId, slackTeamId: run.request.slackSource.teamId }
+      : {}),
     ...(editRef ? { editRef } : {}),
     ...(taskList.length ? { taskList: taskList.map(({ id, title, status }) => ({ id, title, status })) } : {}),
     ...(webTranscript ? { webTranscript } : {}),
@@ -140,8 +144,8 @@ export function wireRunResultDeliveries(
 ): void {
   runs.onTerminal((run) => {
     if (sessions) {
-      void recordRunFailureEntry(sessions, run).catch((err) =>
-        console.error("%s", `[delivery] failed to record turn_failure entry for run ${run.id}:`, errMessage(err)),
+      void recordRunFailureEntry(sessions, run).catch(
+        reportFailureAs("delivery: record turn_failure entry", undefined, `run=${run.id}`),
       );
     }
     void (async () => {
@@ -149,8 +153,6 @@ export function wireRunResultDeliveries(
       const delivery = runResultDelivery(run, taskList, adminUrlFor);
       if (!delivery) return;
       await deliveries.enqueue(delivery);
-    })().catch((err) =>
-      console.error("%s", `[delivery] failed to enqueue recovery delivery for run ${run.id}:`, errMessage(err)),
-    );
+    })().catch(reportFailureAs("delivery: enqueue recovery delivery", undefined, `run=${run.id}`));
   });
 }

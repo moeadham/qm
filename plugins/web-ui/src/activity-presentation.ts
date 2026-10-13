@@ -3,7 +3,7 @@ import type { WorkBlock } from "./core-bridge.ts";
 
 export type ActivityCategory = "read" | "search" | "execute" | "other";
 
-export function compactPath(path: string): string {
+function compactPath(path: string): string {
   const parts = path.replace(/\/$/, "").split("/");
   return parts.at(-1) === "SKILL.md" ? parts.slice(-2).join("/") : parts.at(-1) || path;
 }
@@ -31,6 +31,11 @@ export function activityDescription(
 } {
   const tool = toolCategory({ ...result, ...call });
   if (tool === "read") return { category: "read", target: compactPath(call.path ?? result.path ?? "") };
+  if (tool === "skill") {
+    const name = call.name ?? result.name ?? "";
+    const path = call.path ?? result.path ?? "SKILL.md";
+    return { category: "read", target: path === "SKILL.md" ? name : `${name}/${compactPath(path)}` };
+  }
   if (tool !== "execute") return { category: "other", target: "" };
   const command = call.command ?? "";
   const words = shellWords(command);
@@ -77,7 +82,21 @@ export function activityLabel(row: ToolRowModel, status: WorkBlock["status"]): s
   const result = (row.result?.payload ?? {}) as ToolPayload;
   const { category, target } = activityDescription(call, result);
   const state = toolRowKind(row, status);
-  if (category === "other" || state === "approval") return null;
+  if (state === "approval") return null;
+  const exit =
+    state === "ok" &&
+    toolCategory({ ...result, ...call }) === "execute" &&
+    typeof result.code === "number" &&
+    result.code !== 0
+      ? ` · exit ${result.code}`
+      : "";
+  const purpose = typeof call.purpose === "string" ? call.purpose.trim() : "";
+  if (purpose) {
+    if (state === "failed") return `${purpose} · Failed`;
+    if (state === "attempted") return `${purpose} · Unconfirmed`;
+    return purpose + exit;
+  }
+  if (category === "other") return null;
   const verbs = {
     read: { ok: "Read", running: "Reading", failed: "Failed to read", attempted: "Tried reading" },
     search: {
@@ -88,8 +107,8 @@ export function activityLabel(row: ToolRowModel, status: WorkBlock["status"]): s
     },
     execute: { ok: "Ran", running: "Running", failed: "Failed running", attempted: "Tried running" },
   };
-  if (state === "ok" && (category === "read" || category === "execute") && target) return target;
-  return `${verbs[category][state]} ${target || (category === "execute" ? "command" : "file")}`;
+  if (state === "ok" && (category === "read" || category === "execute") && target) return target + exit;
+  return `${verbs[category][state]} ${target || (category === "execute" ? "command" : "file")}${exit}`;
 }
 
 export function activityGroupSummary(
@@ -143,7 +162,7 @@ export function activityGroupSummary(
 export function thinkingPresentation(text: string): { title: string; body: string } {
   const trimmed = text.trim();
   const heading = /^(?:#{1,6} +([^\n]+)|\*\*([^\n]+?)\*\*|__([^\n]+?)__)(?:\r?\n|$)/.exec(trimmed);
-  if (!heading) return { title: "Thought process", body: trimmed };
+  if (!heading) return { title: "Thinking", body: trimmed };
   const title = (heading[1] ?? heading[2] ?? heading[3]!).replace(/ +#+$/, "").trim();
   return { title, body: trimmed.slice(heading[0].length).trim() };
 }
@@ -159,7 +178,7 @@ export function sessionPresentation(
     interrupt?: boolean;
   };
   const result = (row.result?.payload ?? {}) as ToolPayload & { title?: string; sessionId?: string };
-  if ((call.tool ?? result.tool) !== "session") return null;
+  if (toolCategory({ ...result, ...call }) !== "session") return null;
   const action = call.interrupt === true ? "interrupt" : (call.action ?? result.action ?? "");
   const actions: Record<string, [string, string, string]> = {
     open: ["Created", "Creating", "create"],
@@ -171,6 +190,8 @@ export function sessionPresentation(
     interrupt: ["Interrupted", "Interrupting", "interrupt"],
     close: ["Closed", "Closing", "close"],
     list: ["Listed", "Listing", "list"],
+    new: ["Started", "Starting", "start"],
+    fork: ["Forked into", "Forking into", "fork into"],
   };
   const verbs = actions[action];
   if (!verbs) return null;
@@ -181,7 +202,12 @@ export function sessionPresentation(
   else if (state === "attempted") label = `Tried to ${verbs[2]}`;
   else if (state === "approval") label = `${row.pending ? "Approval needed" : "Approval requested"} to ${verbs[2]}`;
   const target =
-    result.title || call.name || call.target || result.sessionId || (action === "open" ? "subagent" : "subagents");
+    result.title ||
+    call.name ||
+    call.target ||
+    result.sessionId ||
+    ({ open: "subagent", new: "session", fork: "session", list: "sessions" } as Record<string, string>)[action] ||
+    "subagents";
   const preview = ["write", "send_message", "followup_task"].includes(action)
     ? (call.text ?? call.task ?? "").replace(/\s+/g, " ").trim()
     : "";

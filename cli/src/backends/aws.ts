@@ -772,9 +772,17 @@ function releaseCandidate(config: QmConfig, path: string): AwsReleaseCandidate {
     Array.isArray(candidate.images) ||
     !candidate.imageProvenance ||
     typeof candidate.imageProvenance !== "object" ||
-    Array.isArray(candidate.imageProvenance)
+    Array.isArray(candidate.imageProvenance) ||
+    (candidate.architectures !== undefined &&
+      (!candidate.architectures ||
+        typeof candidate.architectures !== "object" ||
+        Array.isArray(candidate.architectures)))
   ) {
     throw new CliError(`AWS release candidate ${path} has an invalid contract or targets another AWS account/region`);
+  }
+  for (const [workload, architecture] of Object.entries(candidate.architectures ?? {})) {
+    if (!candidate.images[workload] || (architecture !== "arm64" && architecture !== "amd64"))
+      throw new CliError(`AWS release candidate ${path} has an invalid ${workload} architecture`);
   }
   for (const [workload, image] of Object.entries(candidate.images)) {
     const provenance = candidate.imageProvenance[workload];
@@ -793,6 +801,20 @@ function releaseCandidate(config: QmConfig, path: string): AwsReleaseCandidate {
     ) {
       throw new CliError(`AWS release candidate ${path} has an invalid ${workload} image or provenance`);
     }
+    const architecture = candidate.architectures?.[workload];
+    if (candidate.architectures && architecture !== workloadArchitecture(config, workload))
+      throw new CliError(
+        `AWS release candidate ${path} architecture for ${workload} does not match its configuration; use a matching architecture or rebuild the candidate`,
+      );
+    if (
+      architecture === undefined &&
+      provenance?.kind === "source-build" &&
+      isServiceName(workload) &&
+      !aws.services[workload]!.architecture
+    )
+      throw new CliError(
+        `AWS release candidate ${path} has no architecture for source-built ${workload}; set aws.services.${workload}.architecture to the image platform or rebuild the candidate`,
+      );
   }
   return candidate as AwsReleaseCandidate;
 }
@@ -1245,6 +1267,7 @@ interface AwsReleaseCandidate {
   label: string;
   images: Record<string, string>;
   imageProvenance: Record<string, DeploymentImageProvenance>;
+  architectures?: Record<string, "arm64" | "amd64">;
 }
 
 interface DeploymentManifest {
@@ -2144,7 +2167,7 @@ function assertPredeployDbRestorePoint(config: QmConfig): string {
   const instance = awsJson<{
     DBInstances?: Array<{ DBInstanceStatus?: string; BackupRetentionPeriod?: number; LatestRestorableTime?: string }>;
   }>(aws, ["rds", "describe-db-instances", "--db-instance-identifier", database]).DBInstances?.[0];
-  if (instance?.DBInstanceStatus !== "available") {
+  if (instance?.DBInstanceStatus !== "available" && instance?.DBInstanceStatus !== "storage-optimization") {
     throw new CliError(
       `database ${database} is ${instance?.DBInstanceStatus ?? "missing"}; refusing to deploy without an available source for the pre-deploy restore point`,
     );
@@ -2322,6 +2345,7 @@ export async function awsUp(config: QmConfig, _configDir: string, opts: AwsUpOpt
       label: opts.imageLabel!,
       images,
       imageProvenance,
+      architectures: Object.fromEntries(services.map((service) => [service, workloadArchitecture(config, service)])),
     };
     writeFileSync(opts.candidateOut!, `${JSON.stringify(release, null, 2)}\n`, { mode: 0o600 });
     ok(`AWS release candidate written to ${opts.candidateOut}`);
@@ -3484,12 +3508,13 @@ export async function awsSetBackgroundWork(
   configDir: string,
   enabled: boolean,
   candidatePath?: string,
-): Promise<void> {
+  expectedOwnership?: Pick<BackgroundWorkStatus, "generation" | "lastRequestId">,
+): Promise<BackgroundWorkStatus | undefined> {
   const { aws, workloads } = awsTopology(config, configDir);
   if (!workloads.includes("core")) throw new CliError("background work requires the core workload");
   const candidate = candidatePath ? releaseCandidate(config, candidatePath) : undefined;
   assertAwsCallerAccount(aws);
-  await withAwsLease(aws, async () => {
+  const confirmed = await withAwsLease(aws, async () => {
     const current = currentDeploymentManifest(aws);
     if (!current) throw new CliError("background work requires a recorded deployment");
     const states = describedServices(config, workloads);
@@ -3532,26 +3557,35 @@ export async function awsSetBackgroundWork(
       const cohort = await awsBackgroundCohort(config, configDir, candidatePath);
       const transport = awsBackgroundWorkTransport(config);
       let status = await readBackgroundWork(transport, cohort.deploymentId);
+      if (
+        expectedOwnership &&
+        (status.generation !== expectedOwnership.generation || status.lastRequestId !== expectedOwnership.lastRequestId)
+      )
+        throw new CliError("background ownership changed since promotion; refusing automatic compensation");
       if (!status.enabled)
         throw new CliError("explicitly bootstrap all background ownership cohorts before changing ownership");
       if (!enabled && status.desiredDeploymentId !== null && status.desiredDeploymentId !== cohort.deploymentId)
         throw new CliError("cannot disable background work on a different deployment's current owner");
       const desiredDeploymentId = enabled ? cohort.deploymentId : null;
       if (status.desiredDeploymentId !== desiredDeploymentId) {
-        status = await mutateBackgroundWork(
-          transport,
-          cohort.deploymentId,
-          backgroundWorkMutation(status.generation, desiredDeploymentId),
-        );
+        status = await mutateBackgroundWork(transport, cohort.deploymentId, {
+          ...backgroundWorkMutation(status.generation, desiredDeploymentId),
+          ...(expectedOwnership ? { expectedLastRequestId: expectedOwnership.lastRequestId } : {}),
+        });
       }
-      await awaitBackgroundWork(
+      return awaitBackgroundWork(
         transport,
         cohort.deploymentId,
-        { generation: status.generation, desiredDeploymentId, taskArns: enabled ? cohort.taskArns : [] },
+        {
+          generation: status.generation,
+          desiredDeploymentId,
+          taskArns: enabled ? cohort.taskArns : [],
+          lastRequestId: status.lastRequestId,
+        },
         { timeoutMs: envNum("QM_AWS_ROLLOUT_DEADLINE_MS", 30 * 60_000), pollMs: 1000 },
       );
-      return;
     }
+    if (expectedOwnership) throw new CliError("ownership preconditions require controlled background work");
     if (current.backgroundDeploymentId)
       throw new CliError("controlled background work cannot fall back to task replacement");
     const desired = taskDefinitionForBackgroundWork(coreTask!, enabled);
@@ -3614,6 +3648,7 @@ export async function awsSetBackgroundWork(
     }
   });
   ok(`background work ${enabled ? "enabled" : "disabled"}`);
+  return confirmed;
 }
 
 function envValues(configDir: string, path: string | undefined): Map<string, string> {
@@ -3679,6 +3714,23 @@ export async function awsSecretsPush(config: QmConfig, configDir: string, envFil
       const affected = workloads.filter((workload) =>
         workloadSecrets(config, workload, uploaded).some((secret) => uploaded[secret.name]),
       );
+      if (baseline && before) {
+        for (const workload of affected) {
+          if (aws.backgroundWorkControl && workload === "core") continue;
+          const live = awsJson<{ taskDefinition?: { runtimePlatform?: { cpuArchitecture?: string } } }>(aws, [
+            "ecs",
+            "describe-task-definition",
+            "--task-definition",
+            before.tasks[workload]!,
+          ]).taskDefinition;
+          const architecture = live?.runtimePlatform?.cpuArchitecture ?? "X86_64";
+          const expected = workloadArchitecture(config, workload) === "arm64" ? "ARM64" : "X86_64";
+          if (architecture !== expected)
+            throw new CliError(
+              `cannot rotate secrets while ${workload} uses ${architecture} but its configuration selects ${expected}; set aws.services.${workload}.architecture to match the deployed image or rebuild it with qm up --build-from`,
+            );
+        }
+      }
       if (baseline?.backgroundDeploymentId) {
         for (const secret of staged.filter((item) =>
           ["DEPLOYMENT_CONTROL_SECRET", "CORE_SIGNING_SECRET"].includes(item.name),
@@ -4720,7 +4772,7 @@ export async function awsDoctor(config: QmConfig, configDir: string): Promise<vo
         VpcSecurityGroups?: Array<{ VpcSecurityGroupId?: string }>;
       }>;
     }>(aws, ["rds", "describe-db-instances", "--db-instance-identifier", rdsInstanceIdentifier(aws)]).DBInstances?.[0];
-    if (database?.DBInstanceStatus !== "available")
+    if (database?.DBInstanceStatus !== "available" && database?.DBInstanceStatus !== "storage-optimization")
       throw new Error(`database is ${database?.DBInstanceStatus || "missing"}`);
     const coreService = aws.services.core;
     if (!coreService) throw new Error("aws.services.core is missing");

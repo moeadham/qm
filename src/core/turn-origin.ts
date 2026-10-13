@@ -9,6 +9,7 @@ type LegacyTurnOrigin = Pick<
   | "securityScreenData"
   | "triggerDestination"
   | "ownerKeychainUnion"
+  | "ownerResourcesRequireOpen"
   | "unprompted"
   | "liveActor"
 >;
@@ -33,6 +34,9 @@ export function resolveTurnOrigin(input: Partial<LegacyTurnOrigin> & { origin?: 
       ...((typed.destination ?? legacy.destination) ? { destination: typed.destination ?? legacy.destination! } : {}),
       ...(typed.useOwnerKeychain || legacy.useOwnerKeychain ? { useOwnerKeychain: true } : {}),
       ...(typed.useOwnerModelAuth ? { useOwnerModelAuth: true } : {}),
+      ...(typed.ownerResourcesRequireOpen || legacy.ownerResourcesRequireOpen
+        ? { ownerResourcesRequireOpen: true }
+        : {}),
     };
   }
   if (typed.kind === "human" && legacy.kind === "human") {
@@ -59,6 +63,7 @@ export function normalizeTurnOrigin(input: LegacyTurnOrigin): TurnOrigin {
       ...(input.securityScreenData !== undefined ? { screenData: input.securityScreenData } : {}),
       ...(input.triggerDestination ? { destination: input.triggerDestination } : {}),
       ...(input.ownerKeychainUnion === true ? { useOwnerKeychain: true } : {}),
+      ...(input.ownerResourcesRequireOpen === true ? { ownerResourcesRequireOpen: true } : {}),
     };
   }
   if (input.unprompted === true) {
@@ -98,6 +103,7 @@ export function turnOriginRequestFields(origin: TurnOrigin): Partial<LegacyTurnO
         ...(origin.screenData !== undefined ? { securityScreenData: origin.screenData } : {}),
         ...(origin.destination ? { triggerDestination: origin.destination } : {}),
         ...(origin.useOwnerKeychain ? { ownerKeychainUnion: true } : {}),
+        ...(origin.ownerResourcesRequireOpen ? { ownerResourcesRequireOpen: true } : {}),
       };
     case "direct":
       return {};
