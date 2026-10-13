@@ -1,4 +1,5 @@
 import "./instrument.ts";
+import { createSpeechHandler, speechConfig, speechAllowed } from "./speech.ts";
 import { browserErrorConfig } from "./browser-error-config.ts";
 import { flushErrorReporting, reportBackendError } from "../../chassis/src/error-reporting.ts";
 import { appEditSlug } from "../src/app-edit.ts";
@@ -1147,7 +1148,18 @@ async function serveFileContent(c: WebCtx, playground = false): Promise<unknown>
   return Readable.fromWeb(r.body as Parameters<typeof Readable.fromWeb>[0]).pipe(res);
 }
 
+const transcribeSpeech = createSpeechHandler();
+
 const apiRoutes: readonly WebRoute[] = [
+  {
+    method: "GET",
+    path: "/api/speech",
+    handle: ({ res, user }) => {
+      res.setHeader("cache-control", "no-store");
+      return json(res, 200, { enabled: speechAllowed(user) && Boolean(speechConfig().apiKey) });
+    },
+  },
+  { method: "POST", path: "/api/speech/transcribe", handle: ({ req, res, user }) => transcribeSpeech(req, res, user) },
   {
     method: "GET",
     path: "/api/files/by-name/content",

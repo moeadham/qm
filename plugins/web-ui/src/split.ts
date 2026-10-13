@@ -983,7 +983,10 @@ class PaneContent implements IContentRenderer {
     p.api.onDidDimensionsChange(() => this.syncDensity());
     p.api.onDidVisibilityChange((e) => {
       this.visible = e.isVisible;
-      if (!e.isVisible) return;
+      if (!e.isVisible) {
+        this.conversation?.composer.cancelSpeech();
+        return;
+      }
       if (!this.loaded) {
         void this.load();
         return;

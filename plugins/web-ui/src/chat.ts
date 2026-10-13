@@ -410,6 +410,7 @@ export function createChatSurface(
   let readOnlyView: { id: string; threadRef: string; session: CoreSession; anchorSeq: number | null } | null = null;
 
   function teardownActiveChat(): void {
+    ctx.composer.cancelSpeech();
     transcriptViewport.dispose();
     transcriptRefreshGeneration++;
     readOnlyView = null;

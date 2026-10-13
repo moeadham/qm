@@ -491,3 +491,17 @@ test("deployment control credentials are conditional and cannot be delivered to 
     /only to core/,
   );
 });
+
+test("AllModels speech credentials are optional and delivered only to web-ui", () => {
+  const config = makeConfig({ services: ["core", "web-ui", "portal", "admin"] });
+  const key = secretByName(config, "ALLMODELS_API_KEY");
+  assert.equal(key.required, false);
+  assert.deepEqual(key.services, ["web-ui"]);
+  assert.deepEqual([...secretDestinations(key).keys()], ["web-ui"]);
+  assert.deepEqual(runtimeSecretNames("web-ui", key), ["ALLMODELS_API_KEY"]);
+  assert.match(renderEnvExample(config), /^# ALLMODELS_API_KEY=\s{2}# optional$/m);
+  assert.equal(
+    computedSecrets(makeConfig()).some((secret) => secret.name === "ALLMODELS_API_KEY"),
+    false,
+  );
+});

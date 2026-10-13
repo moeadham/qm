@@ -33,6 +33,7 @@ test("stopping returns Send immediately and queues every submit path without int
     requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
     cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
     fetch: async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/speech")) return Response.json({ enabled: false });
       requests.push(String(input));
       return Response.json({ runId: "queued-test", sessions: [] });
     },

@@ -13551,3 +13551,14 @@ body.app-edit-embed .custom-chat-shell.app-edit-chat > .chat-bottom-dock {
 .loop-triage-none {
   color: var(--muted-foreground);
 }
+
+.composer-mic.recording {
+  color: var(--danger, #dc2626);
+  background: rgba(220, 38, 38, 0.1);
+}
+.speech-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}

@@ -1,3 +1,4 @@
+import { SpeechInput } from "./speech";
 import { appEditSlug } from "./app-edit";
 import {
   runtimeConfigKey,
@@ -13,7 +14,7 @@ import { FolderDropError, folderToZipFile, isFolderReadError, splitDropItems, ty
 import { html, nothing, render, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
 import { repeat } from "lit/directives/repeat.js";
-import { ArrowUp, Box, CornerDownRight, FileText, Paperclip, Square, X } from "lucide";
+import { ArrowUp, Box, CornerDownRight, FileText, Mic, Paperclip, Square, X } from "lucide";
 import {
   api,
   ApiError,
@@ -282,6 +283,48 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     pasteView: null as { id: string; text: string; initial: string; dirty: boolean } | null,
   };
 
+  let speechEnabled = false;
+  let disposed = false;
+  let speechThread: string | null = null;
+  const speech = new SpeechInput({
+    state: () => {
+      if (!disposed) ctx.chat.drawActiveChat();
+    },
+    error: (message) => {
+      if (disposed) return;
+      composerState.error = message;
+      ctx.chat.drawActiveChat();
+    },
+    text: (text) => {
+      if (disposed || ctx.chat.state.threadRef !== speechThread) return;
+      composerState.draft = [composerState.draft, text]
+        .filter(Boolean)
+        .join(composerState.draft && !/\s$/.test(composerState.draft) ? " " : "");
+      persistDraft();
+      ctx.chat.drawActiveChat();
+      resizeComposer();
+      focusComposerEnd();
+    },
+    transcribe: (audio, signal) =>
+      api<{ text: string }>("/api/speech/transcribe", {
+        method: "POST",
+        headers: { "content-type": audio.type },
+        body: audio,
+        signal,
+      }),
+  });
+  void api<{ enabled: boolean }>("/api/speech")
+    .then((result) => {
+      if (disposed) return;
+      speechEnabled = result.enabled;
+      ctx.chat.drawActiveChat();
+    })
+    .catch(() => {});
+  const cancelHiddenSpeech = () => {
+    if (document.visibilityState === "hidden" && speech.state !== "idle") speech.cancel();
+  };
+  document.addEventListener("visibilitychange", cancelHiddenSpeech);
+
   const pastedTextIds = new Set<string>();
 
   const queuedRuns = new Map<string, QueuedRun[]>();
@@ -331,7 +374,20 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     return composerState.fastMode === true;
   }
 
+  function speechTooltip(): string {
+    if (!speechEnabled) return "Speech input is not configured";
+    if (speech.state === "recording") return "Stop and transcribe";
+    return "Dictate instruction";
+  }
+
+  function speechStatus(): string {
+    if (speech.state === "starting") return "Opening microphone…";
+    if (speech.state === "recording") return "Listening… Stop when you're done (up to 2 minutes).";
+    return "Transcribing…";
+  }
+
   function resetComposer(): void {
+    speech.cancel();
     composerState.draft = "";
     composerState.attachments = [];
     composerState.pasteView = null;
@@ -536,6 +592,8 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const runtimePending = activeRuntimeConfig === null;
     const inputBlocked = runtimePending || ctx.chat.state.resolvingApprovals.size > 0 || blockingPauses.length > 0;
     const attachingDisabled = inputBlocked;
+    if ((inputBlocked || ctx.chat.state.threadRef !== speechThread) && speech.state !== "idle")
+      queueMicrotask(() => speech.cancel());
     let placeholder =
       options.placeholder ??
       (appEditSlug(ctx.chat.state.threadRef, appState.me?.user) ? "Describe a change…" : "Ask anything");
@@ -691,8 +749,37 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
             </button>
             ${runtimeControls}
           </div>
-          <div class="composer-right">${sendControls(agent)}</div>
+          <div class="composer-right">
+            <button
+              type="button"
+              class="icon-btn composer-mic ${speech.state === "recording" ? "recording" : ""}"
+              aria-label=${speech.state === "recording" ? "Stop recording" : "Dictate instruction"}
+              aria-pressed=${speech.state === "recording" ? "true" : "false"}
+              ${tip(speechTooltip())}
+              ?disabled=${inputBlocked || !speechEnabled || speech.state === "transcribing"}
+              @click=${() => {
+                if (speech.state === "recording") speech.stop();
+                else if (speech.state === "starting") speech.cancel();
+                else {
+                  speechThread = ctx.chat.state.threadRef;
+                  composerState.error = "";
+                  void speech.start();
+                }
+              }}
+            >
+              ${icon(speech.state === "recording" ? Square : Mic, 18)}
+            </button>
+            ${sendControls(agent)}
+          </div>
         </div>
+        ${
+          speech.state !== "idle"
+            ? html`<div class="composer-note speech-status" role="status">
+                <span>${speechStatus()}</span>
+                <button type="button" class="btn compact" @click=${() => speech.cancel()}>Cancel</button>
+              </div>`
+            : nothing
+        }
         ${composerNotice}
       </form>
       ${pasteViewDialog(agent)}
@@ -1264,6 +1351,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     return (
       Boolean(composerState.draft.trim() || composerState.attachments.length) &&
       !composerState.processingFiles &&
+      speech.state === "idle" &&
       !submitting &&
       getRuntimeConfig(scopeKey()) !== null &&
       ctx.chat.state.resolvingApprovals.size === 0 &&
@@ -1968,6 +2056,9 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   }
 
   function dispose(): void {
+    disposed = true;
+    speech.cancel();
+    document.removeEventListener("visibilitychange", cancelHiddenSpeech);
     window.removeEventListener("model-account-changed", refreshAccount);
     document.removeEventListener("visibilitychange", revalidateRuntime);
     modelPicker.dispose();
@@ -1994,6 +2085,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     queuedStrip,
     queuedRunsFor,
     setQueuedRuns,
+    cancelSpeech: () => speech.cancel(),
     resetComposer,
     focusComposerEnd,
     fillSuggestedPrompt,

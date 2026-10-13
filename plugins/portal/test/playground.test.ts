@@ -7,6 +7,7 @@ import { deriveKey, seal, openSession, type SessionClaims } from "../src/session
 
 const claimed = new Set<string>();
 let claimCalls = 0;
+let speechCalls = 0;
 let refuseClaims = false;
 
 const upstream = createServer((req: IncomingMessage, res) => {
@@ -24,6 +25,7 @@ const upstream = createServer((req: IncomingMessage, res) => {
     });
     return;
   }
+  if (req.url?.startsWith("/api/speech")) speechCalls++;
   if (req.url === "/api/whoami") {
     res.writeHead(200, { "content-type": "application/json" });
     return void res.end(JSON.stringify({ isAdmin: false }));
@@ -205,5 +207,26 @@ test("mints beyond the per-IP budget are refused, and refusal sets no cookie", a
     assert.equal(down.status, 429, "a failed claim must fail closed");
   } finally {
     refuseClaims = false;
+  }
+});
+
+test("speech requires a signed-in session before forwarding to the paid provider", async () => {
+  const key = deriveKey("playground-test-portal-secret", "portal.session.v1");
+  const now = Math.floor(Date.now() / 1000);
+  for (const anon of [true, false]) {
+    const cookie = `portal_session=${seal({ k: "session", sub: anon ? "playground-speech-guest" : "speech-user", org: "acme", anon, auth: now, iat: now, exp: now + SESSION_TTL_S }, key)}`;
+    const before = speechCalls;
+    for (const [method, path] of [
+      ["GET", "/api/speech"],
+      ["POST", "/api/speech/transcribe"],
+    ]) {
+      const response = await fetch(`${base}${path}`, {
+        method,
+        headers: { cookie, origin: "http://localhost:18196", "content-type": "audio/webm" },
+      });
+      assert.equal(response.status, anon ? 403 : 200);
+      await response.text();
+    }
+    assert.equal(speechCalls - before, anon ? 0 : 2);
   }
 });

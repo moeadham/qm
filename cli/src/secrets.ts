@@ -304,6 +304,12 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     generate: MINT_LOCALLY,
   },
   {
+    name: "ALLMODELS_API_KEY",
+    service: "web-ui",
+    required: false,
+    description: "AllModels API key for microphone speech-to-text in the web composer. Stored only on the web service.",
+  },
+  {
     name: "INBOX_USERS",
     service: "web-ui",
     required: false,

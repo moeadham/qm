@@ -64,7 +64,7 @@ test("a pane is an element in this document — never a second copy of the app",
   assert.match(load, /if \(this\.disposed\) return;/, "and drops the continuation if the pane closed mid-load");
   assert.match(
     split,
-    /onDidVisibilityChange\(\(e\) => \{\s*this\.visible = e\.isVisible;\s*if \(!e\.isVisible\) return;/,
+    /onDidVisibilityChange\(\(e\) => \{\s*this\.visible = e\.isVisible;\s*if \(!e\.isVisible\) \{\s*this\.conversation\?\.composer\.cancelSpeech\(\);\s*return;\s*\}/,
   );
 });
 

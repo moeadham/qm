@@ -1337,6 +1337,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   const key = surfaceKey as string;
+  if (key === "web-ui" && session.anon && /^\/api\/speech(?:\/|$)/.test(pathname))
+    return json(res, 403, { error: "forbidden", message: "sign in to use speech input" });
   if (key === "admin") {
     if (session.anon) {
       if (wantsHtml(req)) return sendHtml(res, 403, nonAdminDeniedHtml({ sub: session.sub, org: session.org }));
