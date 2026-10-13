@@ -317,3 +317,36 @@ test("cron model defaults resolve with the owner's subscription before credentia
     await built.runtime.stop();
   }
 });
+
+test("creating and editing an explicit Codex cron validates the owner's subscription", async () => {
+  const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+  try {
+    built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+    await built.config.flushScope("org:default-org");
+    await built.config.setPersonalModelAuth("internal:alice", true);
+    await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+      accessToken: "test-access",
+      idToken: "test-id",
+      accountId: "test-account",
+      expiresAt: Date.now() + 3600000,
+    });
+    const input = {
+      owner: "internal:alice",
+      createdBy: "internal:alice",
+      ownerScopeId: "personal:internal:alice" as const,
+      schedule: { everyMs: 3600000 },
+      action: "Inspect the fixture",
+      runtime: { harnessId: "codex" as const, modelId: "gpt-6-sol" },
+    };
+    const cron = await built.app.createCron(input);
+    assert.equal(cron.runtime?.modelId, "gpt-6-sol");
+    await built.app.updateCron(cron.id, { runtime: { harnessId: "codex", modelId: "gpt-6-astra" } });
+    await built.userModelCredentials.delete("internal:alice", "openai");
+    await assert.rejects(
+      built.app.createCron({ ...input, action: "Disconnected check" }),
+      /runtime is no longer available/,
+    );
+  } finally {
+    await built.runtime.stop();
+  }
+});

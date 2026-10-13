@@ -160,12 +160,20 @@ export function createMessagingMethods(
     return [...stored, ...viaEmail.filter((member) => !seen.has(personKey(member.principalId)))];
   };
 
-  const validateRuntime = async (cron: Pick<Cron, "runtime" | "ownerScopeId" | "loopId" | "action" | "message">) => {
+  const validateRuntime = async (
+    cron: Pick<Cron, "runtime" | "ownerScopeId" | "loopId" | "action" | "message" | "owner" | "runAs">,
+  ) => {
     assertCronRuntime(cron);
     if (!cron.runtime) return;
     const error =
       validateRuntimeChoice(cron.runtime) ??
-      (await availableRuntimeError({ deps }, cron.ownerScopeId, cron.runtime, "cron"));
+      (await availableRuntimeError(
+        { deps },
+        cron.ownerScopeId,
+        cron.runtime,
+        "cron",
+        cron.runAs === "scopeShared" ? undefined : cron.owner,
+      ));
     if (error) throw new Error(error);
   };
 
