@@ -281,3 +281,39 @@ for (const connected of [true, false]) {
     }
   });
 }
+
+test("cron model defaults resolve with the owner's subscription before credential routing", async () => {
+  const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+  const start = seen.length;
+  try {
+    await built.config.setPersonalModelAuth("internal:alice", true);
+    built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+    await built.config.flushScope("org:default-org");
+    await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
+      harnessId: "claude",
+      modelId: "claude-opus-5-5",
+    });
+    await built.config.setPurposeRuntime("cron", { harnessId: "codex", modelId: "gpt-6-sol", effortLevel: "auto" });
+    await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+      accessToken: "test-access",
+      idToken: "test-id",
+      accountId: "cron-owner",
+      expiresAt: Date.now() + 3600000,
+    });
+    const result = await built.app.turn({
+      surface: "cron",
+      triggered: true,
+      origin: { kind: "automation", useOwnerModelAuth: true },
+      actor: { externalId: "internal:alice" },
+      conversation: { kind: "dm", threadRef: "owner-cron-purpose" },
+      text: "Return a diagnostic reply",
+      skipMemory: true,
+    });
+    assert.equal(result.status, "ok", JSON.stringify(result));
+    assert.equal(seen.length, start + 1);
+    assert.equal(seen[start]?.runtime?.modelId, "gpt-6-sol");
+    assert.equal(seen[start]?.codexAuth?.accountId, "cron-owner");
+  } finally {
+    await built.runtime.stop();
+  }
+});

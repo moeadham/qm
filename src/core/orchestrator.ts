@@ -3372,6 +3372,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 scopeId,
                 { harnessId: fallbackHarness, modelId: defaultModelForHarness(fallbackHarness) },
                 runtime,
+                undefined,
+                runtimePurpose,
               );
             }
             const [anthCred, oaiCred] = await Promise.all([
