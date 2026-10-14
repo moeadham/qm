@@ -47,7 +47,7 @@ test("browser error config requires authentication and excludes impersonation", 
   const directives = csp.split(";").map((directive) => directive.trim().split(/\s+/));
   assert.deepEqual(
     directives.find(([name]) => name === "connect-src"),
-    ["connect-src", "'self'", "https://sentry.example.com"],
+    ["connect-src", "'self'", "wss://api.allmodels.io", "https://sentry.example.com"],
   );
   assert.equal((await (await fetch(`${base}/me`, { headers: headers("admin") })).json()).browserErrors, undefined);
   coreStatus = 503;
