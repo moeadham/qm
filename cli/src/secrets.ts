@@ -307,7 +307,8 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     name: "ALLMODELS_API_KEY",
     service: "web-ui",
     required: false,
-    description: "AllModels API key for microphone speech-to-text in the web composer. Stored only on the web service.",
+    description:
+      "AllModels API key for microphone speech-to-text in the web composer. Delivered to signed-in web clients for direct streaming.",
   },
   {
     name: "INBOX_USERS",

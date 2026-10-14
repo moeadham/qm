@@ -1,4 +1,4 @@
-import { SpeechInput } from "./speech";
+import { SpeechInput, type SpeechConnection } from "./speech";
 import { appEditSlug } from "./app-edit";
 import {
   runtimeConfigKey,
@@ -285,8 +285,10 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   let disposed = false;
   let speechThread: string | null = null;
+  let speechPreview = "";
   const speech = new SpeechInput({
-    state: () => {
+    state: (state) => {
+      if (state === "idle" || state === "starting") speechPreview = "";
       if (!disposed) ctx.chat.drawActiveChat();
     },
     error: (message) => {
@@ -304,13 +306,11 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       resizeComposer();
       focusComposerEnd();
     },
-    transcribe: (audio, signal) =>
-      api<{ text: string }>("/api/speech/transcribe", {
-        method: "POST",
-        headers: { "content-type": audio.type },
-        body: audio,
-        signal,
-      }),
+    preview: (text) => {
+      speechPreview = text;
+      if (!disposed) ctx.chat.drawActiveChat();
+    },
+    configure: (signal) => api<SpeechConnection>("/api/speech", { signal }),
   });
   const cancelHiddenSpeech = () => {
     if (document.visibilityState === "hidden" && speech.state !== "idle") speech.cancel();
@@ -372,14 +372,14 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   function speechTooltip(): string {
     if (!speechEnabled()) return "Speech input is not configured";
-    if (speech.state === "recording") return "Stop and transcribe";
+    if (speech.state === "recording") return "Stop dictation";
     return "Dictate instruction";
   }
 
   function speechStatus(): string {
     if (speech.state === "starting") return "Opening microphone…";
-    if (speech.state === "recording") return "Listening… Stop when you're done (up to 2 minutes).";
-    return "Transcribing…";
+    if (speech.state === "recording") return speechPreview || "Listening… Stop when you're done (up to 2 minutes).";
+    return speechPreview || "Finishing transcription…";
   }
 
   function resetComposer(): void {

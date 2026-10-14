@@ -210,7 +210,7 @@ test("mints beyond the per-IP budget are refused, and refusal sets no cookie", a
   }
 });
 
-test("speech requires a signed-in session before forwarding to the paid provider", async () => {
+test("speech credentials require a signed-in session before forwarding to web-ui", async () => {
   const key = deriveKey("playground-test-portal-secret", "portal.session.v1");
   const now = Math.floor(Date.now() / 1000);
   for (const anon of [true, false]) {
@@ -218,7 +218,6 @@ test("speech requires a signed-in session before forwarding to the paid provider
     const before = speechCalls;
     for (const [method, path] of [
       ["GET", "/api/speech"],
-      ["POST", "/api/speech/transcribe"],
     ]) {
       const response = await fetch(`${base}${path}`, {
         method,

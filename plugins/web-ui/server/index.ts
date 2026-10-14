@@ -213,7 +213,7 @@ const SPA_CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  `connect-src 'self'${analyticsConfig ? ` ${analyticsConfig.host}` : ""}${browserErrorOrigin ? ` ${browserErrorOrigin}` : ""}`,
+  `connect-src 'self' wss://api.allmodels.io${analyticsConfig ? ` ${analyticsConfig.host}` : ""}${browserErrorOrigin ? ` ${browserErrorOrigin}` : ""}`,
   "frame-src 'self' data: https:",
   "worker-src 'self' blob:",
   "frame-ancestors 'self'",
@@ -1148,18 +1148,14 @@ async function serveFileContent(c: WebCtx, playground = false): Promise<unknown>
   return Readable.fromWeb(r.body as Parameters<typeof Readable.fromWeb>[0]).pipe(res);
 }
 
-const transcribeSpeech = createSpeechHandler();
+const configureSpeech = createSpeechHandler();
 
 const apiRoutes: readonly WebRoute[] = [
   {
     method: "GET",
     path: "/api/speech",
-    handle: ({ res, user }) => {
-      res.setHeader("cache-control", "no-store");
-      return json(res, 200, { enabled: speechAllowed(user) && Boolean(speechConfig().apiKey) });
-    },
+    handle: ({ res, user }) => configureSpeech(res, user),
   },
-  { method: "POST", path: "/api/speech/transcribe", handle: ({ req, res, user }) => transcribeSpeech(req, res, user) },
   {
     method: "GET",
     path: "/api/files/by-name/content",

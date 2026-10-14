@@ -368,30 +368,33 @@ continue to require them.
 
 The standalone `::link-slack-account{}` directive offers personal Slack account linking in a web reply. It shows the account card or linked status, requires the company bot to be installed first, and does not include the app picker. `::add-to-slack{}` remains the company installation trigger.
 
-## Speech input (AllModels)
+## Speech input
 
-The shared web composer includes microphone dictation for chats, compact panes and
-embedded composers. Click the microphone, speak, then click Stop. The transcript
-is appended to the current draft, ready to edit and send. It never sends a message
-automatically. Cancel discards the recording; closing the composer, switching chats
-or hiding the tab cancels it too. Recordings are limited to two minutes and 8 MiB.
+The microphone beside Send streams dictation directly from the browser to AllModels.
+Partial words appear below the composer; final transcripts append to the editable
+current draft. Stop finishes transcription. Instructions are never sent automatically.
+Cancel discards unfinished speech; closing the composer, switching chats or hiding
+the tab closes the microphone and WebSocket. Sessions are limited to two minutes
+and 8 MiB of audio. Completed text remains in the draft.
 
 Set `ALLMODELS_API_KEY` as a secret on the **web-ui service**, then restart or deploy
 that service. The CLI secret catalog includes this optional secret. Until configured,
-the microphone is disabled. The key is never sent to the browser or stored in its
-preferences. Audio is forwarded to AllModels for transcription and is not persisted
-by QM. Normal authenticated web access is required.
+the microphone is disabled. When dictation starts, authenticated `/api/speech`
+returns the configured API key to the signed-in browser with `Cache-Control: no-store`.
+The browser uses it in the WebSocket subprotocol; it is not placed in a URL, local
+storage or preferences. Every signed-in user with speech access can read and reuse
+this key. Anonymous playground users cannot retrieve it.
 
 Optional web-ui environment settings:
 
-| Variable                 | Default            | Purpose                                            |
-| ------------------------ | ------------------ | -------------------------------------------------- |
-| `ALLMODELS_STT_MODEL`    | `openai/whisper-1` | AllModels model supporting file transcription      |
-| `ALLMODELS_STT_LANGUAGE` | unset              | Optional ISO language code; unset detects language |
+| Variable                 | Default           | Purpose                                                              |
+| ------------------------ | ----------------- | -------------------------------------------------------------------- |
+| `ALLMODELS_STT_MODEL`    | `deepgram/nova-3` | AllModels model supporting realtime transcription and manual commits |
+| `ALLMODELS_STT_LANGUAGE` | unset             | Optional ISO language code                                           |
 
 Use HTTPS (localhost also works) and allow microphone access in the browser.
-Chrome/Firefox record Opus audio; Safari uses MP4. Speech input uses AllModels'
-OpenAI-compatible `/oai/audio/transcriptions` endpoint through QM's authenticated
-HTTP portal. It follows the microphone/draft workflow of
-[dsh-speech](https://github.com/allmodels-io/dsh-speech), with transcription after
-Stop rather than streaming partial words. There is no TTS, spoken summary or autoplay.
+An AudioWorklet captures mono PCM at 24 kHz and streams it through AllModels'
+OpenAI-compatible `wss://api.allmodels.io/oai/realtime` endpoint. QM does not proxy
+or persist the audio. The microphone/draft workflow takes inspiration from
+[dsh-speech](https://github.com/allmodels-io/dsh-speech). There is no TTS, spoken
+summary or autoplay, and no AllModels API changes are required.
