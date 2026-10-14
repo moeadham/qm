@@ -216,9 +216,7 @@ test("speech credentials require a signed-in session before forwarding to web-ui
   for (const anon of [true, false]) {
     const cookie = `portal_session=${seal({ k: "session", sub: anon ? "playground-speech-guest" : "speech-user", org: "acme", anon, auth: now, iat: now, exp: now + SESSION_TTL_S }, key)}`;
     const before = speechCalls;
-    for (const [method, path] of [
-      ["GET", "/api/speech"],
-    ]) {
+    for (const [method, path] of [["GET", "/api/speech"]]) {
       const response = await fetch(`${base}${path}`, {
         method,
         headers: { cookie, origin: "http://localhost:18196", "content-type": "audio/webm" },
