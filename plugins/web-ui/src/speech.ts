@@ -1,8 +1,6 @@
 import { UI_BASE } from "./deep-link.ts";
 
 export type SpeechState = "idle" | "starting" | "recording" | "transcribing";
-const MAX_BYTES = 8 * 1024 * 1024;
-const MAX_DURATION_MS = 120_000;
 
 export interface SpeechConnection {
   apiKey: string;
@@ -175,6 +173,7 @@ export class SpeechInput {
 
   private fail(message: string): void {
     this.diagnostic(message);
+    this.keepPreview();
     this.cancel();
     this.callbacks.error(message);
   }
@@ -266,7 +265,6 @@ export class SpeechInput {
       this.source.connect(capture);
       capture.connect(context.destination);
       clearTimeout(this.timer);
-      this.timer = setTimeout(() => this.stop(), MAX_DURATION_MS);
       this.lastAudioAt = Date.now();
       this.captureTimer = setInterval(() => {
         if (Date.now() - this.lastAudioAt > 5000)
@@ -355,7 +353,7 @@ export class SpeechInput {
     this.callbacks.amplitude?.(this.level);
     this.callbacks.changed?.();
     this.bytes += audio.byteLength;
-    if (this.bytes > MAX_BYTES || (this.socket?.bufferedAmount ?? 0) > 512 * 1024) {
+    if ((this.socket?.bufferedAmount ?? 0) > 512 * 1024) {
       this.fail("Speech connection cannot keep up. Try a shorter instruction.");
       return;
     }
@@ -408,13 +406,17 @@ export class SpeechInput {
     this.send({ type: "close" });
   }
 
-  private finish(): void {
+  private keepPreview(): void {
     const partial = [...this.previews.values()].join(" ").trim();
     if (partial) {
       this.heardSpeech = true;
       this.callbacks.preview("");
       this.callbacks.text(partial);
     }
+  }
+
+  private finish(): void {
+    this.keepPreview();
     const heard = this.heardSpeech;
     this.diagnostic("finished");
     const resolve = this.resolveStop;

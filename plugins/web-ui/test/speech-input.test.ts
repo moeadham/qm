@@ -450,3 +450,33 @@ test("cancel and provider errors abort pending transcription completion", async 
   assert.equal(await failed, false);
   assert.equal(await f.input.stop(), false);
 });
+
+test("healthy streaming continues beyond the former duration and audio-size limits", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(t);
+  await f.input.start();
+  t.mock.timers.tick(180_000);
+  assert.equal(f.input.state, "recording");
+  const audio = new Uint8Array(4800).buffer;
+  for (let i = 0; i < 1800; i++) Capture.latest.port.onmessage?.({ data: audio });
+  assert.equal(f.input.state, "recording");
+  assert.equal(Socket.latest.frames.filter((frame) => frame.type === "input_audio_buffer.append").length, 1800);
+  assert.deepEqual(f.errors, []);
+});
+
+test("unexpected connection loss keeps partial words without completing a pending send", async (t) => {
+  const f = fixture(t);
+  await f.input.start();
+  Socket.latest.receive({
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: "partial",
+    delta: "Keep the last words",
+  });
+  const result = f.input.stop();
+  Socket.latest.onerror?.();
+  assert.equal(await result, false);
+  assert.equal(f.input.state, "idle");
+  assert.deepEqual(f.texts, ["Keep the last words"]);
+  assert.equal(f.previews.at(-1), "");
+  assert.equal(f.errors.length, 1);
+});
