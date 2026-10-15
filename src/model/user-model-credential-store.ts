@@ -21,6 +21,7 @@ export interface UserModelCredential {
 }
 
 interface UserCredentialConnection {
+  needsReconnect?: boolean;
   provider: ModelProvider;
   kind: UserCredentialKind;
 }
@@ -113,7 +114,8 @@ export function createUserModelCredentialStore(input: { keychain: Keychain }): U
       const found: UserCredentialConnection[] = [];
       for (const provider of PROVIDERS) {
         const cred = (await oauthCredential(userId, provider)) ?? (await apiKeyCredential(userId, provider));
-        if (cred) found.push({ provider, kind: cred.kind });
+        if (cred)
+          found.push({ provider, kind: cred.kind, ...(cred.oauth?.needsReconnect ? { needsReconnect: true } : {}) });
       }
       return found;
     },

@@ -53,7 +53,7 @@ async function setAccount(ctx: ApiCtx): Promise<void> {
   ) {
     return sendJson(ctx.res, 409, { error: "Connect this AI account first." });
   }
-  await ctx.deps.config.setPersonalModelAuth(principal, account === "personal", provider);
+  await ctx.deps.config.setPersonalModelAuth(principal, account === "personal");
   audit(ctx.deps, {
     principalId: principal,
     action: "user-model-auth.account",

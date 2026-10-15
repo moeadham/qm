@@ -54,7 +54,10 @@ test("AI account modal interactions", async (t) => {
   const { appState } = await vite.ssrLoadModule("/src/shell-state.ts");
   appState.me = { user: "alice", org: "acme" };
   const doc = dom.window.document;
-  const status = (account = "company", connections: { provider: string; kind: string }[] = []) => ({
+  const status = (
+    account = "company",
+    connections: { provider: string; kind: string; needsReconnect?: boolean }[] = [],
+  ) => ({
     account,
     individualModelAuth: account !== "company",
     required: false,
@@ -109,6 +112,31 @@ test("AI account modal interactions", async (t) => {
     close();
     await vite.close();
     dom.window.close();
+  });
+
+  await t.test("reconnect-required Claude keeps Codex available and reconnects without disconnecting", async () => {
+    const calls: string[] = [];
+    fetcher = async (path) => {
+      calls.push(path);
+      if (path === "/api/user-model-auth/status")
+        return Response.json(
+          status("personal", [
+            { provider: "anthropic", kind: "oauth", needsReconnect: true },
+            { provider: "openai", kind: "oauth" },
+          ]),
+        );
+      return base(path);
+    };
+    await open();
+    assert.match(provider("Claude").textContent!, /Session expired or authorization failed/);
+    assert.doesNotMatch(provider("Claude").textContent!, /In use/);
+    assert.match(provider("ChatGPT / Codex").textContent!, /In use/);
+    providerButton("Claude", "Reconnect");
+    await tick();
+    assert.ok(provider("Claude").textContent?.includes("Sign in with Claude"));
+    assert.ok(!calls.some((path) => path.includes("disconnect")));
+    assert.equal(appState.me.modelAuthConnected, true);
+    close();
   });
 
   await t.test("Escape, focus trap, backdrop close, and focus restoration work", async () => {

@@ -35,7 +35,7 @@ rl.on("line", (line) => {
       if (${JSON.stringify(opts.succeed)}) {
         fs.writeFileSync(path.join(process.env.CODEX_HOME, "auth.json"), JSON.stringify({
           auth_mode: "chatgpt",
-          tokens: { access_token: "acc-1", refresh_token: "ref-1", id_token: ${JSON.stringify(idToken("acct_9"))}, account_id: "acct_9" },
+          tokens: { access_token: ${JSON.stringify("e30." + Buffer.from(JSON.stringify({ exp: 2000000000 })).toString("base64url") + ".sig")}, refresh_token: "ref-1", id_token: ${JSON.stringify(idToken("acct_9"))}, account_id: "acct_9" },
         }));
         send({ method: "account/login/completed", params: { loginId: "login-1", success: true, error: null } });
       } else {
@@ -65,7 +65,7 @@ test("device login: start returns the prompt, poll is pending then yields tokens
   const tokens = await login.poll(prompt.deviceAuthId);
   assert.notEqual(tokens, "pending");
   if (tokens === "pending") return;
-  assert.equal(tokens.accessToken, "acc-1");
+  assert.equal(tokens.expiresAt, 2000000000000);
   assert.equal(tokens.refreshToken, "ref-1");
   assert.equal(tokens.accountId, "acct_9");
   // The login is one-shot: after harvest it is gone.

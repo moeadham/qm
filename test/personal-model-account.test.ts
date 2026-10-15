@@ -46,9 +46,14 @@ test("account API binds choice to the signed-in person, preserves connections, a
   });
   server.listen(0);
   const base = `http://localhost:${(server.address() as AddressInfo).port}`;
-  async function request(account: unknown, principalId = "alice@default-org", signedIn = "alice@default-org") {
+  async function request(
+    account: unknown,
+    principalId = "alice@default-org",
+    signedIn = "alice@default-org",
+    provider?: "anthropic" | "openai",
+  ) {
     const path = "/v1/user-model-auth/account";
-    const body = JSON.stringify({ account, principalId, nonce: crypto.randomUUID() });
+    const body = JSON.stringify({ account, principalId, provider, nonce: crypto.randomUUID() });
     const ts = Math.floor(Date.now() / 1000);
     return fetch(base + path, {
       method: "POST",
@@ -74,6 +79,15 @@ test("account API binds choice to the signed-in person, preserves connections, a
       account: "personal",
       connections: [{ provider: "anthropic", kind: "apikey" }],
     });
+    await built.userModelCredentials.setApiKey("alice@default-org", "openai", "test-openai-key");
+    for (const provider of ["openai", "anthropic"] as const) {
+      const response = await request("personal", "alice@default-org", "alice@default-org", provider);
+      assert.equal(response.status, 200);
+      const status = (await response.json()) as { account: string; connections: unknown[] };
+      assert.equal(status.account, "personal");
+      assert.equal(status.connections.length, 2);
+    }
+    await built.userModelCredentials.delete("alice@default-org", "openai");
     assert.equal(await built.config.getIndividualModelAuthDurable("bob@default-org"), false);
     assert.equal((await request("company")).status, 200);
     assert.equal((await built.userModelCredentials.connections("alice@default-org")).length, 1);
