@@ -1,3 +1,4 @@
+import { jwtExpiryMs } from "../util/jwt.ts";
 import { createMemoryAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { orgId as configOrgId } from "../config.ts";
 import { randomBytes } from "node:crypto";
@@ -698,7 +699,6 @@ export function createKeychain(deps: {
   const oauthSlot = (accountType?: string) => `oauth:${accountType && accountType !== "default" ? accountType : ""}`;
   const oauthId = (host: string, principalId: string, accountType?: string) =>
     credId(principalId, host.toLowerCase(), oauthSlot(accountType));
-  const inflightRefreshes = new Map<string, Promise<string | null>>();
 
   async function putConnectorToken(
     host: string,
@@ -743,7 +743,19 @@ export function createKeychain(deps: {
     principalId: string,
     accountType?: string,
   ): Promise<KeychainCredential | null> {
-    return deps.creds.get(oauthId(host, principalId, accountType));
+    return normalizeConnectorRecord(await deps.creds.get(oauthId(host, principalId, accountType)));
+  }
+
+  function normalizeConnectorRecord(rec: KeychainCredential | null): KeychainCredential | null {
+    if (
+      !rec ||
+      rec.expiresAt !== undefined ||
+      rec.host !== "auth.openai.com" ||
+      rec.refresh?.accountType !== "individual-model"
+    )
+      return rec;
+    const expiresAt = jwtExpiryMs(tryDecrypt(rec, (r) => decryptSecret(r.secretEnc, deps.key)));
+    return expiresAt === undefined ? rec : { ...rec, expiresAt };
   }
 
   function recToOAuthToken(rec: KeychainCredential): OAuthToken {
@@ -801,7 +813,8 @@ export function createKeychain(deps: {
       // Compare-and-set: if another flight already rotated this credential,
       // keep its result rather than clobbering a newer refresh token.
       const current = await deps.creds.get(rec.id);
-      if (current && (current.updatedAt !== rec.updatedAt || current.fingerprint !== rec.fingerprint)) {
+      if (!current) return null;
+      if (current.updatedAt !== rec.updatedAt || current.fingerprint !== rec.fingerprint) {
         const latest = tryDecrypt(current, recToOAuthToken);
         return latest?.accessToken ?? null;
       }
@@ -825,19 +838,18 @@ export function createKeychain(deps: {
     rec.expiresAt !== undefined && t >= rec.expiresAt - oauthSkew;
 
   async function connectorTokenForRecord(rec: KeychainCredential): Promise<string | null> {
-    const t = now();
-    const refreshable = rec.refresh?.refreshTokenEnc && deps.refreshConnector && rec.host ? rec.host : null;
-    if (refreshable && rec.expiresAt !== undefined && t >= rec.expiresAt - oauthRefreshMargin) {
-      let pending = inflightRefreshes.get(rec.id);
-      if (!pending) {
-        pending = refreshAndStore(refreshable, rec.ownerId, rec.refresh?.accountType, rec);
-        inflightRefreshes.set(rec.id, pending);
-        void pending.finally(() => inflightRefreshes.delete(rec.id));
+    return lock.withLock(`keychain-oauth:${rec.id}`, async () => {
+      const current = normalizeConnectorRecord(await deps.creds.get(rec.id));
+      if (!current) return null;
+      const t = now();
+      const refreshable =
+        current.refresh?.refreshTokenEnc && deps.refreshConnector && current.host ? current.host : null;
+      if (refreshable && current.expiresAt !== undefined && t >= current.expiresAt - oauthRefreshMargin) {
+        return refreshAndStore(refreshable, current.ownerId, current.refresh?.accountType, current);
       }
-      return pending;
-    }
-    if (oauthExpired(rec, t) && !refreshable) return null;
-    return tryDecrypt(rec, (r) => decryptSecret(r.secretEnc, deps.key));
+      if (oauthExpired(current, t) && !refreshable) return null;
+      return tryDecrypt(current, (r) => decryptSecret(r.secretEnc, deps.key));
+    });
   }
 
   function connectorMeta(rec: KeychainCredentialMeta, t: number): ConnectorMeta {
@@ -1390,11 +1402,15 @@ export function createKeychain(deps: {
     },
 
     async setConnectorToken(host, principalId, token, accountType) {
-      await putConnectorToken(host, principalId, token, accountType);
+      await lock.withLock(`keychain-oauth:${oauthId(host, principalId, accountType)}`, () =>
+        putConnectorToken(host, principalId, token, accountType),
+      );
     },
 
     async deleteConnectorToken(host, principalId, accountType) {
-      await deleteCredential(oauthId(host, principalId, accountType));
+      await lock.withLock(`keychain-oauth:${oauthId(host, principalId, accountType)}`, () =>
+        deleteCredential(oauthId(host, principalId, accountType)),
+      );
     },
 
     async connectorTokenStatus(host, principalId, accountType) {

@@ -236,6 +236,8 @@ export function createTurnMethods(
             );
         if (error) return { status: "refused", reason: error };
       }
+      const preserveRuntime =
+        !individualAuth || req.surface === "web" || (origin.kind === "automation" && origin.useOwnerModelAuth === true);
       let requestedModel = req.model;
       let requestedHarness = req.harness;
       if (req.surface === "web") {
@@ -392,8 +394,8 @@ export function createTurnMethods(
         ...(req.detectOpener ? { detectOpener: req.detectOpener } : {}),
         ...(req.attachments?.length ? { attachments: req.attachments } : {}),
         ...(req.inboundNotes?.length ? { inboundNotes: req.inboundNotes } : {}),
-        ...((!individualAuth || req.surface === "web") && requestedHarness ? { harness: requestedHarness } : {}),
-        ...((!individualAuth || req.surface === "web") && requestedModel ? { model: requestedModel } : {}),
+        ...(preserveRuntime && requestedHarness ? { harness: requestedHarness } : {}),
+        ...(preserveRuntime && requestedModel ? { model: requestedModel } : {}),
         ...turnModelOptions(req),
         ...(req.readOnly ? { readOnly: true } : {}),
         ...(privateRequest
