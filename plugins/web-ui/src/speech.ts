@@ -10,7 +10,13 @@ export interface SpeechConnection {
   language?: string;
 }
 
+export interface SpeechMicrophone {
+  deviceId: string;
+  label: string;
+}
+
 export interface SpeechCallbacks {
+  changed?: () => void;
   state: (state: SpeechState) => void;
   text: (text: string) => void;
   preview: (text: string) => void;
@@ -20,6 +26,17 @@ export interface SpeechCallbacks {
 
 export class SpeechInput {
   state: SpeechState = "idle";
+  microphones: SpeechMicrophone[] = [];
+  selectedMicrophone = "";
+  switchingMicrophone = false;
+  level = 0;
+  private deviceVersion = 0;
+  private packets = 0;
+  private events = 0;
+  private audible = false;
+  private closeTimer?: ReturnType<typeof setTimeout>;
+  private captureTimer?: ReturnType<typeof setTimeout>;
+  private lastAudioAt = 0;
   private version = 0;
   private stream?: MediaStream;
   private context?: AudioContext;
@@ -30,7 +47,7 @@ export class SpeechInput {
   private controller?: AbortController;
   private rejectStart?: (error: Error) => void;
   private bytes = 0;
-  private committed?: string;
+  private closeSent = false;
   private commitSent = false;
   private completed = new Set<string>();
   private previews = new Map<string, string>();
@@ -40,6 +57,108 @@ export class SpeechInput {
 
   constructor(callbacks: SpeechCallbacks) {
     this.callbacks = callbacks;
+    try {
+      this.selectedMicrophone =
+        typeof window === "undefined" ? "" : (window.localStorage.getItem("qm.speech.microphone") ?? "");
+    } catch {
+      this.selectedMicrophone = "";
+    }
+  }
+
+  async refreshMicrophones(requestAccess = false): Promise<void> {
+    const version = ++this.deviceVersion;
+    let permissionStream: MediaStream | undefined;
+    try {
+      if (requestAccess) permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const devices = await navigator.mediaDevices?.enumerateDevices?.();
+      if (version !== this.deviceVersion || !devices) return;
+      const seen = new Set(["", "default"]);
+      this.microphones = devices
+        .filter((device) => {
+          if (device.kind !== "audioinput" || seen.has(device.deviceId)) return false;
+          seen.add(device.deviceId);
+          return true;
+        })
+        .map((device, index) => ({ deviceId: device.deviceId, label: device.label || `Microphone ${index + 1}` }));
+      this.callbacks.changed?.();
+    } catch {
+      if (requestAccess && version === this.deviceVersion)
+        this.callbacks.error("Could not list microphones. Allow microphone access in your browser settings.");
+    } finally {
+      permissionStream?.getTracks().forEach((track) => track.stop());
+    }
+  }
+
+  async selectMicrophone(deviceId: string): Promise<void> {
+    if (this.state === "starting" || this.state === "transcribing" || this.switchingMicrophone) return;
+    const version = this.version;
+    this.switchingMicrophone = true;
+    this.callbacks.changed?.();
+    let pendingStream: MediaStream | undefined;
+    try {
+      if (this.state === "recording") {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: this.constraints(deviceId) });
+        pendingStream = stream;
+        if (version !== this.version || this.state !== "recording") return;
+        const source = this.context!.createMediaStreamSource(stream);
+        source.connect(this.capture!);
+        this.source?.disconnect();
+        this.stream?.getTracks().forEach((track) => {
+          track.onended = null;
+          track.stop();
+        });
+        this.source = source;
+        this.stream = stream;
+        pendingStream = undefined;
+        this.watchTracks(stream, version);
+      }
+      this.selectedMicrophone = deviceId;
+      try {
+        if (typeof window !== "undefined") {
+          if (deviceId) window.localStorage.setItem("qm.speech.microphone", deviceId);
+          else window.localStorage.removeItem("qm.speech.microphone");
+        }
+      } catch {
+        this.callbacks.changed?.();
+      }
+    } catch {
+      if (version === this.version) this.callbacks.error("Could not open that microphone. Select another input.");
+    } finally {
+      pendingStream?.getTracks().forEach((track) => track.stop());
+      this.switchingMicrophone = false;
+      this.callbacks.changed?.();
+    }
+  }
+
+  private constraints(deviceId = this.selectedMicrophone): MediaTrackConstraints {
+    return {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    };
+  }
+
+  private watchTracks(stream: MediaStream, version: number): void {
+    for (const track of stream.getTracks())
+      track.onended = () => {
+        if (version === this.version && (this.state === "starting" || this.state === "recording"))
+          this.fail("The microphone disconnected. Select another input and try again.");
+      };
+  }
+
+  private diagnostic(reason: string): void {
+    console.debug(
+      "[qm-speech]",
+      JSON.stringify({
+        reason,
+        packets: this.packets,
+        bytes: this.bytes,
+        receivedEvents: this.events,
+        audibleInput: this.audible,
+        audioContext: this.context?.state,
+      }),
+    );
   }
 
   private update(state: SpeechState): void {
@@ -48,6 +167,7 @@ export class SpeechInput {
   }
 
   private fail(message: string): void {
+    this.diagnostic(message);
     this.cancel();
     this.callbacks.error(message);
   }
@@ -56,7 +176,11 @@ export class SpeechInput {
     if (this.state !== "idle") return;
     const version = ++this.version;
     this.bytes = 0;
-    this.committed = undefined;
+    this.packets = 0;
+    this.events = 0;
+    this.audible = false;
+    this.level = 0;
+    this.closeSent = false;
     this.commitSent = false;
     this.completed.clear();
     this.previews.clear();
@@ -73,7 +197,7 @@ export class SpeechInput {
       if (version !== this.version) return;
       clearTimeout(this.timer);
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        audio: this.constraints(),
       });
       if (version !== this.version) {
         stream.getTracks().forEach((track) => track.stop());
@@ -81,12 +205,8 @@ export class SpeechInput {
       }
       this.timer = setTimeout(() => this.fail("Speech connection timed out. Try again."), 15_000);
       this.stream = stream;
-      for (const track of stream.getTracks()) {
-        track.onended = () => {
-          if (version === this.version && (this.state === "starting" || this.state === "recording"))
-            this.fail("The microphone disconnected. Try again.");
-        };
-      }
+      this.watchTracks(stream, version);
+      void this.refreshMicrophones();
       const context = new AudioContext({ sampleRate: 24000 });
       this.context = context;
       if (context.sampleRate !== 24000 || !context.audioWorklet) {
@@ -114,7 +234,12 @@ export class SpeechInput {
         if (version !== this.version) return;
         if (event.data === "flushed") {
           this.commitSent = true;
+          if ((!this.bytes || !this.audible) && !this.heardSpeech && !this.previews.size) {
+            this.fail("No microphone audio detected. Check the input meter and select the correct microphone.");
+            return;
+          }
           this.send({ type: "input_audio_buffer.commit" });
+          this.closeTimer = setTimeout(() => this.closeStream(), 1500);
         } else if (event.data instanceof ArrayBuffer) {
           this.sendAudio(event.data);
         }
@@ -124,10 +249,21 @@ export class SpeechInput {
       capture.connect(context.destination);
       clearTimeout(this.timer);
       this.timer = setTimeout(() => this.stop(), MAX_DURATION_MS);
+      this.lastAudioAt = Date.now();
+      this.captureTimer = setInterval(() => {
+        if (Date.now() - this.lastAudioAt > 5000)
+          this.fail("No audio is arriving from the microphone. Check microphone access and the selected input.");
+      }, 1000);
       this.update("recording");
+      this.diagnostic("recording_started");
     } catch (error) {
       if (version !== this.version) return;
       const denied = error instanceof DOMException && error.name === "NotAllowedError";
+      const missing = error instanceof DOMException && ["NotFoundError", "OverconstrainedError"].includes(error.name);
+      if (missing) {
+        this.fail("The selected microphone is unavailable. Choose another input.");
+        return;
+      }
       this.fail(
         denied
           ? "Microphone access was denied. Allow it in your browser settings and try again."
@@ -154,7 +290,7 @@ export class SpeechInput {
               input: {
                 format: { type: "audio/pcm", rate: 24000 },
                 transcription: { model: settings.model, ...(settings.language ? { language: settings.language } : {}) },
-                turn_detection: null,
+                turn_detection: { type: "server_vad", silence_duration_ms: 700 },
               },
             },
           },
@@ -177,6 +313,10 @@ export class SpeechInput {
         if (version === this.version) this.fail("Could not connect to AllModels speech input. Try again.");
       };
       socket.onclose = () => {
+        if (version === this.version && this.state === "transcribing") {
+          this.finish();
+          return;
+        }
         if (version === this.version) this.fail("Speech connection closed before transcription finished. Try again.");
       };
     });
@@ -187,6 +327,14 @@ export class SpeechInput {
   }
 
   private sendAudio(audio: ArrayBuffer): void {
+    this.lastAudioAt = Date.now();
+    this.packets++;
+    const view = new DataView(audio);
+    let sum = 0;
+    for (let i = 0; i + 1 < view.byteLength; i += 2) sum += (view.getInt16(i, true) / 32768) ** 2;
+    this.level = Math.min(1, Math.sqrt(sum / Math.max(1, view.byteLength / 2)) * 8);
+    if (this.level > 0.01) this.audible = true;
+    this.callbacks.changed?.();
     this.bytes += audio.byteLength;
     if (this.bytes > MAX_BYTES || (this.socket?.bufferedAmount ?? 0) > 512 * 1024) {
       this.fail("Speech connection cannot keep up. Try a shorter instruction.");
@@ -199,6 +347,7 @@ export class SpeechInput {
   }
 
   private receive(frame: Record<string, unknown>): void {
+    this.events++;
     if (frame.type === "error" || frame.type === "conversation.item.input_audio_transcription.failed") {
       this.fail("AllModels could not transcribe this audio. Check the API key, balance and STT model.");
       return;
@@ -206,15 +355,16 @@ export class SpeechInput {
     const item = typeof frame.item_id === "string" ? frame.item_id : undefined;
     if (!item) return;
     if (frame.type === "conversation.item.input_audio_transcription.delta" && typeof frame.delta === "string") {
+      if (this.completed.has(item)) return;
       const text = (this.previews.get(item) ?? "") + frame.delta;
       this.previews.set(item, text);
-      this.callbacks.preview(text.slice(-1000));
+      this.callbacks.preview([...this.previews.values()].join(" "));
     }
     if (frame.type === "conversation.item.input_audio_transcription.completed") {
       if (!this.completed.has(item)) {
         this.completed.add(item);
         this.previews.delete(item);
-        this.callbacks.preview("");
+        this.callbacks.preview([...this.previews.values()].join(" "));
         const text = typeof frame.transcript === "string" ? frame.transcript.trim() : "";
         if (text) {
           this.heardSpeech = true;
@@ -222,29 +372,56 @@ export class SpeechInput {
         }
       }
     }
-    if (frame.type === "input_audio_buffer.committed" && this.commitSent) this.committed = item;
-    if (this.state === "transcribing" && this.committed && this.completed.has(this.committed)) {
-      const heardSpeech = this.heardSpeech;
-      this.cancel();
-      if (!heardSpeech) this.callbacks.error("No speech was detected. Try again.");
+    if (
+      frame.type === "conversation.item.input_audio_transcription.completed" &&
+      this.state === "transcribing" &&
+      this.commitSent &&
+      !this.closeSent
+    ) {
+      clearTimeout(this.closeTimer);
+      this.closeTimer = setTimeout(() => this.closeStream(), 150);
     }
+  }
+
+  private closeStream(): void {
+    if (this.state !== "transcribing" || this.closeSent) return;
+    this.closeSent = true;
+    this.send({ type: "close" });
+  }
+
+  private finish(): void {
+    const partial = [...this.previews.values()].join(" ").trim();
+    if (partial) {
+      this.heardSpeech = true;
+      this.callbacks.preview("");
+      this.callbacks.text(partial);
+    }
+    const heard = this.heardSpeech;
+    this.diagnostic("finished");
+    this.cancel();
+    if (!heard) this.callbacks.error("No speech was recognized. Check the input meter and selected microphone.");
   }
 
   stop(): void {
     if (this.state !== "recording") return;
     clearTimeout(this.timer);
     this.update("transcribing");
+    clearInterval(this.captureTimer);
     this.source?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = undefined;
     this.capture?.port.postMessage("stop");
-    this.timer = setTimeout(() => this.fail("Transcription timed out. Try again."), 30_000);
+    this.timer = setTimeout(() => this.finish(), 5000);
   }
 
   cancel(): void {
     if (this.state === "idle") return;
     ++this.version;
+    ++this.deviceVersion;
     clearTimeout(this.timer);
+    clearTimeout(this.closeTimer);
+    clearInterval(this.captureTimer);
+    this.level = 0;
     this.controller?.abort();
     this.controller = undefined;
     this.rejectStart?.(new Error("cancelled"));

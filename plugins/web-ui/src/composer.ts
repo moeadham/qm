@@ -287,6 +287,9 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   let speechThread: string | null = null;
   let speechPreview = "";
   const speech = new SpeechInput({
+    changed: () => {
+      if (!disposed) ctx.chat.drawActiveChat();
+    },
     state: (state) => {
       if (state === "idle" || state === "starting") speechPreview = "";
       if (!disposed) ctx.chat.drawActiveChat();
@@ -308,10 +311,22 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     },
     preview: (text) => {
       speechPreview = text;
-      if (!disposed) ctx.chat.drawActiveChat();
+      if (!disposed) {
+        ctx.chat.drawActiveChat();
+        resizeComposer();
+      }
     },
     configure: (signal) => api<SpeechConnection>("/api/speech", { signal }),
   });
+  void speech.refreshMicrophones();
+  const refreshSpeechDevices = () => {
+    void speech.refreshMicrophones();
+  };
+  navigator.mediaDevices?.addEventListener?.("devicechange", refreshSpeechDevices);
+  const speechDraft = () =>
+    [composerState.draft, speechPreview]
+      .filter(Boolean)
+      .join(composerState.draft && !/\s$/.test(composerState.draft) ? " " : "");
   const cancelHiddenSpeech = () => {
     if (document.visibilityState === "hidden" && speech.state !== "idle") speech.cancel();
   };
@@ -378,8 +393,11 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   function speechStatus(): string {
     if (speech.state === "starting") return "Opening microphone…";
-    if (speech.state === "recording") return speechPreview || "Listening… Stop when you're done (up to 2 minutes).";
-    return speechPreview || "Finishing transcription…";
+    if (speech.state === "recording")
+      return speech.level > 0.01
+        ? "Listening · audio is streaming…"
+        : "Listening · no input level yet. Check the selected microphone.";
+    return "Finishing transcription…";
   }
 
   function resetComposer(): void {
@@ -716,12 +734,51 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                   rows="1"
                   placeholder=${placeholder}
                   ?disabled=${inputBlocked}
-                  .value=${live(composerState.draft)}
+                  .value=${live(speechDraft())}
                   @input=${(e: InputEvent) => onDraftInput(e, agent)}
                   @keydown=${(e: KeyboardEvent) => onComposerKeydown(e, agent)}
                   @paste=${(e: ClipboardEvent) => void onComposerPaste(e, agent)}
                 ></textarea>
               `
+        }
+        ${
+          speechEnabled()
+            ? html`<div class="speech-devices">
+                <label
+                  >Microphone
+                  <select
+                    aria-label="Microphone"
+                    .value=${live(speech.selectedMicrophone)}
+                    ?disabled=${inputBlocked || speech.state === "starting" || speech.state === "transcribing" || speech.switchingMicrophone}
+                    @focus=${() => void speech.refreshMicrophones()}
+                    @change=${(event: Event) => {
+                      composerState.error = "";
+                      void speech.selectMicrophone((event.target as HTMLSelectElement).value);
+                    }}
+                  >
+                    <option value="" ?selected=${!speech.selectedMicrophone}>System default</option>
+                    ${
+                      speech.selectedMicrophone &&
+                      !speech.microphones.some((device) => device.deviceId === speech.selectedMicrophone)
+                        ? html`<option value=${speech.selectedMicrophone} selected>
+                            Previously selected microphone (unavailable)
+                          </option>`
+                        : nothing
+                    }
+                    ${speech.microphones.map((device) => html`<option value=${device.deviceId} ?selected=${device.deviceId === speech.selectedMicrophone}>${device.label}</option>`)}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  class="btn compact"
+                  ?disabled=${speech.state !== "idle"}
+                  @click=${() => void speech.refreshMicrophones(true)}
+                >
+                  Find microphones
+                </button>
+                ${speech.state === "recording" ? html`<meter aria-label="Microphone input level" min="0" max="1" .value=${speech.level}></meter>` : nothing}
+              </div>`
+            : nothing
         }
         <div class="composer-toolbar">
           <div class="composer-left">
@@ -1320,7 +1377,13 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   function onDraftInput(e: InputEvent, agent: Agent): void {
     const wasEmpty = !composerState.draft;
-    composerState.draft = (e.currentTarget as HTMLTextAreaElement).value;
+    const value = (e.currentTarget as HTMLTextAreaElement).value;
+    if (speechPreview && value.endsWith(speechPreview)) {
+      composerState.draft = value.slice(0, -speechPreview.length);
+    } else {
+      composerState.draft = value;
+      if (speechPreview) speech.cancel();
+    }
     persistDraft();
     const hadError = Boolean(composerState.error);
     composerState.error = "";
@@ -2054,6 +2117,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   function dispose(): void {
     disposed = true;
     speech.cancel();
+    navigator.mediaDevices?.removeEventListener?.("devicechange", refreshSpeechDevices);
     document.removeEventListener("visibilitychange", cancelHiddenSpeech);
     window.removeEventListener("model-account-changed", refreshAccount);
     document.removeEventListener("visibilitychange", revalidateRuntime);

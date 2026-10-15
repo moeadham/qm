@@ -371,11 +371,21 @@ The standalone `::link-slack-account{}` directive offers personal Slack account 
 ## Speech input
 
 The microphone beside Send streams dictation directly from the browser to AllModels.
-Partial words appear below the composer; final transcripts append to the editable
-current draft. Stop finishes transcription. Instructions are never sent automatically.
+Partial words appear in the text box as you speak; final transcripts settle into
+the editable draft. Stop finishes transcription. Instructions are never sent automatically.
 Cancel discards unfinished speech; closing the composer, switching chats or hiding
 the tab closes the microphone and WebSocket. Sessions are limited to two minutes
 and 8 MiB of audio. Completed text remains in the draft.
+
+Choose an input from the Microphone selector; Find microphones requests permission
+and refreshes device names. The selection is saved in this browser and can be changed
+while recording. An input-level meter distinguishes a live microphone from a silent
+or incorrect input. A missing device produces a prompt to choose another input.
+Automatic voice detection delivers completed phrases during pauses. Stop requests a
+commit, then uses a bounded close fallback if completion stalls; the latest partial
+words are retained. Silent input produces a microphone hint rather than a timeout.
+Safe `[qm-speech]` console diagnostics contain packet/byte/event counts and audio
+context state, without credentials, device identifiers, audio or transcript text.
 
 Set `ALLMODELS_API_KEY` as a secret on the **web-ui service**, then restart or deploy
 that service. The CLI secret catalog includes this optional secret. Until configured,
@@ -387,10 +397,10 @@ this key. Anonymous playground users cannot retrieve it.
 
 Optional web-ui environment settings:
 
-| Variable                 | Default           | Purpose                                                              |
-| ------------------------ | ----------------- | -------------------------------------------------------------------- |
-| `ALLMODELS_STT_MODEL`    | `deepgram/nova-3` | AllModels model supporting realtime transcription and manual commits |
-| `ALLMODELS_STT_LANGUAGE` | unset             | Optional ISO language code                                           |
+| Variable                 | Default           | Purpose                                                                        |
+| ------------------------ | ----------------- | ------------------------------------------------------------------------------ |
+| `ALLMODELS_STT_MODEL`    | `deepgram/nova-3` | AllModels model supporting realtime transcription and voice activity detection |
+| `ALLMODELS_STT_LANGUAGE` | unset             | Optional ISO language code                                                     |
 
 Use HTTPS (localhost also works) and allow microphone access in the browser.
 An AudioWorklet captures mono PCM at 24 kHz and streams it through AllModels'

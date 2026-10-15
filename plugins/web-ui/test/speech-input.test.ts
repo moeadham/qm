@@ -122,7 +122,10 @@ test("streams PCM directly using browser subprotocol auth, previews deltas and f
   assert.equal(socket.url.pathname, "/oai/realtime");
   assert.ok(!socket.url.toString().includes("browser-test-key"));
   assert.deepEqual(socket.protocols, ["realtime", "openai-insecure-api-key.browser-test-key"]);
-  assert.equal(socket.frames[0].session.audio.input.turn_detection, null);
+  assert.deepEqual(socket.frames[0].session.audio.input.turn_detection, {
+    type: "server_vad",
+    silence_duration_ms: 700,
+  });
   Capture.latest.port.onmessage?.({ data: new Uint8Array([0, 0, 0xff, 0x7f]).buffer });
   assert.equal(socket.frames[1].type, "input_audio_buffer.append");
   assert.equal(socket.frames[1].audio, "AAD/fw==");
@@ -142,6 +145,7 @@ test("streams PCM directly using browser subprotocol auth, previews deltas and f
   };
   socket.receive(completed);
   socket.receive(completed);
+  socket.onclose?.();
   assert.equal(f.input.state, "idle");
   assert.deepEqual(f.texts, ["Add speech"]);
   assert.deepEqual(f.errors, []);
@@ -210,6 +214,7 @@ test("backpressure closes a slow connection", async (t) => {
 test("completion arriving before commit acknowledgment still completes the stop", async (t) => {
   const f = fixture(t);
   await f.input.start();
+  Capture.latest.port.onmessage?.({ data: new Uint8Array([0, 0x40]).buffer });
   f.input.stop();
   await tick();
   Socket.latest.receive({
@@ -219,6 +224,7 @@ test("completion arriving before commit acknowledgment still completes the stop"
   });
   assert.equal(f.input.state, "transcribing");
   Socket.latest.receive({ type: "input_audio_buffer.committed", item_id: "one" });
+  Socket.latest.onclose?.();
   assert.equal(f.input.state, "idle");
   assert.deepEqual(f.texts, ["Ready"]);
 });
@@ -231,4 +237,161 @@ test("microphone disconnect closes the session immediately", async (t) => {
   assert.equal(Socket.latest.closed, true);
   assert.equal(f.contextClosed(), 1);
   assert.match(f.errors[0], /microphone disconnected/);
+});
+
+test("an explicitly selected microphone is used and may be changed during recording", async (t) => {
+  const constraints: MediaStreamConstraints[] = [];
+  const streams: { stopped: number; onended: (() => void) | null }[] = [];
+  const f = fixture(t);
+  Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+    value: async (options: MediaStreamConstraints) => {
+      constraints.push(options);
+      const track = {
+        stopped: 0,
+        onended: null as (() => void) | null,
+        stop() {
+          this.stopped++;
+        },
+      };
+      streams.push(track);
+      return { getTracks: () => [track] };
+    },
+  });
+  await f.input.selectMicrophone("usb-mic");
+  await f.input.start();
+  assert.deepEqual((constraints[0].audio as MediaTrackConstraints).deviceId, { exact: "usb-mic" });
+  await f.input.selectMicrophone("headset");
+  assert.deepEqual((constraints[1].audio as MediaTrackConstraints).deviceId, { exact: "headset" });
+  assert.equal(streams[0].stopped, 1);
+  assert.equal(f.input.selectedMicrophone, "headset");
+  assert.equal(f.input.state, "recording");
+  f.input.cancel();
+  assert.equal(streams[1].stopped, 1);
+});
+
+test("silent input ends with a microphone hint rather than a transcription timeout", async (t) => {
+  const f = fixture(t);
+  await f.input.start();
+  Capture.latest.port.onmessage?.({ data: new ArrayBuffer(4800) });
+  f.input.stop();
+  await tick();
+  assert.equal(f.input.state, "idle");
+  assert.match(f.errors[0], /No microphone audio detected/);
+  assert.ok(!Socket.latest.frames.some((frame) => frame.type === "input_audio_buffer.commit"));
+});
+
+test("Stop sends a close control to flush a provider that does not finalize the commit", async (t) => {
+  const f = fixture(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  await f.input.start();
+  Capture.latest.port.onmessage?.({ data: new Uint8Array([0, 0x40]).buffer });
+  Socket.latest.receive({
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: "one",
+    delta: "Keep these words",
+  });
+  f.input.stop();
+  await tick();
+  t.mock.timers.tick(1500);
+  assert.equal(Socket.latest.frames.at(-1)?.type, "close");
+  Socket.latest.onclose?.();
+  assert.equal(f.input.state, "idle");
+  assert.deepEqual(f.texts, ["Keep these words"]);
+  assert.deepEqual(f.errors, []);
+});
+
+test("missing audio packets release the microphone promptly", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const f = fixture(t);
+  await f.input.start();
+  t.mock.timers.tick(6000);
+  assert.equal(f.input.state, "idle");
+  assert.match(f.errors[0], /No audio is arriving/);
+  assert.equal(Socket.latest.closed, true);
+});
+
+test("device discovery filters outputs and duplicate default entries", async (t) => {
+  const f = fixture(t);
+  Object.defineProperty(navigator.mediaDevices, "enumerateDevices", {
+    value: async () => [
+      { kind: "audioinput", deviceId: "default", label: "Default" },
+      { kind: "audiooutput", deviceId: "speaker", label: "Speaker" },
+      { kind: "audioinput", deviceId: "usb", label: "USB microphone" },
+      { kind: "audioinput", deviceId: "usb", label: "Duplicate" },
+    ],
+  });
+  await f.input.refreshMicrophones();
+  assert.deepEqual(f.input.microphones, [{ deviceId: "usb", label: "USB microphone" }]);
+});
+
+test("a microphone permission result arriving after Stop is immediately released", async (t) => {
+  const f = fixture(t);
+  await f.input.start();
+  let grant!: (stream: MediaStream) => void;
+  Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+    value: () =>
+      new Promise<MediaStream>((resolve) => {
+        grant = resolve;
+      }),
+  });
+  const switching = f.input.selectMicrophone("late");
+  Capture.latest.port.onmessage?.({ data: new Uint8Array([0, 0x40]).buffer });
+  f.input.stop();
+  let released = 0;
+  grant({ getTracks: () => [{ stop: () => released++ }] } as unknown as MediaStream);
+  await switching;
+  assert.equal(released, 1);
+  assert.equal(f.input.selectedMicrophone, "");
+  assert.equal(f.input.state, "transcribing");
+});
+
+test("an uninstalled replacement microphone is released when graph setup fails", async (t) => {
+  const f = fixture(t);
+  await f.input.start();
+  let released = 0;
+  Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+    value: async () => ({ getTracks: () => [{ stop: () => released++ }] }),
+  });
+  const Context = globalThis.AudioContext;
+  Object.defineProperty(Context.prototype, "createMediaStreamSource", {
+    value: () => {
+      throw new Error("graph failed");
+    },
+  });
+  await f.input.selectMicrophone("failed");
+  assert.equal(released, 1);
+  assert.equal(f.input.state, "recording");
+  assert.equal(f.input.selectedMicrophone, "");
+  assert.match(f.errors[0], /Could not open that microphone/);
+});
+
+test("the microphone preference survives a new controller", async (t) => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      localStorage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    },
+  });
+  t.after(() => {
+    if (previous) Object.defineProperty(globalThis, "window", previous);
+    else Reflect.deleteProperty(globalThis, "window");
+  });
+  const first = fixture(t);
+  await first.input.selectMicrophone("remembered-mic");
+  const second = new SpeechInput({
+    state: () => {},
+    text: () => {},
+    preview: () => {},
+    error: () => {},
+    configure: async () => ({ apiKey: "test", model: "deepgram/nova-3" }),
+  });
+  assert.equal(second.selectedMicrophone, "remembered-mic");
+  await second.selectMicrophone("");
+  assert.equal(values.has("qm.speech.microphone"), false);
 });
