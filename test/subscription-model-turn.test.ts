@@ -29,6 +29,27 @@ mock.module("../src/harness/codex-harness.ts", {
     },
   },
 });
+const claude = await import("../src/harness/claude-harness.ts");
+const claudeSeen: HarnessTurnInput[] = [];
+mock.module("../src/harness/claude-harness.ts", {
+  namedExports: {
+    ...claude,
+    createClaudeHarness: () => {
+      const harness = createMockHarness();
+      return {
+        ...harness,
+        id: "claude",
+        turns: {
+          ...harness.turns,
+          runTurn: async (turn: HarnessTurnInput) => {
+            claudeSeen.push(turn);
+            return { reply: "Claude subscription selected", modelCalls: 1 };
+          },
+        },
+      };
+    },
+  },
+});
 const { buildApp } = await import("../src/wiring.ts");
 
 test("web Astra selection reaches Codex with personal OAuth through app and orchestrator", async () => {
@@ -346,6 +367,54 @@ test("creating and editing an explicit Codex cron validates the owner's subscrip
       built.app.createCron({ ...input, action: "Disconnected check" }),
       /runtime is no longer available/,
     );
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
+test("a Claude cron in a Codex project never refreshes the unrelated OpenAI login", async () => {
+  const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+  try {
+    built.config.setApprovedHarnesses(["mock", "claude", "codex"]);
+    await built.config.flushScope("org:default-org");
+    await built.config.setPersonalModelAuth("internal:alice", true);
+    await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
+      harnessId: "codex",
+      modelId: "gpt-5.6-sol",
+    });
+    await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+      accessToken: "expired-openai",
+      refreshToken: "invalid",
+      expiresAt: 1,
+    });
+    await built.userModelCredentials.setOAuth("internal:alice", "anthropic", {
+      accessToken: "valid-claude",
+      expiresAt: Date.now() + 3600000,
+    });
+    const original = built.userModelCredentials.derivedOAuth.bind(built.userModelCredentials);
+    const auth = mock.method(
+      built.userModelCredentials,
+      "derivedOAuth",
+      async (user: string, provider: import("../src/model/pi-models.ts").ModelProvider) => {
+        assert.equal(provider, "anthropic");
+        return original(user, provider);
+      },
+    );
+    const result = await built.app.turn({
+      surface: "cron",
+      actor: { externalId: "internal:alice" },
+      conversation: { kind: "dm", threadRef: "claude-cron-codex-project" },
+      origin: { kind: "automation", useOwnerModelAuth: true },
+      triggered: true,
+      text: "Check authentication",
+      harness: "claude",
+      model: "claude-opus-5-5",
+      skipMemory: true,
+    });
+    assert.equal(result.status, "ok", JSON.stringify(result));
+    assert.equal(claudeSeen.at(-1)?.runtime?.modelId, "claude-opus-5-5");
+    assert.ok(auth.mock.callCount() > 0);
+    auth.mock.restore();
   } finally {
     await built.runtime.stop();
   }

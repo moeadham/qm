@@ -276,7 +276,7 @@ function acceptAiStatus(status: StatusResponse): void {
   if (appState.me) {
     appState.me.individualModelAuth = status.individualModelAuth;
     appState.me.modelAuthConnected = status.connections.some(
-      (c) => status.account === "personal" || status.account === c.provider,
+      (c) => !c.needsReconnect && (status.account === "personal" || status.account === c.provider),
     );
   }
   drawSettings();

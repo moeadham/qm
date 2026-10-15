@@ -1,3 +1,4 @@
+import { jwtExpiryMs } from "../util/jwt.ts";
 import { CODEX_OAUTH_ISSUER, asObject, codexOAuthJwtAccountId, type JsonObject } from "./codex-auth-file.ts";
 import { codexOAuthRefreshToken, readCodexOAuthAuthFile, sanitizedCodexOAuthAuth } from "./codex-auth-file.ts";
 import type { CredentialFile, Keychain } from "../credentials/keychain.ts";
@@ -29,16 +30,6 @@ const CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REFRESH_SKEW_MS = 5 * 60_000;
 
 const CODEX_AUTH_FILE_PATHS = [".codex/auth.json", "codex/auth.json"];
-
-function jwtExpiryMs(token: unknown): number | undefined {
-  if (typeof token !== "string" || token.split(".").length !== 3) return undefined;
-  try {
-    const payload = asObject(JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")));
-    return typeof payload?.exp === "number" ? payload.exp * 1000 : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /** Epoch ms when this auth's access token expires, if it carries an exp claim. */
 export function codexOAuthAccessTokenExpiresAt(auth: JsonObject | null): number | undefined {

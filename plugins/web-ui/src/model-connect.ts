@@ -69,7 +69,7 @@ export interface StatusResponse {
   account: "company" | "personal" | "anthropic" | "openai";
   individualModelAuth: boolean;
   required: boolean;
-  connections: { provider: "anthropic" | "openai"; kind: ConnKind }[];
+  connections: { provider: "anthropic" | "openai"; kind: ConnKind; needsReconnect?: boolean }[];
 }
 
 type Mode = "gate" | "manager";
@@ -96,6 +96,7 @@ interface State {
   busy: boolean;
   saving: boolean;
   connections: Partial<Record<ProviderKey, ConnKind>>;
+  needsReconnect: Partial<Record<ProviderKey, boolean>>;
   open: ProviderKey | null;
   method: Method | null;
   flow: Flow;
@@ -124,6 +125,7 @@ function fresh(mode: Mode): State {
     busy: false,
     saving: false,
     connections: {},
+    needsReconnect: {},
     open: null,
     method: null,
     flow: { kind: "pick" },
@@ -160,14 +162,17 @@ function applyStatus(status: StatusResponse): void {
   s.personal = status.individualModelAuth === true;
   s.account = status.account;
   s.connections = {};
+  s.needsReconnect = {};
   for (const c of status.connections ?? []) {
-    s.connections[c.provider === "anthropic" ? "claude" : "chatgpt"] = c.kind;
+    const key = c.provider === "anthropic" ? "claude" : "chatgpt";
+    s.connections[key] = c.kind;
+    s.needsReconnect[key] = c.needsReconnect === true;
   }
   s.loaded = true;
   if (appState.me) {
     appState.me.individualModelAuth = s.personal;
     appState.me.modelAuthConnected = status.connections.some(
-      (c) => s.account === "personal" || s.account === c.provider,
+      (c) => !c.needsReconnect && (s.account === "personal" || s.account === c.provider),
     );
     window.dispatchEvent(new CustomEvent("model-account-changed", { detail: status }));
   }
@@ -551,18 +556,36 @@ function connectBody(p: ProviderMeta): TemplateResult {
 function providerRow(p: ProviderMeta): TemplateResult {
   const kind = s.connections[p.key];
   const open = s.open === p.key;
+  const needsReconnect = s.needsReconnect[p.key];
   let statusLine = `Chat with ${p.name} on your own account`;
   if (kind === "oauth") statusLine = `Connected with your ${p.name} subscription`;
   else if (kind === "apikey") statusLine = "Connected with your API key";
+  if (needsReconnect) statusLine = "Session expired or authorization failed. Reconnect this account.";
   let action: TemplateResult | typeof nothing = nothing;
-  if (kind) {
-    action = html`<button
+  if (kind && !open) {
+    action = html`${
+        needsReconnect
+          ? nothing
+          : html`<button
+              class="btn"
+              ?disabled=${s.busy || s.saving || s.account === "personal"}
+              @click=${() => switchAccount("personal")}
+            >
+              ${s.account === "personal" ? "In use" : "Use personal accounts"}
+            </button>`
+      }
+      <button
         class="btn"
-        ?disabled=${s.busy || s.saving || s.account === "personal"}
-        @click=${() => switchAccount("personal")}
+        ?disabled=${s.busy || s.saving}
+        @click=${() => {
+          resetFlow();
+          s.open = p.key;
+          paint();
+        }}
       >
-        ${s.account === "personal" ? "In use" : "Use personal accounts"}</button
-      ><button class="btn mc-quiet-danger" ?disabled=${s.busy || s.saving} @click=${() => disconnect(p)}>
+        Reconnect
+      </button>
+      <button class="btn mc-quiet-danger" ?disabled=${s.busy || s.saving} @click=${() => disconnect(p)}>
         ${s.busy ? "…" : "Disconnect"}
       </button>`;
   } else if (open) {
@@ -601,7 +624,7 @@ function providerRow(p: ProviderMeta): TemplateResult {
         </div>
         <div class="mc-provider-actions">${action}</div>
       </div>
-      ${open && !kind ? connectBody(p) : nothing}
+      ${open ? connectBody(p) : nothing}
     </section>
   `;
 }
@@ -638,7 +661,7 @@ async function switchAccount(account: "personal" | "company"): Promise<void> {
 
 function view(): TemplateResult {
   const anyConnected = PROVIDERS.some(
-    (p) => s.connections[p.key] && (s.account === "personal" || s.account === p.apiName),
+    (p) => s.connections[p.key] && !s.needsReconnect[p.key] && (s.account === "personal" || s.account === p.apiName),
   );
   let cta: TemplateResult | typeof nothing = nothing;
   if (s.loaded && (s.mode === "manager" || anyConnected || !s.personal)) {
