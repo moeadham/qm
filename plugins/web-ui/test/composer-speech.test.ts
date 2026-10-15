@@ -220,6 +220,7 @@ test("dictation locks typing and distinguishes partial words until finalization"
     button(".composer-mic").click();
     button("[aria-label='Stop recording']").click();
     assert.equal(active.state(), "transcribing");
+    assert.equal(host.querySelector("[aria-label='Cancel dictation']"), null);
     assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.readOnly, true);
     active.preview("");
     active.text("Final words.");
@@ -233,6 +234,7 @@ test("dictation locks typing and distinguishes partial words until finalization"
     button(".composer-mic").click();
     button(".send-btn").click();
     assert.equal(active.state(), "transcribing");
+    assert.equal(host.querySelector("[aria-label='Cancel dictation']"), null);
     assert.equal(button(".send-btn").disabled, true);
     assert.deepEqual(sent, ["Edited before sending"]);
     await composer!.submit();
