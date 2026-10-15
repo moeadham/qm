@@ -753,11 +753,11 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                   .value=${live(speechDraft())}
                   @input=${(event: InputEvent) => onDraftInput(event, agent)}
                   @scroll=${(event: Event) => {
-                      const input = event.currentTarget as HTMLTextAreaElement;
-                      const display = input.parentElement?.querySelector<HTMLElement>(".speech-input-display");
-                      followSpeechTail = input.scrollHeight - input.clientHeight - input.scrollTop <= 8;
-                      if (display) display.scrollTop = input.scrollTop;
-                    }}
+                    const input = event.currentTarget as HTMLTextAreaElement;
+                    const display = input.parentElement?.querySelector<HTMLElement>(".speech-input-display");
+                    followSpeechTail = input.scrollHeight - input.clientHeight - input.scrollTop <= 8;
+                    if (display) display.scrollTop = input.scrollTop;
+                  }}
                 ></textarea>
                 ${speechDisplay()}
               </div>`
@@ -886,14 +886,14 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                     ${tip(speechTooltip())}
                     ?disabled=${inputBlocked || !speechEnabled()}
                     @click=${() => {
-                        if (speech.state === "recording") speech.stop();
-                        else if (speech.state === "starting") speech.cancel();
-                        else {
-                          speechThread = ctx.chat.state.threadRef;
-                          composerState.error = "";
-                          void speech.start();
-                        }
-                      }}
+                      if (speech.state === "recording") speech.stop();
+                      else if (speech.state === "starting") speech.cancel();
+                      else {
+                        speechThread = ctx.chat.state.threadRef;
+                        composerState.error = "";
+                        void speech.start();
+                      }
+                    }}
                   >
                     ${icon(Mic, 18)}
                   </button>

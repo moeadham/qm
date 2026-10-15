@@ -404,10 +404,10 @@ this key. Anonymous playground users cannot retrieve it.
 
 Optional web-ui environment settings:
 
-| Variable                 | Default           | Purpose                                                                        |
-| ------------------------ | ----------------- | ------------------------------------------------------------------------------ |
+| Variable                 | Default                                 | Purpose                                                                        |
+| ------------------------ | --------------------------------------- | ------------------------------------------------------------------------------ |
 | `ALLMODELS_STT_MODEL`    | `assemblyai/universal-3-5-pro-realtime` | AllModels model supporting realtime transcription and voice activity detection |
-| `ALLMODELS_STT_LANGUAGE` | unset             | Optional ISO language code                                                     |
+| `ALLMODELS_STT_LANGUAGE` | unset                                   | Optional ISO language code                                                     |
 
 Use HTTPS (localhost also works) and allow microphone access in the browser.
 An AudioWorklet captures mono PCM at 24 kHz and streams it through AllModels'
