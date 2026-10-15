@@ -783,29 +783,28 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         ${
           speech.state === "recording"
             ? html`<div class="speech-devices">
-                <label
+                <label @focusin=${() => void speech.refreshMicrophones()}
                   >Microphone
-                  <select
-                    aria-label="Microphone"
-                    .value=${live(speech.selectedMicrophone)}
-                    ?disabled=${inputBlocked || speech.switchingMicrophone}
-                    @focus=${() => void speech.refreshMicrophones()}
-                    @change=${(event: Event) => {
+                  ${fieldSelect({
+                    ariaLabel: "Microphone",
+                    value: speech.selectedMicrophone,
+                    disabled: inputBlocked || speech.switchingMicrophone,
+                    compact: true,
+                    onChange: (value) => {
                       composerState.error = "";
-                      void speech.selectMicrophone((event.target as HTMLSelectElement).value);
-                    }}
-                  >
-                    <option value="" ?selected=${!speech.selectedMicrophone}>System default</option>
-                    ${
-                      speech.selectedMicrophone &&
-                      !speech.microphones.some((device) => device.deviceId === speech.selectedMicrophone)
-                        ? html`<option value=${speech.selectedMicrophone} selected>
-                            Previously selected microphone (unavailable)
-                          </option>`
-                        : nothing
-                    }
-                    ${speech.microphones.map((device) => html`<option value=${device.deviceId} ?selected=${device.deviceId === speech.selectedMicrophone}>${device.label}</option>`)}
-                  </select>
+                      void speech.selectMicrophone(value);
+                    },
+                    options: html`<option value="" ?selected=${!speech.selectedMicrophone}>System default</option>
+                      ${
+                        speech.selectedMicrophone &&
+                        !speech.microphones.some((device) => device.deviceId === speech.selectedMicrophone)
+                          ? html`<option value=${speech.selectedMicrophone} selected>
+                              Previously selected microphone (unavailable)
+                            </option>`
+                          : nothing
+                      }
+                      ${speech.microphones.map((device) => html`<option value=${device.deviceId} ?selected=${device.deviceId === speech.selectedMicrophone}>${device.label}</option>`)}`,
+                  })}
                 </label>
               </div>`
             : nothing

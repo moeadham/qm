@@ -13572,14 +13572,9 @@ body.app-edit-embed .custom-chat-shell.app-edit-chat > .chat-bottom-dock {
   gap: 6px;
   min-width: 0;
 }
-.speech-devices select {
+.speech-devices .field-select {
   max-width: 180px;
   min-width: 0;
-  background: var(--background);
-  color: inherit;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 3px;
 }
 .speech-recording-toolbar {
   gap: 10px;

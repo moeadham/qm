@@ -29,7 +29,11 @@ test("the composer locks input on blocking approvals only, while every approval 
     /const inputBlocked = runtimePending \|\| ctx\.chat\.state\.resolvingApprovals\.size > 0 \|\| blockingPauses\.length > 0;/,
   );
   assert.match(composer, /\$\{approvalPauses\.length \? composerApprovalPanel\(approvalPauses\) : nothing\}/);
-  assert.match(composer, /\$\{\s*blockingPauses\.length\s*\?\s*nothing\s*:\s*html`\s*<textarea/);
+  assert.match(composer, /!blockingPauses\.length && speech\.state === "idle"\s*\? html`\s*<textarea/);
+  assert.match(
+    composer,
+    /!blockingPauses\.length && speech\.state !== "idle"\s*\? html`<div class="speech-input-wrap">\s*<textarea/,
+  );
 });
 
 test("a send swallowed by a pending approval is restored to the composer with the reason", () => {
