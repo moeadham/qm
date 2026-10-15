@@ -377,8 +377,11 @@ Stop finalizes transcription and leaves the draft editable. Send remains availab
 while recording: it stops capture, waits for the final transcript and submits it
 in one click. Cancel, errors or switching chats abort a pending send.
 Cancel discards unfinished speech; closing the composer, switching chats or hiding
-the tab closes the microphone and WebSocket. Sessions are limited to two minutes
-and 8 MiB of audio. Completed text remains in the draft.
+the tab closes the microphone and WebSocket. QM imposes no fixed recording duration
+or cumulative audio-size cap. Network backpressure and missing-audio checks remain.
+Recognized text, including the latest partial words, is preserved if a connection fails.
+Provider session limits still apply; AssemblyAI documents a
+[three-hour streaming session limit](https://www.assemblyai.com/docs/faq/how-does-universal-streaming-session-based-pricing-work).
 
 The microphone selector appears only during recording, once permission is granted.
 Its selection is saved in this browser and can be changed while recording.
