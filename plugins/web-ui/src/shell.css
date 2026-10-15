@@ -13556,12 +13556,6 @@ body.app-edit-embed .custom-chat-shell.app-edit-chat > .chat-bottom-dock {
   color: var(--danger, #dc2626);
   background: rgba(220, 38, 38, 0.1);
 }
-.speech-status {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
 
 .speech-devices {
   display: flex;
@@ -13587,7 +13581,65 @@ body.app-edit-embed .custom-chat-shell.app-edit-chat > .chat-bottom-dock {
   border-radius: 5px;
   padding: 3px;
 }
-.speech-devices meter {
-  width: 70px;
-  height: 12px;
+.speech-recording-toolbar {
+  gap: 10px;
+  min-width: 0;
+}
+.speech-recording-track {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  overflow: hidden;
+}
+.speech-recording-waveform {
+  display: block;
+  width: 100%;
+  height: 30px;
+  color: var(--muted-foreground);
+}
+.speech-recording-cancel {
+  flex: none;
+}
+.speech-recording-toolbar .composer-mic {
+  flex: none;
+}
+.composer-wrap .composer-toolbar.speech-recording-toolbar,
+.composer-wrap .composer-toolbar.speech-pending-toolbar,
+.split-canvas:not(.single-pane) .composer-wrap .composer-toolbar.speech-recording-toolbar,
+.split-canvas:not(.single-pane) .composer-wrap .composer-toolbar.speech-pending-toolbar {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
+.speech-input-wrap {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+  grid-column: 1 / -1;
+}
+.speech-input-readonly {
+  display: block;
+  color: transparent;
+  caret-color: transparent;
+}
+.speech-input-display {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-y: hidden;
+  pointer-events: none;
+}
+.speech-partial {
+  color: var(--muted-foreground);
+  opacity: 0.7;
+}
+
+.speech-pending-toolbar {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  min-height: 30px;
 }

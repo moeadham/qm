@@ -1,4 +1,6 @@
 import { SpeechInput, type SpeechConnection } from "./speech";
+import { SpeechWaveform } from "./speech-waveform";
+import { ref } from "lit/directives/ref.js";
 import { appEditSlug } from "./app-edit";
 import {
   runtimeConfigKey,
@@ -286,13 +288,36 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   let disposed = false;
   let speechThread: string | null = null;
   let speechPreview = "";
+  let followSpeechTail = true;
+  const speechDisplayElement = document.createElement("div");
+  speechDisplayElement.className = "composer-input speech-input-display";
+  speechDisplayElement.setAttribute("aria-hidden", "true");
+  speechDisplayElement.dir = "auto";
+  function speechDisplay(): HTMLDivElement {
+    render(
+      html`${composerState.draft}${speechPreview ? html`${composerState.draft && !/\s$/.test(composerState.draft) ? " " : ""}<span class="speech-partial">${speechPreview}</span>` : nothing}`,
+      speechDisplayElement,
+    );
+    return speechDisplayElement;
+  }
+
+  const waveform = new SpeechWaveform();
   const speech = new SpeechInput({
+    amplitude: (level) => waveform.push(level),
     changed: () => {
       if (!disposed) ctx.chat.drawActiveChat();
     },
     state: (state) => {
-      if (state === "idle" || state === "starting") speechPreview = "";
-      if (!disposed) ctx.chat.drawActiveChat();
+      if (state === "idle" || state === "starting") {
+        speechPreview = "";
+        followSpeechTail = true;
+        waveform.reset();
+      }
+      if (!disposed) {
+        ctx.chat.drawActiveChat();
+        resizeComposer();
+        if (state === "idle" && pendingComposerFocus) focusComposerEnd();
+      }
     },
     error: (message) => {
       if (disposed) return;
@@ -389,15 +414,6 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     if (!speechEnabled()) return "Speech input is not configured";
     if (speech.state === "recording") return "Stop dictation";
     return "Dictate instruction";
-  }
-
-  function speechStatus(): string {
-    if (speech.state === "starting") return "Opening microphone…";
-    if (speech.state === "recording")
-      return speech.level > 0.01
-        ? "Listening · audio is streaming…"
-        : "Listening · no input level yet. Check the selected microphone.";
-    return "Finishing transcription…";
   }
 
   function resetComposer(): void {
@@ -725,9 +741,31 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         }
         ${approvalPauses.length ? composerApprovalPanel(approvalPauses) : nothing}
         ${
-          blockingPauses.length
-            ? nothing
-            : html`
+          !blockingPauses.length && speech.state !== "idle"
+            ? html`<div class="speech-input-wrap">
+                <textarea
+                  class="composer-input speech-input-readonly"
+                  dir="auto"
+                  rows="1"
+                  readonly
+                  aria-label="Dictation draft"
+                  placeholder="Speak your instruction…"
+                  .value=${live(speechDraft())}
+                  @input=${(event: InputEvent) => onDraftInput(event, agent)}
+                  @scroll=${(event: Event) => {
+                      const input = event.currentTarget as HTMLTextAreaElement;
+                      const display = input.parentElement?.querySelector<HTMLElement>(".speech-input-display");
+                      followSpeechTail = input.scrollHeight - input.clientHeight - input.scrollTop <= 8;
+                      if (display) display.scrollTop = input.scrollTop;
+                    }}
+                ></textarea>
+                ${speechDisplay()}
+              </div>`
+            : nothing
+        }
+        ${
+          !blockingPauses.length && speech.state === "idle"
+            ? html`
                 <textarea
                   class="composer-input"
                   dir="auto"
@@ -740,16 +778,17 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                   @paste=${(e: ClipboardEvent) => void onComposerPaste(e, agent)}
                 ></textarea>
               `
+            : nothing
         }
         ${
-          speechEnabled()
+          speech.state === "recording"
             ? html`<div class="speech-devices">
                 <label
                   >Microphone
                   <select
                     aria-label="Microphone"
                     .value=${live(speech.selectedMicrophone)}
-                    ?disabled=${inputBlocked || speech.state === "starting" || speech.state === "transcribing" || speech.switchingMicrophone}
+                    ?disabled=${inputBlocked || speech.switchingMicrophone}
                     @focus=${() => void speech.refreshMicrophones()}
                     @change=${(event: Event) => {
                       composerState.error = "";
@@ -768,68 +807,98 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                     ${speech.microphones.map((device) => html`<option value=${device.deviceId} ?selected=${device.deviceId === speech.selectedMicrophone}>${device.label}</option>`)}
                   </select>
                 </label>
-                <button
-                  type="button"
-                  class="btn compact"
-                  ?disabled=${speech.state !== "idle"}
-                  @click=${() => void speech.refreshMicrophones(true)}
-                >
-                  Find microphones
-                </button>
-                ${speech.state === "recording" ? html`<meter aria-label="Microphone input level" min="0" max="1" .value=${speech.level}></meter>` : nothing}
               </div>`
             : nothing
         }
-        <div class="composer-toolbar">
-          <div class="composer-left">
-            <input
-              class="file-input"
-              type="file"
-              multiple
-              hidden
-              ?disabled=${attachingDisabled}
-              @change=${(e: Event) => void onFilesSelected(e, agent)}
-            />
-            <button
-              class="icon-btn composer-attach"
-              type="button"
-              aria-label="Attach files"
-              ${tip("Attach files")}
-              ?disabled=${attachingDisabled}
-              @click=${() => pickFiles()}
-            >
-              ${icon(Paperclip, 18)}
-            </button>
-            ${runtimeControls}
-          </div>
-          <div class="composer-right">
-            <button
-              type="button"
-              class="icon-btn composer-mic ${speech.state === "recording" ? "recording" : ""}"
-              aria-label=${speech.state === "recording" ? "Stop recording" : "Dictate instruction"}
-              aria-pressed=${speech.state === "recording" ? "true" : "false"}
-              ${tip(speechTooltip())}
-              ?disabled=${inputBlocked || !speechEnabled() || speech.state === "transcribing"}
-              @click=${() => {
-                if (speech.state === "recording") speech.stop();
-                else if (speech.state === "starting") speech.cancel();
-                else {
-                  speechThread = ctx.chat.state.threadRef;
-                  composerState.error = "";
-                  void speech.start();
-                }
-              }}
-            >
-              ${icon(speech.state === "recording" ? Square : Mic, 18)}
-            </button>
-            ${sendControls(agent)}
-          </div>
-        </div>
         ${
-          speech.state !== "idle"
-            ? html`<div class="composer-note speech-status" role="status">
-                <span>${speechStatus()}</span>
-                <button type="button" class="btn compact" @click=${() => speech.cancel()}>Cancel</button>
+          speech.state === "recording"
+            ? html` <div class="composer-toolbar speech-recording-toolbar">
+                <button
+                  type="button"
+                  class="icon-btn speech-recording-cancel"
+                  aria-label="Cancel dictation"
+                  ${tip("Cancel dictation")}
+                  @click=${() => speech.cancel()}
+                >
+                  ${icon(X, 18)}
+                </button>
+                <div
+                  class="speech-recording-track"
+                  role="img"
+                  aria-label="Live microphone waveform: newest sound enters from the right"
+                >
+                  <canvas class="speech-recording-waveform" aria-hidden="true" ${ref(waveform.attach)}></canvas>
+                </div>
+                <button
+                  type="button"
+                  class="icon-btn composer-mic recording"
+                  aria-label="Stop recording"
+                  ${tip("Stop dictation")}
+                  @click=${() => speech.stop()}
+                >
+                  ${icon(Square, 18)}
+                </button>
+              </div>`
+            : nothing
+        }
+        ${
+          speech.state === "starting" || speech.state === "transcribing"
+            ? html`<div class="composer-toolbar speech-pending-toolbar">
+                <span role="status"
+                  >${speech.state === "starting" ? "Connecting microphone…" : "Finishing transcription…"}</span
+                >
+                <button type="button" class="icon-btn" aria-label="Cancel dictation" @click=${() => speech.cancel()}>
+                  ${icon(X, 18)}
+                </button>
+              </div>`
+            : nothing
+        }
+        ${
+          speech.state === "idle"
+            ? html` <div class="composer-toolbar">
+                <div class="composer-left">
+                  <input
+                    class="file-input"
+                    type="file"
+                    multiple
+                    hidden
+                    ?disabled=${attachingDisabled}
+                    @change=${(e: Event) => void onFilesSelected(e, agent)}
+                  />
+                  <button
+                    class="icon-btn composer-attach"
+                    type="button"
+                    aria-label="Attach files"
+                    ${tip("Attach files")}
+                    ?disabled=${attachingDisabled}
+                    @click=${() => pickFiles()}
+                  >
+                    ${icon(Paperclip, 18)}
+                  </button>
+                  ${runtimeControls}
+                </div>
+                <div class="composer-right">
+                  <button
+                    type="button"
+                    class="icon-btn composer-mic"
+                    aria-label="Dictate instruction"
+                    aria-pressed="false"
+                    ${tip(speechTooltip())}
+                    ?disabled=${inputBlocked || !speechEnabled()}
+                    @click=${() => {
+                        if (speech.state === "recording") speech.stop();
+                        else if (speech.state === "starting") speech.cancel();
+                        else {
+                          speechThread = ctx.chat.state.threadRef;
+                          composerState.error = "";
+                          void speech.start();
+                        }
+                      }}
+                  >
+                    ${icon(Mic, 18)}
+                  </button>
+                  ${sendControls(agent)}
+                </div>
               </div>`
             : nothing
         }
@@ -1308,7 +1377,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     requestAnimationFrame(() => {
       const ta = ctx.chat.state.host?.querySelector<HTMLTextAreaElement>(".composer-input");
       if (!ta) return;
-      if (ta.disabled) {
+      if (ta.disabled || ta.readOnly) {
         pendingComposerFocus = true;
         return;
       }
@@ -1376,14 +1445,13 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   }
 
   function onDraftInput(e: InputEvent, agent: Agent): void {
-    const wasEmpty = !composerState.draft;
-    const value = (e.currentTarget as HTMLTextAreaElement).value;
-    if (speechPreview && value.endsWith(speechPreview)) {
-      composerState.draft = value.slice(0, -speechPreview.length);
-    } else {
-      composerState.draft = value;
-      if (speechPreview) speech.cancel();
+    const input = e.currentTarget as HTMLTextAreaElement;
+    if (speech.state !== "idle") {
+      input.value = speechDraft();
+      return;
     }
+    const wasEmpty = !composerState.draft;
+    composerState.draft = input.value;
     persistDraft();
     const hadError = Boolean(composerState.error);
     composerState.error = "";
@@ -2097,6 +2165,15 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         ta.style.overflowY = "hidden";
         ta.scrollTop = 0;
       }
+      if (ta.readOnly) {
+        if (followSpeechTail) ta.scrollTop = ta.scrollHeight;
+        const display = ta.parentElement?.querySelector<HTMLElement>(".speech-input-display");
+        if (display) {
+          const scrollbar = Math.max(0, ta.offsetWidth - ta.clientWidth);
+          display.style.paddingRight = `${(parseFloat(getComputedStyle(ta).paddingRight) || 0) + scrollbar}px`;
+          display.scrollTop = ta.scrollTop;
+        }
+      }
     });
   }
 
@@ -2117,6 +2194,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   function dispose(): void {
     disposed = true;
     speech.cancel();
+    waveform.dispose();
     navigator.mediaDevices?.removeEventListener?.("devicechange", refreshSpeechDevices);
     document.removeEventListener("visibilitychange", cancelHiddenSpeech);
     window.removeEventListener("model-account-changed", refreshAccount);

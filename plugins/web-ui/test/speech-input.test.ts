@@ -269,6 +269,25 @@ test("an explicitly selected microphone is used and may be changed during record
   assert.equal(streams[1].stopped, 1);
 });
 
+test("an unavailable saved microphone falls back to the default input", async (t) => {
+  const f = fixture(t);
+  const constraints: MediaStreamConstraints[] = [];
+  Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+    value: async (options: MediaStreamConstraints) => {
+      constraints.push(options);
+      if (constraints.length === 1) throw new DOMException("Device unavailable", "OverconstrainedError");
+      return f.stream;
+    },
+  });
+  await f.input.selectMicrophone("unplugged-mic");
+  await f.input.start();
+  assert.deepEqual((constraints[0].audio as MediaTrackConstraints).deviceId, { exact: "unplugged-mic" });
+  assert.equal((constraints[1].audio as MediaTrackConstraints).deviceId, undefined);
+  assert.equal(f.input.selectedMicrophone, "");
+  assert.equal(f.input.state, "recording");
+  assert.deepEqual(f.errors, []);
+});
+
 test("silent input ends with a microphone hint rather than a transcription timeout", async (t) => {
   const f = fixture(t);
   await f.input.start();

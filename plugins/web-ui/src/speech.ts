@@ -17,6 +17,7 @@ export interface SpeechMicrophone {
 
 export interface SpeechCallbacks {
   changed?: () => void;
+  amplitude?: (level: number) => void;
   state: (state: SpeechState) => void;
   text: (text: string) => void;
   preview: (text: string) => void;
@@ -112,20 +113,24 @@ export class SpeechInput {
         pendingStream = undefined;
         this.watchTracks(stream, version);
       }
-      this.selectedMicrophone = deviceId;
-      try {
-        if (typeof window !== "undefined") {
-          if (deviceId) window.localStorage.setItem("qm.speech.microphone", deviceId);
-          else window.localStorage.removeItem("qm.speech.microphone");
-        }
-      } catch {
-        this.callbacks.changed?.();
-      }
+      this.rememberMicrophone(deviceId);
     } catch {
       if (version === this.version) this.callbacks.error("Could not open that microphone. Select another input.");
     } finally {
       pendingStream?.getTracks().forEach((track) => track.stop());
       this.switchingMicrophone = false;
+      this.callbacks.changed?.();
+    }
+  }
+
+  private rememberMicrophone(deviceId: string): void {
+    this.selectedMicrophone = deviceId;
+    try {
+      if (typeof window !== "undefined") {
+        if (deviceId) window.localStorage.setItem("qm.speech.microphone", deviceId);
+        else window.localStorage.removeItem("qm.speech.microphone");
+      }
+    } catch {
       this.callbacks.changed?.();
     }
   }
@@ -196,9 +201,20 @@ export class SpeechInput {
       const settings = await this.callbacks.configure(this.controller.signal);
       if (version !== this.version) return;
       clearTimeout(this.timer);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: this.constraints(),
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: this.constraints() });
+      } catch (error) {
+        if (
+          version !== this.version ||
+          !this.selectedMicrophone ||
+          !(error instanceof DOMException) ||
+          (error.name !== "NotFoundError" && error.name !== "OverconstrainedError")
+        )
+          throw error;
+        this.rememberMicrophone("");
+        stream = await navigator.mediaDevices.getUserMedia({ audio: this.constraints() });
+      }
       if (version !== this.version) {
         stream.getTracks().forEach((track) => track.stop());
         return;
@@ -235,7 +251,7 @@ export class SpeechInput {
         if (event.data === "flushed") {
           this.commitSent = true;
           if ((!this.bytes || !this.audible) && !this.heardSpeech && !this.previews.size) {
-            this.fail("No microphone audio detected. Check the input meter and select the correct microphone.");
+            this.fail("No microphone audio detected. Check your microphone and try again.");
             return;
           }
           this.send({ type: "input_audio_buffer.commit" });
@@ -334,6 +350,7 @@ export class SpeechInput {
     for (let i = 0; i + 1 < view.byteLength; i += 2) sum += (view.getInt16(i, true) / 32768) ** 2;
     this.level = Math.min(1, Math.sqrt(sum / Math.max(1, view.byteLength / 2)) * 8);
     if (this.level > 0.01) this.audible = true;
+    this.callbacks.amplitude?.(this.level);
     this.callbacks.changed?.();
     this.bytes += audio.byteLength;
     if (this.bytes > MAX_BYTES || (this.socket?.bufferedAmount ?? 0) > 512 * 1024) {
@@ -399,7 +416,7 @@ export class SpeechInput {
     const heard = this.heardSpeech;
     this.diagnostic("finished");
     this.cancel();
-    if (!heard) this.callbacks.error("No speech was recognized. Check the input meter and selected microphone.");
+    if (!heard) this.callbacks.error("No speech was recognized. Check your microphone and try again.");
   }
 
   stop(): void {

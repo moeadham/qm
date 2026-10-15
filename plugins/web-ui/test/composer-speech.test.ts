@@ -5,7 +5,7 @@ import { JSDOM } from "jsdom";
 import { createServer } from "vite";
 import type { ComposerSurface, ConvCtx } from "../src/conv-types.ts";
 
-test("editing live speech keeps visible text and the saved draft in agreement", async () => {
+test("dictation locks typing and distinguishes partial words until finalization", async () => {
   const dom = new JSDOM('<!doctype html><div id="app"></div><div id="composer"></div>', {
     url: "http://localhost/",
     pretendToBeVisual: true,
@@ -122,21 +122,69 @@ test("editing live speech keeps visible text and the saved draft in agreement", 
     };
     composer!.state.draft = "Keep";
     draw();
+    assert.equal(host.querySelector("select[aria-label=Microphone]"), null);
+    button(".composer-mic").click();
     assert.equal(host.querySelector<HTMLSelectElement>("select[aria-label=Microphone]")!.value, "remembered-mic");
-    button(".composer-mic").click();
+    assert.equal(host.querySelector(".speech-status"), null);
     assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.value, "Keep streaming words");
-    type("Keep streaming words!");
-    assert.equal(active.state(), "idle");
-    assert.equal(composer!.state.draft, "Keep streaming words!");
-    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.value, "Keep streaming words!");
-    composer!.state.draft = "Keep";
-    draw();
-    button(".composer-mic").click();
-    type("Edited base streaming words");
+    assert.ok(host.querySelector("canvas.speech-recording-waveform"));
+    assert.ok(host.querySelector("[aria-label='Cancel dictation']"));
+    assert.ok(host.querySelector("[aria-label='Stop recording']"));
+    assert.equal(host.querySelector(".composer-left"), null);
+    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.readOnly, true);
+    assert.equal(host.querySelector(".speech-partial")!.textContent, "streaming words");
+    assert.equal(host.querySelector(".speech-input-display")!.textContent, "Keep streaming words");
+    type("Overwrite the recording");
+    assert.equal(active.state(), "recording");
+    assert.equal(composer!.state.draft, "Keep");
+    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.value, "Keep streaming words");
     active.preview("");
     active.text("Streaming words.");
-    assert.equal(composer!.state.draft, "Edited base Streaming words.");
-    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.value, "Edited base Streaming words.");
+    assert.equal(host.querySelector(".speech-partial"), null);
+    assert.equal(host.querySelector(".speech-input-display")!.textContent, "Keep Streaming words.");
+    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.readOnly, true);
+    composer!.cancelSpeech();
+    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.readOnly, false);
+    type("Edit after recording");
+    assert.equal(composer!.state.draft, "Edit after recording");
+    ctx.chat.state.sessionId = "after-first-message";
+    ctx.chat.state.threadRef = "web:tester:after-first-message";
+    composer!.state.draft = "";
+    draw();
+    button(".composer-mic").click();
+    assert.ok(host.querySelector("canvas.speech-recording-waveform"));
+    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.value, "streaming words");
+    const input = host.querySelector<HTMLTextAreaElement>("textarea")!;
+    let scrollTop = 0;
+    Object.defineProperties(input, {
+      scrollHeight: { configurable: true, get: () => 500 },
+      clientHeight: { configurable: true, get: () => 100 },
+      offsetWidth: { configurable: true, get: () => 320 },
+      clientWidth: { configurable: true, get: () => 305 },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value) => {
+          scrollTop = Math.min(400, Math.max(0, value));
+        },
+      },
+    });
+    active.preview("Long dictation follows the newest words");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const display = host.querySelector<HTMLElement>(".speech-input-display")!;
+    assert.equal(input.scrollTop, 400);
+    assert.equal(display.scrollTop, 400);
+    assert.equal(display.style.paddingRight, "15px");
+    input.scrollTop = 20;
+    input.dispatchEvent(new dom.window.Event("scroll"));
+    active.preview("New words do not interrupt reading earlier text");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(input.scrollTop, 20);
+    assert.equal(display.scrollTop, 20);
+    composer!.cancelSpeech();
+    assert.equal(host.querySelector("canvas.speech-recording-waveform"), null);
+    assert.ok(host.querySelector(".composer-left"));
+    assert.equal(host.querySelector("select[aria-label=Microphone]"), null);
   } finally {
     composer?.dispose();
     await vite.close();

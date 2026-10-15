@@ -371,16 +371,23 @@ The standalone `::link-slack-account{}` directive offers personal Slack account 
 ## Speech input
 
 The microphone beside Send streams dictation directly from the browser to AllModels.
-Partial words appear in the text box as you speak; final transcripts settle into
-the editable draft. Stop finishes transcription. Instructions are never sent automatically.
+Partial words appear in lighter grey as you speak and switch to the normal text
+color when finalized. Typing is locked while dictation starts, records and finishes;
+the finalized draft becomes editable when dictation ends. Stop finishes transcription.
+Instructions are never sent automatically.
 Cancel discards unfinished speech; closing the composer, switching chats or hiding
 the tab closes the microphone and WebSocket. Sessions are limited to two minutes
 and 8 MiB of audio. Completed text remains in the draft.
 
-Choose an input from the Microphone selector; Find microphones requests permission
-and refreshes device names. The selection is saved in this browser and can be changed
-while recording. An input-level meter distinguishes a live microphone from a silent
-or incorrect input. A missing device produces a prompt to choose another input.
+The microphone selector appears only during recording, once permission is granted.
+Its selection is saved in this browser and can be changed while recording.
+The idle composer shows only the microphone button; there is no listening status row.
+A recording toolbar replaces the normal composer actions with Cancel, a scrolling
+amplitude waveform, and Stop. New audio enters at the right and moves left, following
+the dsh-speech recording UX. Reduced-motion preferences show a stationary level.
+Long dictation follows the latest words unless you scroll back.
+The waveform distinguishes a live microphone from a silent or incorrect input.
+An unavailable saved microphone falls back to the system default.
 Automatic voice detection delivers completed phrases during pauses. Stop requests a
 commit, then uses a bounded close fallback if completion stalls; the latest partial
 words are retained. Silent input produces a microphone hint rather than a timeout.
