@@ -14,7 +14,7 @@ export function speechAllowed(user: string): boolean {
 export function speechConfig(): SpeechConfig {
   return {
     apiKey: process.env.ALLMODELS_API_KEY?.trim() || undefined,
-    model: process.env.ALLMODELS_STT_MODEL?.trim() || "deepgram/nova-3",
+    model: process.env.ALLMODELS_STT_MODEL?.trim() || "assemblyai/universal-3-5-pro-realtime",
     language: process.env.ALLMODELS_STT_LANGUAGE?.trim() || undefined,
   };
 }

@@ -6,7 +6,7 @@ import { createSpeechHandler } from "../server/speech.ts";
 async function fixture(configured = true, user = "alice") {
   const handler = createSpeechHandler(() => ({
     apiKey: configured ? "browser-test-key" : undefined,
-    model: "deepgram/nova-3",
+    model: "assemblyai/universal-3-5-pro-realtime",
     language: "en",
   }));
   const server = createServer((_req, res) => handler(res, user));
@@ -25,7 +25,11 @@ test("signed-in users receive browser streaming credentials without caching", as
     const res = await fetch(app.url);
     assert.equal(res.status, 200);
     assert.equal(res.headers.get("cache-control"), "no-store");
-    assert.deepEqual(await res.json(), { apiKey: "browser-test-key", model: "deepgram/nova-3", language: "en" });
+    assert.deepEqual(await res.json(), {
+      apiKey: "browser-test-key",
+      model: "assemblyai/universal-3-5-pro-realtime",
+      language: "en",
+    });
   } finally {
     await app.close();
   }

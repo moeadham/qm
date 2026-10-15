@@ -406,7 +406,7 @@ Optional web-ui environment settings:
 
 | Variable                 | Default           | Purpose                                                                        |
 | ------------------------ | ----------------- | ------------------------------------------------------------------------------ |
-| `ALLMODELS_STT_MODEL`    | `deepgram/nova-3` | AllModels model supporting realtime transcription and voice activity detection |
+| `ALLMODELS_STT_MODEL`    | `assemblyai/universal-3-5-pro-realtime` | AllModels model supporting realtime transcription and voice activity detection |
 | `ALLMODELS_STT_LANGUAGE` | unset             | Optional ISO language code                                                     |
 
 Use HTTPS (localhost also works) and allow microphone access in the browser.

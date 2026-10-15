@@ -93,7 +93,7 @@ function fixture(t: TestContext, getUserMedia?: () => Promise<MediaStream>) {
     error: (error) => errors.push(error),
     configure: async (signal) => {
       configSignal = signal;
-      return { apiKey: "browser-test-key", model: "deepgram/nova-3", language: "en" };
+      return { apiKey: "browser-test-key", model: "assemblyai/universal-3-5-pro-realtime", language: "en" };
     },
   });
   t.after(() => input.cancel());
@@ -408,7 +408,7 @@ test("the microphone preference survives a new controller", async (t) => {
     text: () => {},
     preview: () => {},
     error: () => {},
-    configure: async () => ({ apiKey: "test", model: "deepgram/nova-3" }),
+    configure: async () => ({ apiKey: "test", model: "assemblyai/universal-3-5-pro-realtime" }),
   });
   assert.equal(second.selectedMicrophone, "remembered-mic");
   await second.selectMicrophone("");
