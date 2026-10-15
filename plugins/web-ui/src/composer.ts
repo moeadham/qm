@@ -849,9 +849,18 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                 <span role="status"
                   >${speech.state === "starting" ? "Connecting microphone…" : "Finishing transcription…"}</span
                 >
-                <button type="button" class="icon-btn" aria-label="Cancel dictation" @click=${() => speech.cancel()}>
-                  ${icon(X, 18)}
-                </button>
+                ${
+                  speech.state === "starting"
+                    ? html`<button
+                        type="button"
+                        class="icon-btn"
+                        aria-label="Cancel dictation"
+                        @click=${() => speech.cancel()}
+                      >
+                        ${icon(X, 18)}
+                      </button>`
+                    : nothing
+                }
                 ${sendControls(agent, true)}
               </div>`
             : nothing
