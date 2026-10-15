@@ -1,3 +1,4 @@
+import { awsCoreHostnames } from "./aws-routing.ts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -22,6 +23,7 @@ const DERIVED_VARS = new Set([
   "transfer_lifecycle_prefix",
   "deploy_microvm_image",
   "deploy_microvm_execution_role_arn",
+  "db_instance_class",
   "services",
   "secret_names",
 ]);
@@ -155,21 +157,7 @@ function derivedValues(
       "the vendored AWS scaffold predates aws.deployEnvironment; update infra/variables.tf and infra/main.tf from the current scaffold before configuring it",
     );
   }
-  const corePublicHosts: string[] = [];
-  if (config.services.includes("portal")) {
-    const publicHost = new URL(config.publicUrl).hostname.toLowerCase();
-    if (config.apiUrl) {
-      const apiHost = new URL(config.apiUrl).hostname.toLowerCase();
-      if (apiHost !== publicHost) corePublicHosts.push(apiHost);
-    }
-    const appsDomain = config.env.core?.AWS_DEPLOY_APPS_DOMAIN?.trim().toLowerCase().replace(/\.$/, "");
-    if (appsDomain) {
-      if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(appsDomain)) {
-        throw new CliError(`env.core.AWS_DEPLOY_APPS_DOMAIN ${JSON.stringify(appsDomain)} is not a valid DNS domain`);
-      }
-      corePublicHosts.push(`*.${appsDomain}`);
-    }
-  }
+  const corePublicHosts = config.services.includes("portal") ? awsCoreHostnames(config) : [];
   if (corePublicHosts.length && !declared.includes("core_public_hosts")) {
     throw new CliError(
       "the vendored AWS scaffold predates split portal/core host routing; update infra/variables.tf and infra/main.tf from the current scaffold before configuring apiUrl or AWS_DEPLOY_APPS_DOMAIN",
@@ -212,9 +200,12 @@ function derivedValues(
       ...(declared.includes("github_environment") ? { github_environment: aws.deployEnvironment ?? "" } : {}),
       object_store_bucket: awsObjectStoreBucket(config),
       transfer_lifecycle_prefix: `${config.env.core?.S3_PREFIX ?? ""}transfer/`,
-      deploy_microvm_image: config.env.core!.AWS_DEPLOY_IMAGE!,
+      deploy_microvm_image: config.env.core?.AWS_DEPLOY_IMAGE?.trim() || config.orgId,
       deploy_microvm_execution_role_arn:
         config.env.core?.AWS_DEPLOY_EXEC_ROLE_ARN ?? `arn:aws:iam::${aws.accountId}:role/${aws.cluster}-microvm-exec`,
+      ...(declared.includes("db_instance_class") && aws.dbInstanceClass
+        ? { db_instance_class: aws.dbInstanceClass }
+        : {}),
     },
     json: {
       ...(declared.includes("core_public_hosts") ? { core_public_hosts: [...new Set(corePublicHosts)].sort() } : {}),
@@ -245,6 +236,10 @@ export function terraformVars(
   const { strings, json } = derivedValues(config, declared, managedTaskRoles(existing));
   const line = (name: string, value: string): string => `${name.padEnd(19)} = ${value}`;
   const lines = Object.entries(strings).map(([name, value]) => line(name, JSON.stringify(value)));
+  if (!config.aws?.dbInstanceClass && declared.includes("db_instance_class")) {
+    const preserved = hclAssignment(existing, "db_instance_class");
+    if (preserved !== undefined) lines.push(preserved);
+  }
   for (const name of new Set([...Object.keys(OPERATOR_DEFAULTS), ...declared])) {
     if (DERIVED_VARS.has(name)) continue;
     const preserved = hclAssignment(existing, name);
@@ -284,13 +279,22 @@ export function assertTerraformScaffoldSupportsConfig(config: QmConfig, configDi
   const services = Object.values(config.aws?.services ?? {});
   const hasPublicPaths = services.some((service) => service?.publicPaths?.length);
   const hasAssumeRoles = services.some((service) => service?.assumeRoleArns !== undefined);
-  if (!hasPublicPaths && !hasAssumeRoles) return;
+  const hasDatabaseOverrides = config.aws?.dbInstanceClass !== undefined;
+  if (!hasPublicPaths && !hasAssumeRoles && !hasDatabaseOverrides) return;
   const tfvarsPath = join(configDir, "infra", "terraform.tfvars");
   if (!existsSync(tfvarsPath)) return;
   const variablesPath = join(configDir, "infra", "variables.tf");
   const mainPath = join(configDir, "infra", "main.tf");
   const variables = existsSync(variablesPath) ? readFileSync(variablesPath, "utf8") : "";
   const main = existsSync(mainPath) ? readFileSync(mainPath, "utf8") : "";
+  if (
+    hasDatabaseOverrides &&
+    (!/variable\s+"db_instance_class"/.test(variables) || !/instance_class\s*=\s*var\.db_instance_class/.test(main))
+  ) {
+    throw new CliError(
+      "the vendored AWS scaffold predates aws.dbInstanceClass; update infra/variables.tf and infra/main.tf from the current scaffold before configuring it",
+    );
+  }
   if (hasPublicPaths && (!/public_paths\s*=\s*optional/.test(variables) || !/public_path_services\s*=/.test(main))) {
     throw new CliError(
       "the vendored AWS scaffold predates aws.services.*.publicPaths; update infra/variables.tf and infra/main.tf before exposing plugins",

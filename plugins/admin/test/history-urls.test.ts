@@ -1,3 +1,5 @@
+import { litFixture } from "./lit-fixture.ts";
+import { renderDesign } from "./design-source.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -26,8 +28,10 @@ function routerAt(pathname: string, search = "", base = "/admin") {
   );
   return factory(
     base,
-    new Set(["history", "files", "memory", "live", "audit", "errors", "skills", "crons", "deployments"]),
+    new Function(`${html.match(/const SCOPED = new Set\(\[[\s\S]*?\]\);/)?.[0]}; return SCOPED;`)(),
     [
+      "connectors",
+      "slack-settings",
       "history",
       "files",
       "memory",
@@ -40,6 +44,7 @@ function routerAt(pathname: string, search = "", base = "/admin") {
       "slack",
       "judgments",
       "user",
+      "spend",
     ],
     "history",
     (scopeId: string) => String(scopeId || "").split(":")[0] || "scope",
@@ -50,11 +55,13 @@ function routerAt(pathname: string, search = "", base = "/admin") {
     stateToUrl: (st: Record<string, unknown>) => string;
     urlToState: () => {
       view: string;
+      setup: string | null;
       scope: string;
       session: string | null;
       historyKind: string;
       cron: string | null;
       turn: string | null;
+      range: string | null;
       page: number;
     };
   };
@@ -84,6 +91,18 @@ test("scoped history addresses the scope as a path segment; kind stays a query p
     `/admin/history/scopes/${SCOPE_ENC}?cron=c1&kind=cron&page=2`,
   );
   assert.equal(stateToUrl({ view: "history", scope: "org:acme", session: null }), "/admin/history");
+});
+
+test("the spend window round-trips through the URL so Back restores the prior range", () => {
+  const { stateToUrl } = routerAt("/admin/spend");
+  assert.equal(stateToUrl({ view: "spend", scope: "org:acme", range: "7d" }), "/admin/spend?range=7d");
+  assert.equal(stateToUrl({ view: "spend", scope: "org:acme", range: null }), "/admin/spend");
+  const router = routerAt("/admin/spend", "?range=90d");
+  const st = router.urlToState();
+  assert.equal(st.view, "spend");
+  assert.equal(st.range, "90d");
+  assert.equal(router.stateToUrl(st), "/admin/spend?range=90d");
+  assert.equal(routerAt("/admin/spend").urlToState().range, null);
 });
 
 test("non-history views keep their query-param scope", () => {
@@ -128,11 +147,7 @@ test("a mangled ?scopecom link still lands on the session and canonicalizes", ()
 
 test("session deep-link entries synthesize a list back-stop and repair it from the session's own scope", () => {
   assert.match(html, /history\.pushState\(\{ \.\.\.st, deepLink: true \}, "", stateToUrl\(st\)\);/);
-  assert.match(
-    html,
-    /if \(history\.state\?\.deepLink\)\s*go\(\{ view: "history", scope: sessionScope \|\| scope, session: null, historyKind \}\);\s*else history\.back\(\);/,
-  );
-  assert.match(html, /onClick: backToList\(session\.scopeId\)/);
+  assert.match(html, /governanceUI.transcript.show/);
 });
 
 test("a scope whose encoding the portal would reject stays in the query form", () => {
@@ -151,11 +166,39 @@ test("an undecodable scope segment falls back instead of throwing", () => {
   assert.equal(st.scope, "org:acme");
 });
 
-test("cron fire rows surface the fire's result digest and keep the silent styling", () => {
-  assert.match(html, /\} else if \(isBackground && s\.result\) \{\s*name = s\.result;/);
-  assert.match(html, /previewText = s\.result \|\| s\.lastMessage \|\| s\.firstMessage \|\| "";/);
-  assert.match(html, /s\.result \|\| "\(no messages\)"/);
-  assert.match(html, /isBackground && typeof s\.delivered === "number" && !s\.delivered \? "history-silent" : ""/);
+test("cron fire rows surface the result digest and retain silent styling", () => {
+  const f = litFixture();
+  f.ui.history.history(
+    f.root,
+    {
+      sessions: [
+        { id: "fire1", category: "background", result: "Digest result", lastMessage: "Tool chatter", delivered: 0 },
+      ],
+      total: 1,
+    },
+    {
+      historyKind: "cron",
+      cron: "job1",
+      scope: "org:acme",
+      orgScope: "org:acme",
+      environments: [],
+      historyKindMatches: () => true,
+      pageSize: 50,
+      correctPage() {},
+      historyModeLabel: () => "Crons",
+      kindLabels: { conversation: "Conversations", cron: "Crons" },
+      pageShell() {},
+      cronName: () => "Job",
+      scopeKind: () => "org",
+      plural: String,
+      stateToUrl: () => "/session/fire1",
+      go() {},
+    },
+  );
+  assert.equal(f.root.querySelector(".dense-name")!.textContent, "Digest result");
+  assert.equal(f.root.querySelector(".dense-preview")!.textContent, "Tool chatter");
+  assert.ok(f.root.querySelector(".history-silent"));
+  f.dom.window.close();
 });
 
 test("a bare history URL is the org scope, not whatever scope was viewed last", () => {
@@ -181,3 +224,49 @@ test("Errors pagination round-trips arbitrary pages without losing scope", () =>
     `/admin/errors?scope=${SCOPE_ENC}&page=37`,
   );
 });
+
+test("Slack setup links select Slack settings and preserve the guide through canonical routing", () => {
+  for (const pathname of ["/admin", "/admin/", "/admin/connectors"]) {
+    const { stateToUrl, urlToState } = routerAt(pathname, "?setup=slack");
+    const state = urlToState();
+    assert.equal(state.view, "slack-settings");
+    assert.equal(state.setup, "slack");
+    assert.equal(stateToUrl(state), "/admin/slack-settings?setup=slack");
+  }
+  const { stateToUrl } = routerAt("/admin/connectors", "?setup=slack");
+  assert.equal(stateToUrl({ view: "connectors" }), "/admin/connectors");
+  assert.equal(stateToUrl({ view: "files", setup: "slack" }), "/admin/files");
+});
+
+test("navigation drops retired design parameters while retaining route state", () => {
+  const { stateToUrl } = routerAt("/admin/history", "?variant=original");
+  assert.equal(
+    stateToUrl({ view: "history", scope: SCOPE, session: "sess-1", turn: 4 }),
+    "/admin/history/s/sess-1?turn=4",
+  );
+  assert.equal(stateToUrl({ view: "files", scope: SCOPE }), `/admin/files?scope=${SCOPE_ENC}`);
+});
+
+for (const base of ["", "/admin", "/control"]) {
+  test(`catalog live links use the configured base (${base || "root"})`, () => {
+    const { stateToUrl } = routerAt(`${base}/design-system`, "", base);
+    const dom = renderDesign(stateToUrl, SCOPE);
+    const links = [...dom.window.document.querySelectorAll<HTMLAnchorElement>(".design-page-links a")];
+    assert.deepEqual(
+      links.map((link) => link.dataset.designView),
+      ["governance", "skills", "files", "history", "audit", "egress"],
+    );
+    assert.deepEqual(
+      links.map((link) => link.getAttribute("href")),
+      [
+        `${base}/governance?scope=${SCOPE_ENC}`,
+        `${base}/skills?scope=${SCOPE_ENC}`,
+        `${base}/files?scope=${SCOPE_ENC}`,
+        `${base}/history/scopes/${SCOPE_ENC}`,
+        `${base}/audit?scope=${SCOPE_ENC}`,
+        `${base}/egress?scope=${SCOPE_ENC}`,
+      ],
+    );
+    dom.window.close();
+  });
+}

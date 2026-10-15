@@ -19,7 +19,12 @@ export interface ScopeMembershipDeps {
     channelMembership?(channelId: string, principalId: string): Promise<boolean | undefined>;
     groupMembership?(groupId: string, principalId: string): Promise<boolean | undefined>;
     channelPrivacy?(channelId: string): Promise<boolean | undefined>;
+    conversationMembers?(
+      kind: "channel" | "group",
+      id: string,
+    ): Promise<Array<{ principalId: string; displayName?: string; type: string }> | undefined>;
     list?(): Promise<Array<{ principalId: string; displayName?: string }>>;
+    get?(principalId: string): Promise<{ principalId?: string; slackId?: string } | null>;
   };
   identity?: {
     classify(externalId: string, isExternalGuest?: boolean): { type?: string; teamIds?: readonly string[] };
@@ -39,11 +44,15 @@ async function currentSharedScopeMember(
   principalId: string,
 ): Promise<boolean> {
   if (!activePrincipal(deps, principalId)) return false;
+  const member = await deps.directory?.get?.(principalId).catch(() => null);
+  const ids = [...new Set([principalId, member?.principalId, member?.slackId].filter((id): id is string => !!id))];
   if (kind === "group" && deps.managedGroups?.recognizes(ref)) {
-    return (await deps.managedGroups.membership(ref, principalId).catch(() => false)) === true;
+    for (const id of ids) if ((await deps.managedGroups.membership(ref, id).catch(() => false)) === true) return true;
+    return false;
   }
   const direct = kind === "channel" ? deps.directory?.channelMember : deps.directory?.groupMember;
-  return (await direct?.call(deps.directory, ref, principalId).catch(() => false)) === true;
+  for (const id of ids) if ((await direct?.call(deps.directory, ref, id).catch(() => false)) === true) return true;
+  return false;
 }
 
 async function sharedScopeMembership(
@@ -92,9 +101,18 @@ export function createIsCurrentSharedScopeMember(deps: ScopeMembershipDeps): IsC
   };
 }
 
+export function withLiveTurnMembership(
+  stored: IsCurrentSharedScopeMember | undefined,
+  turn: { actorId: string; scopeId: ScopeId; verified: boolean },
+): IsCurrentSharedScopeMember {
+  return async (principalId, scope) =>
+    (turn.verified && scope === turn.scopeId && samePerson(principalId, turn.actorId)) ||
+    (await stored?.(principalId, scope)) === true;
+}
+
 export type CurrentScopeMembers = (scope: ScopeId) => Promise<Principal[] | undefined>;
 
-export function createCurrentScopeMembers(deps: ScopeMembershipDeps): CurrentScopeMembers {
+export function createCurrentScopeMembers(deps: ScopeMembershipDeps, requireComplete = false): CurrentScopeMembers {
   const principal = (id: string, displayName?: string): Principal | null => {
     const classified = deps.identity?.classify(id);
     if (classified?.type !== undefined && classified.type !== "internal") return null;
@@ -112,7 +130,16 @@ export function createCurrentScopeMembers(deps: ScopeMembershipDeps): CurrentSco
 
     if (kind === "group" && deps.managedGroups?.recognizes(ref)) {
       const memberIds = await deps.managedGroups.members(ref);
-      return (memberIds ?? []).map((id) => principal(id)).filter((member): member is Principal => member !== null);
+      const members = (memberIds ?? []).map((id) => principal(id));
+      if (requireComplete && (!memberIds?.length || members.some((member) => member === null))) return undefined;
+      return members.filter((member): member is Principal => member !== null);
+    }
+
+    if (requireComplete) {
+      const roster = await deps.directory?.conversationMembers?.(kind, ref);
+      if (!roster?.length || roster.some((member) => member.type !== "internal")) return undefined;
+      const members = roster.map((member) => principal(member.principalId, member.displayName));
+      return members.some((member) => member === null) ? undefined : (members as Principal[]);
     }
 
     if (!deps.directory?.list) return undefined;

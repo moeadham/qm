@@ -1,3 +1,5 @@
+import { getRuntimeConfig } from "./runtime-config-store.ts";
+import type { RuntimeConfig } from "./core-bridge.ts";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getBaseModel, type ModelMetadata } from "./pi-models.ts";
 
@@ -10,6 +12,7 @@ export interface ModelOption {
   label: string;
   buttonLabel: string;
   groupLabel: string;
+  displayProvider?: string;
 }
 
 const HARNESS_LABELS: Record<string, string> = {
@@ -21,6 +24,7 @@ const HARNESS_LABELS: Record<string, string> = {
 };
 
 const PROVIDER_LABELS: Record<string, string> = {
+  "qm:gateway": "Gateway",
   anthropic: "Anthropic",
   openai: "OpenAI",
   openrouter: "OpenRouter",
@@ -46,6 +50,24 @@ function providerLabel(id: string, name: string, provider: string): string {
   );
 }
 
+function gatewayPresentation(id: string, provider: string): { label: string; provider: string } | null {
+  if (provider !== "qm:gateway" || !id.startsWith("gateway/")) return null;
+  const name = id.split("/").at(-1)!;
+  const family = /^(claude|gpt|gemini)-(.+)$/.exec(name);
+  if (!family) return null;
+  const words = family[2]!.replace(/^((?:[a-z]+-)*)(\d+)-(\d+)(?=-|$)/, "$1$2.$3").split("-");
+  const title = words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+  const brand = {
+    claude: { prefix: "", provider: "anthropic" },
+    gpt: { prefix: "GPT-", provider: "openai" },
+    gemini: { prefix: "Gemini ", provider: "google" },
+  }[family[1] as "claude" | "gpt" | "gemini"];
+  return {
+    label: brand.prefix + title,
+    provider: brand.provider,
+  };
+}
+
 function buildOption(
   id: string,
   harnessId = "pi",
@@ -57,13 +79,27 @@ function buildOption(
     const meta = dynamic ? { label: dynamic.label, buttonLabel: dynamic.buttonLabel } : null;
     if (!meta) return null;
     const model = getBaseModel(id, dynamic);
+    const presentation = gatewayPresentation(id, String(model.provider));
     return {
       value: qualified ? `${harnessId}:${id}` : id,
       harnessId,
       harnessLabel: HARNESS_LABELS[harnessId] ?? harnessId,
       model,
       ...meta,
-      groupLabel: providerLabel(id, meta.label, dynamic?.provider ?? String(model?.provider ?? model?.api ?? "other")),
+      ...(presentation
+        ? {
+            label: [id, id.slice("gateway/".length)].includes(meta.label) ? presentation.label : meta.label,
+            buttonLabel: [id, id.slice("gateway/".length)].includes(meta.buttonLabel)
+              ? presentation.label
+              : meta.buttonLabel,
+            displayProvider: presentation.provider,
+          }
+        : {}),
+      groupLabel: providerLabel(
+        id,
+        meta.label,
+        presentation?.provider ?? dynamic?.provider ?? String(model?.provider ?? model?.api ?? "other"),
+      ),
     };
   } catch {
     return null;
@@ -93,12 +129,20 @@ interface RuntimeOptions {
 }
 
 const FALLBACK: RuntimeOptions = { options: [], defaultValue: null };
-const byScope = new Map<string, RuntimeOptions>();
-let lastApplied: RuntimeOptions = FALLBACK;
+const derived = new WeakMap<RuntimeConfig, RuntimeOptions>();
 
 function runtimeFor(scopeKey?: string | null): RuntimeOptions {
-  if (scopeKey === undefined) return lastApplied;
-  return (scopeKey !== null ? byScope.get(scopeKey) : undefined) ?? FALLBACK;
+  const config = getRuntimeConfig(scopeKey);
+  if (!config) return FALLBACK;
+  let options = derived.get(config);
+  if (!options) {
+    options = {
+      options: runtimeModelOptions(config.approvedHarnesses, config.modelsByHarness, config.modelCatalog),
+      defaultValue: `${config.effective.harnessId}:${config.effective.modelId}`,
+    };
+    derived.set(config, options);
+  }
+  return options;
 }
 
 export function getModelOptions(scopeKey?: string | null): ModelOption[] {
@@ -112,10 +156,6 @@ export function getHarnessOptions(scopeKey?: string | null): Array<{ value: stri
   );
 }
 
-export function getModelOptionsForHarness(harnessId: string, scopeKey?: string | null): ModelOption[] {
-  return runtimeFor(scopeKey).options.filter((option) => option.harnessId === harnessId);
-}
-
 export function runtimeModelOptions(
   approvedHarnesses: readonly string[],
   modelsByHarness: Readonly<Record<string, readonly string[]>>,
@@ -124,19 +164,6 @@ export function runtimeModelOptions(
   return approvedHarnesses.flatMap((harnessId) =>
     buildOptions(modelsByHarness[harnessId] ?? [], harnessId, true, catalog),
   );
-}
-
-export function applyRuntimeOptions(
-  scopeKey: string | null,
-  approvedHarnesses: readonly string[],
-  modelsByHarness: Readonly<Record<string, readonly string[]>>,
-  effective: { harnessId: string; modelId: string },
-  catalog: Readonly<Record<string, ModelMetadata>> = {},
-): void {
-  const options = runtimeModelOptions(approvedHarnesses, modelsByHarness, catalog);
-  const applied = { options, defaultValue: `${effective.harnessId}:${effective.modelId}` };
-  lastApplied = applied;
-  if (scopeKey !== null) byScope.set(scopeKey, applied);
 }
 
 export function defaultModelValue(scopeKey?: string | null): ModelOptionValue {
@@ -148,35 +175,12 @@ export function transcriptModel(scopeKey?: string | null): Model<Api> | undefine
   return options.find((o) => o.value === defaultValue)?.model;
 }
 
-export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max" | "ultracode" | "auto";
-
-export const EFFORT_LEVELS: Array<{ value: EffortLevel; label: string }> = [
-  { value: "auto", label: "Auto" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "XHigh" },
-  { value: "max", label: "Max" },
-  { value: "ultracode", label: "Ultracode" },
-];
-
-export function effortLabel(level: EffortLevel): string {
-  return EFFORT_LEVELS.find((option) => option.value === level)?.label ?? level;
-}
-
-export function harnessSupportsEffort(harnessId: string): boolean {
-  return harnessId === "pi" || harnessId === "codex" || harnessId === "claude";
-}
-
-export function harnessSupportsFastMode(harnessId: string): boolean {
-  return harnessId === "pi" || harnessId === "claude";
-}
-
-export function harnessSupportsSteer(harnessId: string): boolean {
-  return harnessId === "pi" || harnessId === "claude" || harnessId === "codex" || harnessId === "opencode";
-}
-
-export function defaultEffortForModel(model: Model<Api> | undefined): EffortLevel {
-  const provider = String(model?.provider ?? model?.api ?? "").toLowerCase();
-  return provider.includes("anthropic") ? "low" : "auto";
-}
+export {
+  EFFORT_LEVELS,
+  defaultEffortForModel,
+  effortLabel,
+  harnessSupportsEffort,
+  harnessSupportsFastMode,
+  harnessSupportsSteer,
+  type EffortLevel,
+} from "./runtime-capabilities.ts";

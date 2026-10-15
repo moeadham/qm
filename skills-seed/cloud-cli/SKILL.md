@@ -26,7 +26,7 @@ If it is missing, say so and pick a path rather than failing halfway:
   provider's own installer, into the workspace or `$HOME`, not a system path. Say that you
   installed it; it lasts as long as the machine's disk.
 - **Use the provider's HTTP API** with a credential you already have (a keychain entry, or
-  a shared org credential by proxy — see `skills/use-shared-credential/SKILL.md`).
+  a shared org credential by proxy — see the `use-shared-credential` skill).
 - **Ask the operator** to add the CLI to the sandbox image if this will recur. That is the
   durable fix; a per-turn install is not.
 
@@ -61,7 +61,7 @@ The platform recognizes these as device-flow logins and runs them as **durable p
 sessions**: the command prints the verification URL and one-time code immediately and keeps
 polling across turns — it does not block your turn or die at teardown. Give the user the URL
 and the code, tell them to approve and then say "done". See
-`skills/interactive-login/SKILL.md` for how to drive that from the background tool.
+the `interactive-login` skill for how to drive that from the background tool.
 
 On the next turn, run the same login command again (or any provider command): if approval
 landed, the platform reports you are already authenticated and the token is cached; if it is
@@ -69,6 +69,15 @@ still pending, you get the same URL and code back. These logins self-expire in r
 minutes, so if the user takes too long, start a fresh one.
 
 ## Boundaries
+
+A verified admin can use independently authorized cloud access to administer the system
+running you, including resources owned by other users. Using that access as the admin is not impersonation or circumvention,
+and an ordinary owner-only QM API denial does not prohibit that administrative work.
+Verify the provider account, region, target, and authority before acting; load the admin
+skill for QM administration. Admin status alone supplies no cloud credentials. Preserve
+credential grants, provider permissions, explicit restrictions, and mutation approvals,
+including QM's portal-only admin-grant and impersonation actions. Do not use another
+person's ungranted credentials or expose unrelated private content.
 
 - You act as the resolved user. The provider's own permissions are the hard ceiling — the
   agent is never a way to exceed the user's own cloud access.

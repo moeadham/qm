@@ -33,7 +33,8 @@ import { createMemoryRunSignalStore } from "../src/runs/run-signal-store.ts";
 import { NonRetryableTurnError } from "../src/core/turn-error.ts";
 import type { ScopeId, Session, SessionEntry } from "../src/types.ts";
 import { createMemoryTaskStore } from "../src/tasks/memory-task-store.ts";
-import { CodexAppServer, redactCodexDiagnostics } from "../src/harness/codex-app-server.ts";
+import { CodexAppServer } from "../src/harness/codex-app-server.ts";
+import { redactSecrets } from "../src/harness/redact-secrets.ts";
 import { DEFAULT_CODEX_MODEL_ID } from "../src/model/pi-models.ts";
 import { readCodexOAuthAuthFile } from "../src/harness/codex-auth.ts";
 import { acquireCodexOAuthAuthLock } from "../src/harness/codex-auth.ts";
@@ -68,7 +69,7 @@ test("Codex replay keeps paired tool ids within the provider's 64-character limi
   assert.equal(codexReplayCallId("short-id"), "short-id");
 });
 
-function fakeCodexBinary(dir: string): string {
+function fakeCodexBinary(dir: string, commentary = false, coordinator = false): string {
   const path = join(dir, "fake-codex");
   writeFileSync(
     path,
@@ -84,15 +85,27 @@ rl.on("line", (line) => {
     if (msg.params.sandbox !== "read-only" || msg.params.approvalPolicy !== "never" || !Array.isArray(msg.params.dynamicTools) ||
         !Array.isArray(msg.params.environments) || msg.params.environments.length !== 0 ||
         msg.params.config?.features?.shell_tool !== false || msg.params.config?.features?.unified_exec !== false ||
+        msg.params.config?.features?.goals !== false ||
         process.env.CORE_SIGNING_SECRET || process.env.DATABASE_URL || process.env.HOME !== msg.params.cwd ||
         !process.env.CODEX_HOME?.startsWith(msg.params.cwd)) {
       return send({ id: msg.id, error: { code: -1, message: "unsafe or missing adapter settings" } });
+    }
+    if (${coordinator} && (msg.params.config?.features?.multi_agent !== false || msg.params.dynamicTools.some(tool => ["execute", "background"].includes(tool.name)))) {
+      return send({ id: msg.id, error: { code: -1, message: "coordinator exposes command or native delegation tools" } });
     }
     return send({ id: msg.id, result: { thread: { id: "thread-1" }, model: "fake-model" } });
   }
   if (msg.method === "thread/inject_items") return send({ id: msg.id, result: {} });
   if (msg.method === "turn/start") {
     send({ id: msg.id, result: { turn: { id: "turn-1", status: "inProgress", items: [] } } });
+    if (${commentary}) {
+      for (const id of ["ack-1", "ack-2"]) {
+        send({ method: "item/started", params: { threadId: "thread-1", item: { type: "agentMessage", id, phase: "commentary" } } });
+        send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", itemId: id, delta: "Checking." } });
+        send({ method: "item/completed", params: { threadId: "thread-1", item: { type: "agentMessage", id, text: "Checking.", phase: "commentary" } } });
+      }
+      send({ method: "item/started", params: { threadId: "thread-1", item: { type: "agentMessage", id: "item-1", phase: "final_answer" } } });
+    }
     send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", tokenUsage: { total: { inputTokens: 100 }, last: { inputTokens: 100 } } } });
     send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", tokenUsage: { total: { inputTokens: 100 }, last: { inputTokens: 100 } } } });
     send({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: { type: "collabAgentToolCall", id: "collab-1", tool: "spawnAgent", status: "inProgress", senderThreadId: "thread-1", receiverThreadIds: ["child-1"], prompt: "return ALPHA", agentsStates: { "child-1": { status: "running", message: null } } } } });
@@ -203,6 +216,31 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 process.stdin.resume();
+`,
+  );
+  chmodSync(path, 0o755);
+  return path;
+}
+
+function pendingThreadStartCodexBinary(dir: string): string {
+  const path = join(dir, "pending-thread-start-codex");
+  writeFileSync(
+    path,
+    `#!${process.execPath}
+const fs = require("node:fs");
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") return send({ id: msg.id, result: {} });
+  if (msg.method === "initialized") return;
+  if (msg.method === "thread/start") fs.writeFileSync(${JSON.stringify(join(dir, "thread-started"))}, "started");
+});
+process.on("SIGTERM", () => {
+  fs.writeFileSync(${JSON.stringify(join(dir, "closed"))}, "closed");
+  process.exit(0);
+});
 `,
   );
   chmodSync(path, 0o755);
@@ -405,9 +443,21 @@ rl.on("line", (line) => {
   const msg = JSON.parse(line);
   if (msg.method === "initialize") return send({ id: msg.id, result: {} });
   if (msg.method === "initialized") return;
+  if (msg.method === "account/login/start") {
+    const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
+    if (msg.params.type !== "chatgptAuthTokens" || msg.params.accessToken !== auth.tokens.access_token ||
+        msg.params.chatgptAccountId !== auth.tokens.account_id || "refreshToken" in msg.params) {
+      return send({ id: msg.id, error: { code: -1, message: "incorrect external account login" } });
+    }
+    fs.writeFileSync(path.join(process.env.CODEX_HOME, "external-login"), "ready");
+    return send({ id: msg.id, result: { type: "chatgptAuthTokens" } });
+  }
   if (msg.method === "thread/start") return send({ id: msg.id, result: { thread: { id: "thread-" + process.pid } } });
   if (msg.method === "turn/start") {
     const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
+    if (auth.tokens.account_id.startsWith("acct-") && !fs.existsSync(path.join(process.env.CODEX_HOME, "external-login"))) {
+      return send({ id: msg.id, error: { code: -1, message: "external account login missing" } });
+    }
     const reply = String(auth.tokens.account_id ?? "none") + ":" + String(Boolean(auth.tokens.refresh_token));
     send({ id: msg.id, result: { turn: { id: "turn-" + process.pid, status: "inProgress", items: [] } } });
     return setTimeout(() => send({ method: "turn/completed", params: { threadId: "thread-" + process.pid, turn: { id: "turn-" + process.pid, status: "completed", items: [{ type: "agentMessage", text: reply, phase: "final_answer" }] } } }), ${delayMs});
@@ -446,7 +496,7 @@ rl.on("line", (line) => {
 
 test("Codex forwards tool-result screening into its native tool bridge", () => {
   const screenToolResult: NonNullable<HarnessTurnInput["screenToolResult"]> = async () => ({ outcome: "allow" });
-  const ref = harnessToolContext({ screenToolResult } as HarnessTurnInput);
+  const ref = harnessToolContext({ screenToolResult, history: [] } as unknown as HarnessTurnInput);
   assert.equal(ref.screenToolResult, screenToolResult);
 });
 
@@ -682,12 +732,12 @@ test("Codex materializes ChatGPT OAuth auth as ephemeral child material without 
 
 test("Codex diagnostics redact credential-shaped stderr", () => {
   assert.equal(
-    redactCodexDiagnostics(
+    redactSecrets(
       '{"access_token":"access-secret","refresh_token":"refresh-secret"} Bearer bearer-secret-123456789 sk-secret-value',
     ),
     '{"access_token":"[redacted]","refresh_token":"[redacted]"} Bearer [redacted] [redacted]',
   );
-  const diagnostics = redactCodexDiagnostics(
+  const diagnostics = redactSecrets(
     "Authorization: Basic basic-secret-123456 Cookie: session-cookie-secret; Set-Cookie: refresh-cookie-secret; X-Api-Key: api-secret-123456 accessToken=camel-secret-123456 token=generic-secret-123456",
   );
   for (const secret of [
@@ -699,19 +749,19 @@ test("Codex diagnostics redact credential-shaped stderr", () => {
     "generic-secret-123456",
   ])
     assert.equal(diagnostics.includes(secret), false, secret);
-  const structured = redactCodexDiagnostics('authorization=["Bearer array-secret"] access_token="unterminated-secret');
+  const structured = redactSecrets('authorization=["Bearer array-secret"] access_token="unterminated-secret');
   assert.equal(structured.includes("array-secret"), false);
   assert.equal(structured.includes("unterminated-secret"), false);
-  const arrayDiagnostics = redactCodexDiagnostics('access_token=["first-array-secret","second-array-secret"]');
+  const arrayDiagnostics = redactSecrets('access_token=["first-array-secret","second-array-secret"]');
   assert.equal(arrayDiagnostics.includes("first-array-secret"), false);
   assert.equal(arrayDiagnostics.includes("second-array-secret"), false);
-  const malformedArray = redactCodexDiagnostics('access_token=["first-array-secret",\n"second-array-secret"');
+  const malformedArray = redactSecrets('access_token=["first-array-secret",\n"second-array-secret"');
   assert.equal(malformedArray.includes("first-array-secret"), false);
   assert.equal(malformedArray.includes("second-array-secret"), false);
-  const malformedObject = redactCodexDiagnostics('access_token={"a":"first-object-secret","b":"second-object-secret"}');
+  const malformedObject = redactSecrets('access_token={"a":"first-object-secret","b":"second-object-secret"}');
   assert.equal(malformedObject.includes("first-object-secret"), false);
   assert.equal(malformedObject.includes("second-object-secret"), false);
-  const nested = redactCodexDiagnostics(
+  const nested = redactSecrets(
     JSON.stringify({
       nested: { authorization: { header: "Bearer nested-secret" } },
       tokens: { access_token: ["one-secret"] },
@@ -719,8 +769,8 @@ test("Codex diagnostics redact credential-shaped stderr", () => {
   );
   assert.equal(nested.includes("nested-secret"), false);
   assert.equal(nested.includes("one-secret"), false);
-  assert.equal(redactCodexDiagnostics("id_token=header.payload.signature").includes("header.payload.signature"), false);
-  const generic = redactCodexDiagnostics(
+  assert.equal(redactSecrets("id_token=header.payload.signature").includes("header.payload.signature"), false);
+  const generic = redactSecrets(
     JSON.stringify({
       secret: "generic-secret",
       password: "generic-password",
@@ -909,53 +959,56 @@ test("Codex rejects malformed turn completion payloads", async (t) => {
 test("Codex children cannot use parent surface, control, or terminal tools", () => {
   assert.equal(codexChildToolAllowed("history"), true);
   assert.equal(codexChildToolAllowed("execute"), true);
-  for (const denied of ["slack", "cron", "webhook", "guidance", "share", "stay_silent", "finish_silently"]) {
+  for (const denied of ["slack", "cron", "webhook", "guidance", "share", "finish_silently"]) {
     assert.equal(codexChildToolAllowed(denied), false, denied);
   }
 });
 
-test("Codex interrupts the provider after a terminal QM tool", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "qm-codex-stop-test-"));
-  const harness = createCodexHarness({
-    binaryPath: terminatingCodexBinary(dir),
-    env: testHarnessEnv(dir),
-    turnWallClockMs: 2_000,
-  });
-  t.after(async () => {
-    await harness.turns.close?.();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const entries: SessionEntry[] = [];
-  const scope = { kind: "org", id: "test" } as unknown as ScopeId;
-  const result = await harness.turns.runTurn({
-    session: { id: "terminal-tool" } as Session,
-    input: "poll",
-    systemPrompt: "finish silently",
-    history: [],
-    tools: {} as HarnessTurnInput["tools"],
-    scopeLabel: scope,
-    orgScopeId: scope,
-    pollFire: true,
-    emit: async (entry) => {
-      const saved = {
-        ...entry,
-        sessionId: "terminal-tool",
-        seq: entries.length + 1,
-        createdAt: Date.now(),
-      } as SessionEntry;
-      entries.push(saved);
-      return saved;
-    },
-    recordModelCall: () => {},
-  });
+for (const surfaceTools of [false, true]) {
+  test(`Codex interrupts the provider after finish_silently (surface=${surfaceTools})`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "qm-codex-stop-test-"));
+    const harness = createCodexHarness({
+      binaryPath: terminatingCodexBinary(dir),
+      env: testHarnessEnv(dir),
+      turnWallClockMs: 2_000,
+    });
+    t.after(async () => {
+      await harness.turns.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const entries: SessionEntry[] = [];
+    const scope = { kind: "org", id: "test" } as unknown as ScopeId;
+    const result = await harness.turns.runTurn({
+      session: { id: "terminal-tool" } as Session,
+      input: "poll",
+      systemPrompt: "finish silently",
+      history: [],
+      tools: {} as HarnessTurnInput["tools"],
+      scopeLabel: scope,
+      orgScopeId: scope,
+      pollFire: !surfaceTools,
+      surfaceTools,
+      emit: async (entry) => {
+        const saved = {
+          ...entry,
+          sessionId: "terminal-tool",
+          seq: entries.length + 1,
+          createdAt: Date.now(),
+        } as SessionEntry;
+        entries.push(saved);
+        return saved;
+      },
+      recordModelCall: () => {},
+    });
 
-  assert.equal(result.silent, true);
-  assert.notEqual(result.reply, "BAD");
-  assert.equal(
-    entries.some((entry) => entry.type === "assistant"),
-    false,
-  );
-});
+    assert.equal(result.silent, true);
+    assert.notEqual(result.reply, "BAD");
+    assert.equal(
+      entries.some((entry) => entry.type === "assistant"),
+      false,
+    );
+  });
+}
 
 test("Codex spawn failure does not hang run or cleanup", async () => {
   const harness = createCodexHarness({ binaryPath: "/definitely/missing/qm-codex" });
@@ -1101,6 +1154,75 @@ test("cancelling an OAuth startup after spawn closes the provider", async (t) =>
   for (let attempt = 0; attempt < 50 && !existsSync(join(dir, "starts")); attempt += 1)
     await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(existsSync(join(dir, "starts")), true);
+  cancel.abort();
+  assert.deepEqual(await turn, { reply: "", stopped: true });
+  for (let attempt = 0; attempt < 100 && !existsSync(join(dir, "closed")); attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(readFileSync(join(dir, "closed"), "utf8"), "closed");
+});
+
+test("Codex classifies a thread/start deadline as a non-retryable timeout", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-thread-start-timeout-test-"));
+  const harness = createCodexHarness({
+    binaryPath: pendingThreadStartCodexBinary(dir),
+    env: testHarnessEnv(dir),
+    appServerStartTimeoutMs: 500,
+    turnWallClockMs: 0,
+  });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const scope = { kind: "org", id: "test" } as unknown as ScopeId;
+  await assert.rejects(
+    harness.turns.runTurn({
+      session: { id: "thread-start-timeout" } as Session,
+      input: "hi",
+      systemPrompt: "be concise",
+      history: [],
+      tools: {} as HarnessTurnInput["tools"],
+      scopeLabel: scope,
+      orgScopeId: scope,
+      emit: async (entry) =>
+        ({ ...entry, sessionId: "thread-start-timeout", seq: 1, createdAt: Date.now() }) as SessionEntry,
+      recordModelCall: () => {},
+    }),
+    (error: unknown) =>
+      error instanceof NonRetryableTurnError &&
+      /thread\/start request timed out/.test(error.message) &&
+      error.message !== "Codex app-server request cancelled",
+  );
+});
+
+test("cancelling a pending Codex thread/start is not relabeled as a startup timeout", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-cancel-thread-start-test-"));
+  const harness = createCodexHarness({
+    binaryPath: pendingThreadStartCodexBinary(dir),
+    env: testHarnessEnv(dir),
+    turnWallClockMs: 3_000,
+  });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const cancel = new AbortController();
+  const scope = { kind: "org", id: "test" } as unknown as ScopeId;
+  const turn = harness.turns.runTurn({
+    session: { id: "cancel-thread-start" } as Session,
+    input: "hi",
+    systemPrompt: "be concise",
+    history: [],
+    tools: {} as HarnessTurnInput["tools"],
+    scopeLabel: scope,
+    orgScopeId: scope,
+    cancel: cancel.signal,
+    emit: async (entry) =>
+      ({ ...entry, sessionId: "cancel-thread-start", seq: 1, createdAt: Date.now() }) as SessionEntry,
+    recordModelCall: () => {},
+  });
+  for (let attempt = 0; attempt < 100 && !existsSync(join(dir, "thread-started")); attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(existsSync(join(dir, "thread-started")), true);
   cancel.abort();
   assert.deepEqual(await turn, { reply: "", stopped: true });
   for (let attempt = 0; attempt < 100 && !existsSync(join(dir, "closed")); attempt += 1)
@@ -1446,7 +1568,7 @@ for (const mode of ["turnFailed", "startRejected"] as const) {
   });
 }
 
-function stopReportsFailedCodexBinary(dir: string): string {
+function stopReportsFailedCodexBinary(dir: string, stream = false, final = true): string {
   const path = join(dir, "stop-failed-codex");
   writeFileSync(
     path,
@@ -1462,10 +1584,23 @@ rl.on("line", (line) => {
   if (msg.method === "thread/start") return send({ id: msg.id, result: { thread: { id: "thread-sf" } } });
   if (msg.method === "turn/start") {
     send({ id: msg.id, result: { turn: { id: "turn-sf", status: "inProgress", items: [] } } });
+    if (${stream}) {
+      send({ method: "item/started", params: { threadId: "thread-sf", item: { id: "ack", type: "agentMessage", phase: "commentary" } } });
+      send({ method: "item/agentMessage/delta", params: { threadId: "thread-sf", itemId: "ack", delta: "Checking." } });
+      if (${final}) {
+      send({ method: "item/completed", params: { threadId: "thread-sf", item: { id: "ack", type: "agentMessage", phase: "commentary", text: "Checking." } } });
+      send({ method: "item/started", params: { threadId: "thread-sf", item: { id: "answer", type: "agentMessage", phase: "final_answer" } } });
+      send({ method: "item/agentMessage/delta", params: { threadId: "thread-sf", itemId: "answer", delta: "Partial answer" } });
+      }
+    }
     return writeFileSync(${JSON.stringify(join(dir, "started"))}, "1");
   }
   if (msg.method === "turn/interrupt") {
     send({ id: msg.id, result: {} });
+    if (${stream}) {
+      send({ method: "item/agentMessage/delta", params: { threadId: "thread-sf", itemId: "answer", delta: " LATE" } });
+      send({ method: "item/completed", params: { threadId: "thread-sf", item: { id: "answer", type: "agentMessage", phase: "final_answer", text: "BAD LATE COMPLETION" } } });
+    }
     return send({ method: "turn/completed", params: { threadId: "thread-sf", turn: { id: "turn-sf", status: "failed", error: { message: "turn interrupted" }, items: [] } } });
   }
 });
@@ -1693,6 +1828,7 @@ test(
             shell_tool: false,
             unified_exec: false,
             shell_snapshot: false,
+            goals: false,
             apps: false,
             plugins: false,
             browser_use: false,
@@ -1725,3 +1861,290 @@ test(
     assert.deepEqual(requests, []);
   },
 );
+
+test("Codex persists repeated public commentary in order with distinct streaming blocks", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-commentary-"));
+  const harness = createCodexHarness({ binaryPath: fakeCodexBinary(dir, true), env: testHarnessEnv(dir) });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const entries: SessionEntry[] = [];
+  const streamed: string[] = [];
+  const scope = "personal:test" as ScopeId;
+  const result = await harness.turns.runTurn({
+    session: { id: "commentary" } as Session,
+    input: "check",
+    systemPrompt: "be concise",
+    history: [],
+    tools: {} as HarnessTurnInput["tools"],
+    scopeLabel: scope,
+    orgScopeId: scope,
+    emit: async (entry) => {
+      const saved = {
+        ...entry,
+        sessionId: "commentary",
+        seq: entries.length + 1,
+        createdAt: Date.now(),
+      } as SessionEntry;
+      entries.push(saved);
+      return saved;
+    },
+    recordModelCall: () => {},
+    onDelta: (delta) => {
+      streamed.push(delta);
+    },
+    onTextBlockStart: async (phase) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      streamed.push(`block:${phase}`);
+    },
+  });
+  assert.equal(result.reply, "hello");
+  assert.deepEqual(
+    entries.filter((entry) => entry.type === "text").map((entry) => entry.payload),
+    [
+      { text: "Checking.", phase: "commentary" },
+      { text: "Checking.", phase: "commentary" },
+    ],
+  );
+  assert.deepEqual(streamed, [
+    "block:commentary",
+    "Checking.",
+    "block:commentary",
+    "Checking.",
+    "block:final_answer",
+    "hello",
+  ]);
+});
+
+for (const final of [true, false]) {
+  for (const mechanism of ["signal", "cancel", "both"] as const) {
+    test(`Codex saves only pre-stop ${final ? "final" : "commentary"} text via ${mechanism}`, async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "qm-codex-partial-stop-"));
+      const signals = createMemoryRunSignalStore();
+      const harness = createCodexHarness({
+        binaryPath: stopReportsFailedCodexBinary(dir, true, final),
+        env: testHarnessEnv(dir),
+        signals,
+        turnWallClockMs: 5_000,
+      });
+      t.after(async () => {
+        await harness.turns.close?.();
+        rmSync(dir, { recursive: true, force: true });
+      });
+      const cancel = new AbortController();
+      const received = Promise.withResolvers<void>();
+      const entries: SessionEntry[] = [];
+      const deltas: string[] = [];
+      const scope = "personal:test" as ScopeId;
+      const running = harness.turns.runTurn({
+        session: { id: "partial-stop" } as Session,
+        runId: "partial-stop-run",
+        input: "check",
+        systemPrompt: "be concise",
+        history: [],
+        tools: {} as HarnessTurnInput["tools"],
+        scopeLabel: scope,
+        orgScopeId: scope,
+        cancel: cancel.signal,
+        emit: async (entry) => {
+          const saved = {
+            ...entry,
+            sessionId: "partial-stop",
+            seq: entries.length + 1,
+            createdAt: Date.now(),
+          } as SessionEntry;
+          entries.push(saved);
+          return saved;
+        },
+        recordModelCall: () => {},
+        onDelta: (text) => {
+          deltas.push(text);
+          if (text === (final ? "Partial answer" : "Checking.")) received.resolve();
+        },
+      });
+      await received.promise;
+      if (mechanism === "cancel") cancel.abort();
+      else {
+        await signals.send("partial-stop-run", { kind: "abort" });
+        if (mechanism === "both") cancel.abort();
+      }
+      const result = await running;
+      assert.equal(result.stopped, true);
+      assert.equal(result.stoppedByUser, mechanism === "cancel" ? undefined : true);
+      assert.deepEqual(
+        entries.filter((entry) => entry.type === "text").map((entry) => entry.payload),
+        [{ text: "Checking.", phase: "commentary" }],
+      );
+      assert.equal(result.reply, final ? "Partial answer" : "");
+      assert.deepEqual(deltas, final ? ["Checking.", "Partial answer"] : ["Checking."]);
+      assert.deepEqual(
+        entries.filter((entry) => entry.type === "assistant").map((entry) => entry.payload),
+        [{ text: final ? "Partial answer" : "", stopped: true }],
+      );
+    });
+  }
+}
+
+test("Codex steers extracted documents into the active turn without copying contents into tape", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-steer-doc-test-"));
+  const binary = stopReportsFailedCodexBinary(dir);
+  const capture = join(dir, "steered.json");
+  const source = readFileSync(binary, "utf8").replace(
+    '  if (msg.method === "turn/interrupt") {',
+    `
+  if (msg.method === "turn/steer") {
+    writeFileSync(${JSON.stringify(capture)}, JSON.stringify(msg.params));
+    send({ id: msg.id, result: {} });
+    setTimeout(() => {
+    send({ method: "item/completed", params: { threadId: "thread-sf", item: { id: "steered-user", type: "userMessage", content: msg.params.input } } });
+    send({ method: "item/completed", params: { threadId: "thread-sf", item: { id: "steered-user", type: "userMessage", content: msg.params.input } } });
+    send({ method: "item/completed", params: { threadId: "thread-sf", item: { id: "answer", type: "agentMessage", phase: "final_answer", text: "document read" } } });
+    send({ method: "turn/completed", params: { threadId: "thread-sf", turn: { id: "turn-sf", status: "completed", items: [] } } });
+    }, 100);
+    return;
+  }
+  if (msg.method === "turn/interrupt") {`,
+  );
+  writeFileSync(binary, source);
+  const signals = createMemoryRunSignalStore();
+  const harness = createCodexHarness({ binaryPath: binary, env: process.env, turnWallClockMs: 10_000, signals });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const tape: unknown[] = [];
+  const entries: SessionEntry[] = [];
+  const scope = "personal:tester" as ScopeId;
+  const running = harness.turns.runTurn({
+    session: { id: "steer-document-session" } as Session,
+    input: "wait for a document",
+    runId: "steer-document-run",
+    systemPrompt: "QA",
+    history: [],
+    documents: [
+      { name: "initial.txt", mimeType: "text/plain", dataBase64: Buffer.from("A".repeat(80_000)).toString("base64") },
+    ],
+    tools: {} as HarnessTurnInput["tools"],
+    scopeLabel: scope,
+    orgScopeId: scope,
+    emit: async (entry) => {
+      const saved = {
+        ...entry,
+        sessionId: "steer-document-session",
+        seq: entries.length,
+        createdAt: Date.now(),
+      } as SessionEntry;
+      entries.push(saved);
+      return saved;
+    },
+    recordModelCall: () => {},
+    tape: async (row) => {
+      tape.push(row);
+    },
+    prepareSteer: async (text) => ({
+      text,
+      documents: [
+        {
+          name: "private.txt",
+          mimeType: "text/plain",
+          dataBase64: Buffer.from("STEER-PRIVATE-492" + "Z".repeat(30_000) + "OUTSIDE-BUDGET-492").toString("base64"),
+        },
+      ],
+    }),
+  });
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(join(dir, "started"))) {
+    if (Date.now() > deadline) throw new Error("mock Codex did not start");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  await signals.send("steer-document-run", { kind: "steer", text: "read the document", ts: "doc.1" });
+  while (!existsSync(capture)) {
+    if (Date.now() > deadline) throw new Error("mock Codex did not receive steer");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(entries.filter((entry) => entry.type === "user").length, 1, "turn/steer acceptance is not intake");
+  await running;
+  assert.equal(entries.filter((entry) => entry.type === "user").length, 2);
+  assert.equal((await signals.pending("steer-document-run")).length, 0);
+  assert.match(readFileSync(capture, "utf8"), /STEER-PRIVATE-492/);
+  assert.doesNotMatch(JSON.stringify(tape), /STEER-PRIVATE-492/);
+  assert.doesNotMatch(readFileSync(capture, "utf8"), /OUTSIDE-BUDGET-492/);
+  assert.match(readFileSync(capture, "utf8"), /truncated to fit/);
+});
+
+test("Codex coordinators expose neither command tools nor native subagents", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-coordinator-"));
+  const harness = createCodexHarness({ binaryPath: fakeCodexBinary(dir, false, true), env: testHarnessEnv(dir) });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  let seq = 0;
+  const scope = "personal:U1" as ScopeId;
+  const result = await harness.turns.runTurn({
+    session: { id: "coordinator" } as Session,
+    input: "hello",
+    systemPrompt: "coordinate",
+    history: [],
+    tools: {} as HarnessTurnInput["tools"],
+    scopeLabel: scope,
+    orgScopeId: scope,
+    delegateWork: true,
+    recordModelCall: () => {},
+    emit: async (entry) => ({ ...entry, sessionId: "coordinator", seq: ++seq, createdAt: Date.now() }) as SessionEntry,
+  });
+  assert.equal(result.reply, "hello");
+});
+
+test("Codex denies a child apps move request before executing the shared tool", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-child-resource-"));
+  const binary = join(dir, "codex-test");
+  writeFileSync(
+    binary,
+    `#!${process.execPath}
+const readline = require('node:readline');
+const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') send({id:msg.id,result:{}});
+  if (msg.method === 'thread/start') send({id:msg.id,result:{thread:{id:'parent'}}});
+  if (msg.method === 'turn/start') {
+    send({id:msg.id,result:{turn:{id:'turn',status:'inProgress',items:[]}}});
+    send({method:'item/started',params:{threadId:'parent',turnId:'turn',item:{type:'collabAgentToolCall',id:'spawn',tool:'spawnAgent',status:'inProgress',senderThreadId:'parent',receiverThreadIds:['child'],agentsStates:{child:{status:'running'}}}}});
+    send({id:'child-call',method:'item/tool/call',params:{threadId:'child',callId:'move',tool:'apps',arguments:{action:'move',id:'app',toScope:'personal:bob'}}});
+  }
+  if (msg.id === 'child-call') {
+    const denied = JSON.stringify(msg).includes('child requested unavailable tool apps');
+    send({method:'turn/completed',params:{threadId:'parent',turn:{id:'turn',status:'completed',items:[{type:'agentMessage',id:'answer',text:denied?'denied':'NOT DENIED',phase:'final_answer'}]}}});
+  }
+});
+`,
+  );
+  chmodSync(binary, 0o755);
+  let shared = false;
+  const harness = createCodexHarness({ binaryPath: binary, env: testHarnessEnv(dir), turnWallClockMs: 10000 });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const scope = "personal:test" as ScopeId;
+  const result = await harness.turns.runTurn({
+    session: { id: "child-resource" } as Session,
+    input: "delegate",
+    systemPrompt: "test",
+    history: [],
+    tools: {
+      async shareArtifact() {
+        shared = true;
+        throw new Error("must not execute");
+      },
+    } as unknown as HarnessTurnInput["tools"],
+    scopeLabel: scope,
+    orgScopeId: scope,
+    emit: async (entry) => ({ ...entry, sessionId: "child-resource", seq: 1, createdAt: Date.now() }) as SessionEntry,
+    recordModelCall: () => {},
+  });
+  assert.equal(result.reply, "denied");
+  assert.equal(shared, false);
+});

@@ -50,6 +50,7 @@ test("declaredVariables reads the scaffolded variables.tf", () => {
     "core_public_hosts",
     "db_name",
     "db_username",
+    "db_instance_class",
     "github_repository",
     "github_subject_prefix",
     "github_oidc_provider_arn",
@@ -62,6 +63,27 @@ test("declaredVariables reads the scaffolded variables.tf", () => {
   ]) {
     assert.ok(declared.includes(name), `variables.tf declares ${name}`);
   }
+});
+
+test("database class config renders only an explicit override", () => {
+  const defaults = terraformVars(config, "", declared);
+  assert.doesNotMatch(defaults, /db_instance_class/);
+
+  const overridden = terraformVars(
+    {
+      ...config,
+      aws: { ...config.aws!, dbInstanceClass: "db.t4g.micro" },
+    },
+    defaults,
+    declared,
+  );
+  assert.match(overridden, /db_instance_class\s*= "db\.t4g\.micro"/);
+
+  const upgraded = terraformVars(config, "db_backup_retention_days = 7\n", declared);
+  assert.match(upgraded, /db_backup_retention_days = 7/);
+
+  const operatorClass = terraformVars(config, 'db_instance_class = "db.m7g.large"\n', declared);
+  assert.match(operatorClass, /db_instance_class = "db\.m7g\.large"/);
 });
 
 test("the ECS execution role can read every declared contract secret independent of Terraform state", () => {
@@ -305,6 +327,23 @@ test("assume-role config rejects vendored AWS scaffolds that predate workload ro
   }
 });
 
+test("database class overrides reject vendored AWS scaffolds that cannot render them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-legacy-database-"));
+  try {
+    const infra = join(dir, "infra");
+    mkdirSync(infra);
+    writeFileSync(join(infra, "terraform.tfvars"), "services = {}\n");
+    writeFileSync(join(infra, "variables.tf"), 'variable "services" { type = map(any) }\n');
+    writeFileSync(join(infra, "main.tf"), "");
+    assert.throws(
+      () => renderTerraformVars({ ...config, aws: { ...config.aws!, dbInstanceClass: "db.t4g.micro" } }, dir),
+      /AWS scaffold predates aws\.dbInstanceClass/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the deploy role registers task definitions only for configured ECS families", () => {
   const policy = mainTf.match(/resource "aws_iam_role_policy" "github_deploy" \{([\s\S]*?)\n\}/)?.[1] ?? "";
   const management = policy.match(/Sid\s*= "ManageStackTaskDefinitions"([\s\S]*?)\n\s*\},/)?.[1] ?? "";
@@ -350,6 +389,8 @@ test("the deploy role can run and inspect only stack-scoped deployment canaries"
 
   const inspect = policy.match(/Sid\s*= "InspectDeploymentCanaries"([\s\S]*?)\n\s*\},/)?.[1] ?? "";
   assert.match(inspect, /ecs:DescribeTasks/);
+  assert.match(inspect, /ecs:GetTaskProtection/);
+  assert.doesNotMatch(policy, /ecs:UpdateTaskProtection/);
   assert.match(inspect, /task\/\$\{var\.cluster_name\}\/\*/);
   assert.doesNotMatch(inspect, /Resource\s*= "\*"/);
 });
@@ -390,6 +431,11 @@ test("MicroVM build and runtime roles can write only their stack-owned log group
       /arn:aws:logs:\$\{var\.region\}:\$\{data\.aws_caller_identity\.current\.account_id\}:\*/,
     );
   }
+});
+
+test("terraform defaults built-in workloads to the published image architecture", () => {
+  const rendered = terraformVars(config, "", declared);
+  assert.match(rendered, /"core": \{[\s\S]*?"architecture": "amd64"/);
 });
 
 test("terraform propagates workload architecture to bootstrap task definitions", () => {
@@ -487,6 +533,17 @@ test("GitHub environments remain compatible with AWS scaffolds created before th
     () => terraformVarsDrift(config, rendered, legacyDeclared),
     /AWS scaffold predates aws\.deployEnvironment[\s\S]*variables\.tf[\s\S]*main\.tf/,
   );
+});
+
+test("AWS Terraform renders valid reserved coordinates without an unused MicroVM image", () => {
+  const selected: QmConfig = {
+    ...config,
+    env: { core: { DEPLOY_PROVIDER: "fly", SANDBOX_BACKEND: "sprites" } },
+  };
+  const rendered = terraformVars(selected, "", declared);
+  assert.match(rendered, /deploy_microvm_image\s*= "acme"/);
+  assert.doesNotMatch(rendered, /undefined/);
+  assert.deepEqual(terraformVarsDrift(selected, rendered, declared), []);
 });
 
 test("terraform derives the transfer lifecycle prefix from the same core S3 prefix as runtime", () => {
@@ -593,6 +650,7 @@ test("AWS module supports CloudFront TLS or a direct HTTPS ALB without mixing th
   assert.match(edge, /domain_name\s*=\s*aws_lb\.this\.dns_name/);
   assert.match(edge, /origin_protocol_policy\s*=\s*var\.certificate_arn == "" \? "http-only" : "https-only"/);
   assert.match(edge, /cloudfront_default_certificate\s*=\s*true/);
+  for (const header of ["X-Timestamp", "X-Signature", "X-Agent-Capability"]) assert.ok(edge.includes(`"${header}"`));
 });
 
 test("AWS module reuses account OIDC, guards account and passes configured task roles", () => {
@@ -619,7 +677,7 @@ test("AWS module reuses account OIDC, guards account and passes configured task 
     /Sid\s*= "ManageDeploymentLayers"[\s\S]*"s3:GetObject", "s3:PutObject"[\s\S]*deployment\/layers\/\*/,
   );
   assert.match(mainTf, /Sid\s*= "InspectGithubOidcProvider"[\s\S]*iam:GetOpenIDConnectProvider/);
-  assert.match(mainTf, /"ecs:GetTaskProtection", "ecs:UpdateTaskProtection"/);
+  assert.match(mainTf, /"ecs:GetTaskProtection", "ecs:UpdateTaskProtection", "ecs:DescribeTasks"/);
   assert.match(mainTf, /task\/\$\{var\.cluster_name\}\/\*/);
   assert.match(mainTf, /"lambda:RunMicrovm"[\s\S]*"lambda:CreateMicrovmAuthToken"/);
   assert.match(mainTf, /"lambda:ListMicrovmImages"/);
@@ -683,6 +741,7 @@ test("AWS module provisions durable encrypted object storage and configurable sa
     mainTf,
     /id\s*= "qm-transfer-expiry"[\s\S]*?abort_incomplete_multipart_upload\s*\{\s*days_after_initiation\s*= 1\s*\}/,
   );
+  assert.match(mainTf, /instance_class\s*= var\.db_instance_class/);
   assert.match(mainTf, /backup_retention_period\s*= var\.db_backup_retention_days/);
   assert.match(mainTf, /multi_az\s*= var\.db_multi_az/);
   assert.match(mainTf, /skip_final_snapshot\s*= var\.db_skip_final_snapshot/);
@@ -752,4 +811,85 @@ test("the deploy role lists tasks only within its cluster", () => {
   const listing = mainTf.match(/Sid\s*= "ListClusterTasks"([\s\S]*?)\n\s*\},\n/)?.[1] ?? "";
   assert.match(listing, /ecs:ListTasks/);
   assert.match(listing, /"ecs:cluster" = aws_ecs_cluster\.this\.arn/);
+});
+
+test("terraform routes the app wildcard through portal when both services use the same app domain", () => {
+  for (const key of ["AWS_DEPLOY_APPS_DOMAIN", "DEPLOY_APPS_DOMAIN"]) {
+    const rendered = terraformVars(
+      {
+        ...config,
+        apiUrl: "https://api.agent.acme.example",
+        services: ["core", "portal"],
+        aws: {
+          ...config.aws!,
+          sharedAlb: true,
+          services: {
+            ...config.aws!.services,
+            portal: { ecrRepository: "qm-portal", ecsService: "acme-portal", cpu: 256, memory: 512 },
+          },
+        },
+        env: {
+          core: { [key]: "apps.agent.acme.example" },
+          portal: { PORTAL_APPS_DOMAIN: "APPS.AGENT.ACME.EXAMPLE." },
+        },
+      },
+      "",
+      declared,
+    );
+    assert.match(rendered, /core_public_hosts\s+= \[\s+"api\.agent\.acme\.example"\s+\]/);
+    assert.doesNotMatch(rendered, /\*\.apps/);
+  }
+});
+
+test("terraform rejects an app domain that differs between portal and core", () => {
+  assert.throws(
+    () =>
+      terraformVars(
+        {
+          ...config,
+          services: ["core", "portal"],
+          aws: {
+            ...config.aws!,
+            services: {
+              ...config.aws!.services,
+              portal: { ecrRepository: "qm-portal", ecsService: "acme-portal", cpu: 256, memory: 512 },
+            },
+          },
+          env: {
+            core: { DEPLOY_APPS_DOMAIN: "apps.agent.acme.example" },
+            portal: { PORTAL_APPS_DOMAIN: "other.agent.acme.example" },
+          },
+        },
+        "",
+        declared,
+      ),
+    /portal apps domain must match core/,
+  );
+});
+
+test("dedicated ALBs retain direct core app routing when portal declares the same domain", () => {
+  const rendered = terraformVars(
+    {
+      ...config,
+      apiUrl: "https://api.agent.acme.example",
+      services: ["core", "portal"],
+      aws: {
+        ...config.aws!,
+        services: {
+          ...config.aws!.services,
+          portal: { ecrRepository: "qm-portal", ecsService: "acme-portal", cpu: 256, memory: 512 },
+        },
+      },
+      env: {
+        core: { DEPLOY_APPS_DOMAIN: "apps.agent.acme.example" },
+        portal: { PORTAL_APPS_DOMAIN: "apps.agent.acme.example" },
+      },
+    },
+    "",
+    declared,
+  );
+  assert.match(
+    rendered,
+    /core_public_hosts\s+= \[\s+"\*\.apps\.agent\.acme\.example",\s+"api\.agent\.acme\.example"\s+\]/,
+  );
 });

@@ -24,10 +24,10 @@ Slack  ⇄ (WebSocket)  slack surface (in core)  ── direct calls ──▶  
 ### Slack Agents (top-bar pin)
 
 The manifest enables Slack's [Agents & AI Apps](https://docs.slack.dev/ai/developing-agents)
-feature (`agent_view`) for one reason: users can pin the app to the Slack top bar and open
-it anywhere. Conversations in the resulting split pane are ordinary DM thread messages and
-flow through the normal DM machinery unchanged — none of the extra agent UI (status
-indicators, thread titles, context passing, suggested prompts) is implemented.
+feature (`agent_view`) so users can pin the app to the Slack top bar and open it anywhere.
+Conversations in the resulting split pane are ordinary DM thread messages and flow through
+the normal DM machinery unchanged. Thread titles, context passing and suggested prompts
+are not implemented. Activity cards are experimental and off by default.
 
 Two caveats:
 
@@ -38,6 +38,37 @@ Two caveats:
   `assistant_thread_context_changed` events (Slack requires both to enable the feature;
   the plugin acknowledges them as no-ops). Installs that don't update keep working
   exactly as before.
+
+### Optional activity cards
+
+In Admin → Customize → Feature flags, enable **Slack loading indicator (experimental)**
+for selected people or conversation scopes. It is off by default. The Slack app must
+support [`task_card`](https://docs.slack.dev/reference/block-kit/blocks/task-card-block)
+blocks and have `chat:write`.
+
+After QM commits to answering, one card is posted in the existing reply thread and
+updated in place: **Working**, **Waiting to resume**, **Background work**, **Monitoring**,
+or **No active work**. This describes recorded activity, not success, failure or delivery.
+Quiet ambient turns and unthreaded DMs do not create cards. Cards are visible to everyone
+in their thread; own status cards and edits are excluded from conversation history.
+
+Waiting cards survive turns and restarts. Only this conversation's registered background
+jobs and enabled, unexpired process monitors count, not recurring crons or agent prose.
+Unwatched exits become visible when checked, reconciled during sandbox setup, or expired.
+Commands and monitor instructions are never rendered. After more than five minutes,
+including waits, a subtle **Follow via QM Web** link opens the exact web conversation
+with normal authorization. Without a configured web URL, the link is omitted.
+
+A minute sweep refreshes activity and retries transient failures. Durable receipts and
+per-thread leases preserve card identity across workers; expired run leases are shown as
+waiting, not working. Slack has no conditional writes: late updates are repaired, and an
+ambiguous initial post can duplicate if Slack does not deduplicate `client_msg_id`.
+An outage can leave a stale card until recovery. Status calls have a separate five-second
+timeout and never delay reply delivery.
+
+Once no activity remains, the card settles without a spinner and is no longer tracked.
+Later work creates a fresh card. Disabling the flag settles existing cards without
+stopping work or deleting messages. Native session status and Stop events are not used.
 
 > **Running locally alongside another developer? Each dev needs their OWN app.**
 > See [Local dev with multiple developers](#local-dev-with-multiple-developers)
@@ -245,3 +276,24 @@ your per-dev name + tokens live only in your local app and your gitignored `.env
 - Channel audience is enumerated per-member: `computeChannelAudience` (lib.ts) resolves
   the full member list (with a Slack-Connect / guest external marker, and an actor-only
   fallback when membership is unreadable) so the core's audience-floor is fine-grained.
+
+## History page size
+
+`SLACK_HISTORY_LIMIT` optionally sets the live history/replies page size and default
+`read_thread` result count for workspace-owned apps (integer 1–200). Without it,
+owned apps request 200-message pages and return up to 100 messages by default.
+Shared-app installations use 15 for both defaults regardless of this setting.
+An explicit tool count overrides the result count, but not the live page size.
+Stored mirror reads keep their existing window; shadow comparisons match the live page size.
+
+## Mirror qualification
+
+`SLACK_CONTEXT_SOURCE` controls conversation context and default Slack tool reads:
+
+- `live` (default) keeps Slack history as the source, including automatic channel thread expansion.
+- `shadow` returns the same live context while comparing stored events in the background. It logs `slack_mirror_shadow` counts for missing messages, text differences, and missing thread parents. It does not log message text or channel identifiers, backfill history, or wait for comparison before returning context. The live page is snapshotted before callers add trigger context, and shadow uses the same stored-message selection as mirror mode. Thread selection matches Slack’s first page, including its limitation that newer replies beyond that page may be absent. Channel roots use the newest page, and thread expansion truncation is tracked separately from root-page truncation. An extra stored row distinguishes exactly full pages from truncated pages; it does not prove complete Slack coverage. Counts cover raw message fields, not complete rendered context or author/subtype fidelity. At most one comparison runs per Slack client; concurrent reads are not all sampled.
+- `mirror` explicitly enables stored context and mirror search, with the documented partial coverage and bounded live fallback. Keep this opt-in until shadow evidence and development qualification are satisfactory.
+
+Ingestion continues in every mode. Shadow mismatch counts describe the sampled live window, not complete channel coverage. Compare channel and thread samples, edits/deletes, and normal agent turns before enabling mirror reads. No automatic mode promotion occurs.
+
+Slack mirror records preserve provider subtypes so stored context uses the same system-message filtering as live context. A missing stored subtype means legacy or unobserved metadata; an empty subtype means a verified ordinary message. Partial event updates preserve omitted subtype and thread metadata. Mirror-mode history fallback shares event content normalization and prefers fresh Slack duplicates; live and shadow reads never backfill their comparison source.

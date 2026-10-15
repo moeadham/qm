@@ -1,7 +1,14 @@
 import type { LedgerEvent, LedgerEventOp } from "./ledger-events.ts";
 import { canonicalJson } from "../util/objects.ts";
 import { wireMentionKeys } from "../slack/mrkdwn.ts";
-import type { LoopItem, LoopItemStatus, LoopProposal, LoopSourcePayload, LoopThreadMessage } from "../types.ts";
+import type {
+  LoopItem,
+  LoopItemStatus,
+  LoopItemTriage,
+  LoopProposal,
+  LoopSourcePayload,
+  LoopThreadMessage,
+} from "../types.ts";
 import { isResolved } from "./ledger-view.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
 import { contentPart } from "../triggers/trigger-store.ts";
@@ -49,26 +56,43 @@ interface PruneOptions {
   now?: number;
 }
 
+export type TriagePatch = Partial<Pick<LoopItemTriage, "at" | "priority" | "reason" | "groupId">>;
+
 interface RecordActionInput {
   kind: string;
   result?: string;
   actorId?: string;
   outcome: "actioned" | "dismissed";
+  sourceAt?: number;
 }
 
 export interface LoopItemLedger {
   enqueue(input: EnqueueItemInput): Promise<EnqueueResult>;
   ingest(entries: IngestEntryInput[]): Promise<IngestOutcome>;
-  setProposal(id: string, proposal: Omit<LoopProposal, "at">, opts?: { expectedAt?: number }): Promise<LoopItem | null>;
-  annotate(id: string, patch: LoopSourcePayload): Promise<LoopItem | null>;
+  setProposal(
+    id: string,
+    proposal: Omit<LoopProposal, "at">,
+    opts?: { expectedAt?: number; expectedClaimToken?: string },
+  ): Promise<LoopItem | null>;
+  annotate(
+    id: string,
+    patch: LoopSourcePayload,
+    opts?: { summary?: string; expectedSourceAt?: number },
+  ): Promise<LoopItem | null>;
   appendThread(id: string, messages: Array<Omit<LoopThreadMessage, "id" | "at">>): Promise<LoopItem | null>;
+  setTriage(id: string, patch: TriagePatch, by: "agent" | "human"): Promise<LoopItem | null>;
   recordAction(id: string, input: RecordActionInput): Promise<LoopItem | null>;
-  reopen(id: string): Promise<LoopItem | null>;
+  reopen(id: string, opts?: { sentReply?: boolean }): Promise<LoopItem | null>;
   prune(loopId: string, options: PruneOptions): Promise<number>;
   get(id: string): Promise<LoopItem | null>;
   byLoop(loopId: string): Promise<LoopItem[]>;
+  moveSource(from: string, to: string, source: string): Promise<void>;
+  summaries(
+    loopIds: string[],
+    options?: { includeEmailClassification?: boolean },
+  ): Promise<Array<Omit<LoopItem, "proposal" | "agentDrafts" | "thread" | "sourcePayload">>>;
   queued(loopId: string, limit?: number): Promise<LoopItem[]>;
-  claim(id: string, claimedAt?: number): Promise<LoopItem | null>;
+  claim(id: string, claimedAt?: number, expectedLoopId?: string): Promise<LoopItem | null>;
   acquireDecision(id: string, decisionAt?: number): Promise<string | null>;
   releaseDecision(id: string, token: string): Promise<boolean>;
   recordRun(id: string, runId: string, claimToken: string): Promise<LoopItem | null>;
@@ -77,7 +101,7 @@ export interface LoopItemLedger {
   returnToWork(id: string, guidance: string, claimToken?: string): Promise<LoopItem | null>;
   park(id: string, reason: string, claimToken?: string): Promise<LoopItem | null>;
   skip(id: string, reason: string): Promise<LoopItem | null>;
-  stats(loopId: string, now: number): Promise<LoopQueueStats>;
+  stats(loopId: string, now: number, held?: ReadonlySet<string>): Promise<LoopQueueStats>;
   deleteByLoop(loopId: string): Promise<void>;
 }
 
@@ -122,6 +146,15 @@ function withAgentDraft(
   return { agentDrafts: next.slice(-AGENT_DRAFT_HISTORY), agentMentionKeys: [...keys] };
 }
 
+function inboxPreview(payload: LoopSourcePayload | undefined): LoopSourcePayload {
+  if (!payload) return {};
+  return Object.fromEntries(
+    ["title", "from", "fromDetail", "snippet", "receivedAt", "probablyResolved", "sentChat"].flatMap((key) =>
+      payload[key] === undefined ? [] : [[key, payload[key]]],
+    ),
+  );
+}
+
 function mergeIngest(item: LoopItem, entry: IngestEntryInput, now: number): LoopItem | null {
   const newerSource = entry.sourceAt !== undefined && entry.sourceAt > (item.sourceAt ?? 0);
   if (isResolved(item) && !newerSource) return null;
@@ -132,12 +165,16 @@ function mergeIngest(item: LoopItem, entry: IngestEntryInput, now: number): Loop
     keepHumanProposal || (incoming && item.proposal?.by === "agent" && sameDraft(item.proposal, incoming))
       ? item.proposal
       : incoming;
-  const status = nextIngestStatus(item, proposal);
+  const refresh = newerSource && !entry.proposal;
+  if (refresh && item.decisionToken && (item.decisionAt ?? 0) + DECISION_LEASE_MS > now)
+    throw new Error("Item has an active decision; retry the source update");
+  const status = refresh ? "queued" : nextIngestStatus(item, proposal);
   return {
     ...item,
     status,
     ...withAgentDraft(item, proposal),
     sourcePayload: entry.sourcePayload,
+    inboxPreview: inboxPreview(entry.sourcePayload),
     sourceAt: entry.sourceAt ?? item.sourceAt,
     actedAt: undefined,
     actionKind: undefined,
@@ -147,12 +184,38 @@ function mergeIngest(item: LoopItem, entry: IngestEntryInput, now: number): Loop
     ...(entry.source !== undefined ? { source: entry.source } : {}),
     ...(entry.summary !== undefined ? { sourceSummary: entry.summary } : {}),
     ...(proposal ? { proposal } : { proposal: undefined }),
+    ...(refresh
+      ? {
+          proposal: undefined,
+          outputIds: [],
+          claimToken: undefined,
+          claimedAt: undefined,
+          attempts: 0,
+          ...(item.proposal?.by === "human"
+            ? {
+                thread: [
+                  ...(item.thread ?? []),
+                  {
+                    id: randomUUID(),
+                    role: "human" as const,
+                    text: `Previous draft before a newer message arrived:\n${JSON.stringify(item.proposal.data)}`,
+                    at: now,
+                  },
+                ],
+              }
+            : {}),
+        }
+      : {}),
   };
 }
 
 export function createLoopItemLedger(
   backing: DurableMap<LoopItem> = createMemoryMap<LoopItem>(),
   onEvent?: (event: LedgerEvent) => void,
+  coordination?: {
+    lock: import("../persistence/advisory-lock.ts").AdvisoryLock;
+    accepts: (loopId: string) => Promise<boolean>;
+  },
 ): LoopItemLedger {
   if (!backing.update) throw new Error("loop items need atomic durable updates");
   const update = backing.update.bind(backing);
@@ -180,9 +243,44 @@ export function createLoopItemLedger(
   const forLoop = async (loopId: string): Promise<LoopItem[]> =>
     (await backing.all()).filter((item) => item.loopId === loopId);
 
-  return {
+  const idFor = async (loopId: string, sourceKey: string): Promise<string> => {
+    const id = loopItemId(loopId, sourceKey);
+    if (await backing.get(id)) return id;
+    return (
+      (
+        await backing.select({
+          where: { field: "loopId", anyOfFold: [loopId] },
+          omit: ["sourcePayload", "proposal", "agentDrafts", "thread"],
+        })
+      ).find((item) => item.loopId === loopId && item.sourceKey === sourceKey)?.id ?? id
+    );
+  };
+
+  const ledger: LoopItemLedger = {
+    async moveSource(from, to, source) {
+      const targets = await forLoop(to);
+      for (const item of await forLoop(from)) {
+        if ((item.source ?? item.sourcePayload?.source) !== source) continue;
+        if (targets.some((target) => target.sourceKey === item.sourceKey && target.id !== item.id)) continue;
+        await update(item.id, (current) => {
+          if (
+            current.loopId !== from ||
+            current.status === "in_progress" ||
+            (current.decisionToken && (current.decisionAt ?? 0) + DECISION_LEASE_MS > Date.now())
+          )
+            return current;
+          return {
+            ...current,
+            source,
+            loopId: to,
+            previousLoopId: from,
+            inboxPreview: inboxPreview(current.sourcePayload),
+          };
+        });
+      }
+    },
     async enqueue(input) {
-      const id = loopItemId(input.loopId, input.sourceKey);
+      const id = await idFor(input.loopId, input.sourceKey);
       const now = Date.now();
       const candidate: LoopItem = {
         id,
@@ -203,10 +301,32 @@ export function createLoopItemLedger(
       const stored = await backing.putIfAbsent(id, candidate);
       return { item: stored, created: stored.createdAt === candidate.createdAt };
     },
+    async summaries(loopIds, options) {
+      if (!options?.includeEmailClassification)
+        return backing.select({
+          where: { field: "loopId", anyOfFold: loopIds },
+          omit: ["proposal", "agentDrafts", "thread", "sourcePayload"],
+        });
+      const items = await backing.select({
+        where: { field: "loopId", anyOfFold: loopIds },
+        omit: ["proposal", "agentDrafts", "thread"],
+        pickNested: { sourcePayload: ["source", "automated"] },
+      });
+      return items.map(({ sourcePayload, ...item }) => {
+        const source = item.source ?? (typeof sourcePayload?.source === "string" ? sourcePayload.source : undefined);
+        return {
+          ...item,
+          ...(source !== undefined ? { source } : {}),
+          ...(source === "gmail"
+            ? { inboxPreview: { ...item.inboxPreview, automated: sourcePayload?.automated === true } }
+            : {}),
+        };
+      });
+    },
     async ingest(entries) {
       const outcome: IngestOutcome = { created: 0, updated: 0, skipped: 0 };
       for (const entry of entries) {
-        const id = loopItemId(entry.loopId, entry.dedupeKey);
+        const id = await idFor(entry.loopId, entry.dedupeKey);
         const now = Date.now();
         const candidate: LoopItem = {
           id,
@@ -217,6 +337,7 @@ export function createLoopItemLedger(
           runIds: [],
           outputIds: [],
           sourcePayload: entry.sourcePayload,
+          inboxPreview: inboxPreview(entry.sourcePayload),
           createdAt: now,
           updatedAt: now,
           ...(entry.source !== undefined ? { source: entry.source } : {}),
@@ -251,6 +372,7 @@ export function createLoopItemLedger(
       let applied = false;
       const after = await update(id, (item) => {
         if (item.status === "shipped") return item;
+        if (opts?.expectedClaimToken !== undefined && item.claimToken !== opts.expectedClaimToken) return item;
         if (opts?.expectedAt !== undefined && item.proposal?.at !== opts.expectedAt) return item;
         applied = true;
         const now = Date.now();
@@ -266,12 +388,21 @@ export function createLoopItemLedger(
       if (applied) emit(after, "proposal");
       return applied ? after : null;
     },
-    async annotate(id, patch) {
+    async annotate(id, patch, opts) {
       let applied = false;
       const after = await update(id, (item) => {
         applied = true;
         const now = Date.now();
-        return { ...item, sourcePayload: { ...item.sourcePayload, ...patch }, updatedAt: now };
+        if (opts?.expectedSourceAt !== undefined && item.sourceAt !== opts?.expectedSourceAt) {
+          applied = false;
+          return item;
+        }
+        return {
+          ...item,
+          sourcePayload: { ...item.sourcePayload, ...patch },
+          ...(opts?.summary !== undefined ? { sourceSummary: opts.summary } : {}),
+          updatedAt: now,
+        };
       });
       if (applied) emit(after, "annotate");
       return applied ? after : null;
@@ -293,16 +424,53 @@ export function createLoopItemLedger(
       if (applied) emit(after, "thread");
       return applied ? after : null;
     },
+    async setTriage(id, patch, by) {
+      let applied = false;
+      const after = await update(id, (item) => {
+        if (isResolved(item)) return item;
+        const current = item.triage ?? { at: 0 };
+        const pinned = new Set(current.pinned ?? []);
+        let { priority, reason, groupId } = current;
+        if ("priority" in patch && (by === "human" || !pinned.has("priority"))) {
+          priority = patch.priority;
+          reason = by === "human" ? undefined : patch.reason;
+          if (by === "human") pinned.add("priority");
+        }
+        if ("groupId" in patch && (by === "human" || !pinned.has("group"))) {
+          groupId = patch.groupId;
+          if (by === "human") pinned.add("group");
+        }
+        applied = true;
+        return {
+          ...item,
+          triage: {
+            at: patch.at ?? (by === "human" ? Math.max(current.at, item.sourceAt ?? item.createdAt) : current.at),
+            ...(priority ? { priority } : {}),
+            ...(priority && reason ? { reason } : {}),
+            ...(groupId ? { groupId } : {}),
+            ...(pinned.size ? { pinned: [...pinned] } : {}),
+          },
+        };
+      });
+      if (applied) emit(after, "triage");
+      return applied ? after : null;
+    },
     async recordAction(id, input) {
       let applied = false;
       const after = await update(id, (item) => {
         if (item.status === "shipped") return item;
+        if (
+          input.sourceAt !== undefined &&
+          (!Number.isFinite(input.sourceAt) || input.sourceAt <= (item.sourceAt ?? 0) || isResolved(item))
+        )
+          return item;
         applied = true;
         const now = Date.now();
         return {
           ...item,
           status: input.outcome === "actioned" ? "shipped" : "skipped",
           actionKind: input.kind,
+          ...(input.sourceAt !== undefined ? { sourceAt: input.sourceAt } : {}),
           actedAt: now,
           claimedAt: undefined,
           claimToken: undefined,
@@ -314,15 +482,22 @@ export function createLoopItemLedger(
       if (applied) emit(after, "action");
       return applied ? after : null;
     },
-    async reopen(id) {
+    async reopen(id, opts) {
       let applied = false;
       const after = await update(id, (item) => {
-        if (item.status !== "skipped" && item.status !== "failed") return item;
+        const sentReply = opts?.sentReply === true && item.source === "gmail" && item.sourcePayload?.sentChat === true;
+        if (item.status !== "skipped" && item.status !== "failed" && !(sentReply && item.status === "shipped"))
+          return item;
         applied = true;
         const now = Date.now();
         return {
           ...item,
-          status: item.proposal ? "ready" : "queued",
+          status: sentReply || item.proposal ? "ready" : "queued",
+          ...(sentReply
+            ? {
+                proposal: { data: { body: "" }, by: "human" as const, at: Math.max(now, (item.proposal?.at ?? 0) + 1) },
+              }
+            : {}),
           actedAt: undefined,
           actionKind: undefined,
           actionResult: undefined,
@@ -354,14 +529,19 @@ export function createLoopItemLedger(
     byLoop: forLoop,
     async queued(loopId, limit) {
       const queued = (await forLoop(loopId))
-        .filter((item) => item.status === "queued")
+        .filter(
+          (item) =>
+            item.status === "queued" ||
+            (item.status === "in_progress" && (item.claimedAt ?? 0) + CLAIM_LEASE_MS <= Date.now()),
+        )
         .sort((a, b) => a.createdAt - b.createdAt);
       return limit === undefined ? queued : queued.slice(0, limit);
     },
-    async claim(id, claimedAt = Date.now()) {
+    async claim(id, claimedAt = Date.now(), expectedLoopId) {
       const now = claimedAt;
       let applied = false;
       const after = await update(id, (item) => {
+        if (expectedLoopId !== undefined && item.loopId !== expectedLoopId) return item;
         const stale = item.status === "in_progress" && (item.claimedAt ?? 0) + CLAIM_LEASE_MS <= now;
         if (item.status !== "queued" && !stale) return item;
         applied = true;
@@ -482,8 +662,8 @@ export function createLoopItemLedger(
         undefined,
         "skipped",
       ),
-    async stats(loopId, now) {
-      const items = await forLoop(loopId);
+    async stats(loopId, now, held) {
+      const items = (await forLoop(loopId)).filter((item) => !held?.has(item.id));
       const queued = items.filter((item) => item.status === "queued");
       const oldest = queued.reduce<number | undefined>(
         (acc, item) => (acc === undefined || item.createdAt < acc ? item.createdAt : acc),
@@ -500,5 +680,34 @@ export function createLoopItemLedger(
     async deleteByLoop(loopId) {
       for (const item of await forLoop(loopId)) await backing.delete(item.id);
     },
+  };
+  if (!coordination) return ledger;
+  const guarded = async <T>(ids: string[], fn: () => Promise<T>, check = true): Promise<T> => {
+    let run = async () => {
+      if (check)
+        for (const id of ids)
+          if (!(await coordination.accepts(id))) throw new Error("This Loop no longer accepts intake");
+      return fn();
+    };
+    for (const id of [...new Set(ids)].sort().reverse()) {
+      const next = run;
+      run = () => coordination.lock.withLock(`loop-intake:${id}`, next);
+    }
+    return run();
+  };
+  return {
+    ...ledger,
+    enqueue: (input) => guarded([input.loopId], () => ledger.enqueue(input)),
+    ingest: async (entries) => {
+      const result = { created: 0, updated: 0, skipped: 0 };
+      for (const entry of entries) {
+        const next = await guarded([entry.loopId], () => ledger.ingest([entry]));
+        result.created += next.created;
+        result.updated += next.updated;
+        result.skipped += next.skipped;
+      }
+      return result;
+    },
+    moveSource: (from, to, source) => guarded([from, to], () => ledger.moveSource(from, to, source), false),
   };
 }

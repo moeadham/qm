@@ -36,3 +36,23 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 {{- end -}}
+
+{{- define "qm.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- default (include "qm.fullname" .) .Values.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "qm.image" -}}
+{{- if .service.imageRef -}}
+{{- .service.imageRef -}}
+{{- else -}}
+{{- $tag := .service.tag | default .root.Values.image.tag -}}
+{{- if not $tag -}}
+{{- fail (printf "Set services.%s.imageRef (full tag or digest reference) or image.tag to images built from this checkout; see deploy/helm/README.md" .name) -}}
+{{- end -}}
+{{- printf "%s%s%s:%s" .root.Values.image.repository (.root.Values.image.separator | default "/") .service.image $tag -}}
+{{- end -}}
+{{- end -}}

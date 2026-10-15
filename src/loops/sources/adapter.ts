@@ -64,14 +64,19 @@ export function clipOpt(v: unknown, max: number): string | undefined {
   return clip(v, max) ?? undefined;
 }
 
-export function addressList(v: unknown, maxEntries = 10): string[] | undefined {
-  if (!Array.isArray(v)) return undefined;
+export function addressList(v: unknown): string[] | undefined | null {
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v) || v.length > 100) return null;
   const out: string[] = [];
-  for (const entry of v.slice(0, maxEntries)) {
-    const s = clip(entry, 200);
-    if (s) out.push(s);
+  let length = 0;
+  for (const entry of v) {
+    if (typeof entry !== "string" || /[\r\n\0]/.test(entry)) return null;
+    const address = entry.trim();
+    length += address.length;
+    if (length > 8000) return null;
+    if (address) out.push(address);
   }
-  return out.length ? out : undefined;
+  return out;
 }
 
 function httpUrl(v: unknown): string | undefined {
@@ -91,6 +96,7 @@ interface MessageContext {
   at?: number;
   text: string;
   images?: string[];
+  nearby?: boolean;
 }
 
 function parseImageUrls(v: unknown): string[] | undefined {
@@ -113,7 +119,13 @@ function parseContext(v: unknown): MessageContext[] | undefined {
     if (!author || !text) continue;
     const at = typeof entry.at === "number" && Number.isFinite(entry.at) ? entry.at : undefined;
     const images = parseImageUrls(entry.images);
-    out.push({ author, text, ...(at !== undefined ? { at } : {}), ...(images ? { images } : {}) });
+    out.push({
+      author,
+      text,
+      ...(at !== undefined ? { at } : {}),
+      ...(images ? { images } : {}),
+      ...(entry.nearby === true ? { nearby: true } : {}),
+    });
   }
   return out.length ? out : undefined;
 }
@@ -131,6 +143,7 @@ export function parseReplyDraft(v: unknown): ReplyDraft | null {
   if (body === null) return null;
   const to = addressList(v.to);
   const cc = addressList(v.cc);
+  if (to === null || cc === null) return null;
   const subject = clipOpt(v.subject, 300);
   return { body, ...(to ? { to } : {}), ...(cc ? { cc } : {}), ...(subject ? { subject } : {}) };
 }

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
+import { zstdDecompressSync } from "node:zlib";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import {
   buildDetectionPrompt,
@@ -31,6 +32,7 @@ import { modelGatewayRequest } from "../src/model/provider-endpoints.ts";
 import { reconstructMessagesFromHistory } from "../src/harness/replay.ts";
 import type { SessionEntry } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
+import { NonRetryableTurnError, ProviderTurnError, turnFailureMessage } from "../src/core/turn-error.ts";
 
 function countTempDirs(prefix: string): number {
   return readdirSync(tmpdir()).filter((name) => name.startsWith(prefix)).length;
@@ -128,7 +130,6 @@ test("piHarnessConfigOptions maps every Config knob the harness consumes, field 
       piSystemCacheSplit: true,
       sandboxResourcesEnabled: true,
       scratchExecEnabled: true,
-      sharedOwnerAuthIsolation: true,
       reachExecEnabled: true,
       signingSecret: "sek",
       apiBaseUrl: "https://core.test",
@@ -137,6 +138,7 @@ test("piHarnessConfigOptions maps every Config knob the harness consumes, field 
       execTimeoutMaxMs: 33_000,
       backgroundJobTtlMs: 44_000,
       backgroundJobTtlMaxMs: 55_000,
+      sandboxCapabilityTtlMs: 66_000,
     }),
   );
   assert.deepEqual(opts, {
@@ -162,6 +164,7 @@ test("piHarnessConfigOptions maps every Config knob the harness consumes, field 
     execTimeoutCeilingMs: 33_000,
     backgroundJobTtlMs: 44_000,
     backgroundJobTtlMaxMs: 55_000,
+    sandboxCapabilityTtlMs: 66_000,
   });
 });
 
@@ -197,6 +200,161 @@ test("Pi title generation returns no title without an auxiliary-model credential
   assert.equal(await harness.models.generateTitle!("User:\nPrioritize the public qm issues"), undefined);
 });
 
+test("Pi title generation surfaces provider failures to its caller", async (t) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "title model rejected request" } }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
+  );
+  const address = server.address();
+  assert(address && typeof address !== "string");
+  const harness = createPiHarness({
+    defaultModelId: "claude-opus-4-8",
+    titleModelId: "claude-haiku-4-5",
+    modelGateway: {
+      url: `http://127.0.0.1:${address.port}`,
+      apiKey: "gateway-key",
+      apiKeyHeader: "api-key",
+      models: { "claude-haiku-4-5": "title-model" },
+    },
+  });
+
+  await assert.rejects(harness.models.generateTitle!("User:\nInvestigate the deploy"));
+});
+
+test("Pi title generation rejects a reply-shaped answer with the rule that fired and the rejected text", async (t) => {
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      for (const event of [
+        {
+          type: "message_start",
+          message: {
+            id: "msg_title",
+            type: "message",
+            role: "assistant",
+            model: "title-model",
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Sorry, I can't summarize that" } },
+        { type: "content_block_stop", index: 0 },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 1 },
+        },
+        { type: "message_stop" },
+      ]) {
+        response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      }
+      response.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
+  );
+  const address = server.address();
+  assert(address && typeof address !== "string");
+  const harness = createPiHarness({
+    defaultModelId: "claude-opus-4-8",
+    titleModelId: "claude-haiku-4-5",
+    modelGateway: {
+      url: `http://127.0.0.1:${address.port}`,
+      apiKey: "gateway-key",
+      apiKeyHeader: "api-key",
+      models: { "claude-haiku-4-5": "title-model" },
+    },
+  });
+
+  await assert.rejects(harness.models.generateTitle!("User:\nInvestigate the deploy"), {
+    name: "TitleRejected",
+    rule: "reply_opener",
+    message: 'reply_opener: "Sorry, I can\'t summarize that"',
+  });
+});
+
+test("Pi title generation accepts the prompted NONE sentinel without reporting a failure", async (t) => {
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      for (const event of [
+        {
+          type: "message_start",
+          message: {
+            id: "msg_title",
+            type: "message",
+            role: "assistant",
+            model: "title-model",
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " NONE\n" } },
+        { type: "content_block_stop", index: 0 },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 1 },
+        },
+        { type: "message_stop" },
+      ]) {
+        response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      }
+      response.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
+  );
+  const address = server.address();
+  assert(address && typeof address !== "string");
+  const harness = createPiHarness({
+    defaultModelId: "claude-opus-4-8",
+    titleModelId: "claude-haiku-4-5",
+    modelGateway: {
+      url: `http://127.0.0.1:${address.port}`,
+      apiKey: "gateway-key",
+      apiKeyHeader: "api-key",
+      models: { "claude-haiku-4-5": "title-model" },
+    },
+  });
+
+  assert.equal(await harness.models.generateTitle!("User:\nHello"), undefined);
+});
+
 test("piHarnessConfigOptions omits the optional fields when the config leaves them unset", () => {
   const opts = piHarnessConfigOptions(testConfig());
   for (const key of ["defaultModelId", "detectModelId", "titleModelId", "apiKey"] as const) {
@@ -206,14 +364,14 @@ test("piHarnessConfigOptions omits the optional fields when the config leaves th
 
 test("oneShot removes its temp dirs even when the session call throws", async () => {
   const prefix = "pi-onesh-test";
-  const before = countTempDirs(prefix);
+  const before = countTempDirs(`${prefix}-agent-`);
 
   const fakeModel = { id: "claude-sonnet-4-5" } as unknown as Parameters<typeof oneShot>[1];
 
   await assert.rejects(oneShot(prefix, fakeModel, "test-key", "system", "prompt"));
 
-  const after = countTempDirs(prefix);
-  assert.equal(after, before, "oneShot must leave no temp dirs behind");
+  const after = countTempDirs(`${prefix}-agent-`);
+  assert.equal(after, before, "oneShot must leave no agent dirs behind");
 });
 
 test("oneShot completes an authenticated Pi 0.82 turn", async (t) => {
@@ -281,7 +439,9 @@ test("oneShot completes an authenticated Pi 0.82 turn", async (t) => {
 });
 
 test("oneShot routes configured models through the model gateway without mutating transport metadata", async (t) => {
-  const requests: Array<{ gatewayKey?: string; providerKey?: string; model?: string }> = [];
+  let lastBody = "";
+  let stopReason = "end_turn";
+  const requests: Array<{ gatewayKey?: string; providerKey?: string; model?: string; marker?: string }> = [];
   const server = createServer((request, response) => {
     let body = "";
     request.setEncoding("utf8");
@@ -289,11 +449,13 @@ test("oneShot routes configured models through the model gateway without mutatin
       body += String(chunk);
     });
     request.on("end", () => {
+      lastBody = body;
       const requestModel = (JSON.parse(body) as { model?: string }).model;
       requests.push({
         ...(request.headers["api-key"] ? { gatewayKey: String(request.headers["api-key"]) } : {}),
         ...(request.headers["x-api-key"] ? { providerKey: String(request.headers["x-api-key"]) } : {}),
         ...(requestModel ? { model: requestModel } : {}),
+        ...(request.headers["x-model-marker"] ? { marker: String(request.headers["x-model-marker"]) } : {}),
       });
       response.writeHead(200, { "content-type": "text/event-stream" });
       for (const event of [
@@ -315,7 +477,7 @@ test("oneShot routes configured models through the model gateway without mutatin
         { type: "content_block_stop", index: 0 },
         {
           type: "message_delta",
-          delta: { stop_reason: "end_turn", stop_sequence: null },
+          delta: { stop_reason: stopReason, stop_sequence: null },
           usage: { output_tokens: 1 },
         },
         { type: "message_stop" },
@@ -340,23 +502,63 @@ test("oneShot routes configured models through the model gateway without mutatin
     url: `http://127.0.0.1:${address.port}`,
     apiKey: "gateway-secret",
     apiKeyHeader: "api-key",
-    models: { "claude-haiku-4-5": "router/haiku" },
+    models: { "claude-haiku-4-5": "router/haiku", "retired-model-name": "router/retired" },
   };
-  const model = getRequiredModel("claude-haiku-4-5");
+  const model = { ...getRequiredModel("claude-haiku-4-5"), headers: { "x-model-marker": "preserved" } };
+  assert.equal(await oneShot("pi-gateway-test", model, {}, "system", "hello", { modelGateway }), "gateway");
+  const directModel = { ...getRequiredModel("claude-opus-4-8"), baseUrl: modelGateway.url };
+  await assert.rejects(
+    oneShot("pi-unmapped-test", directModel, {}, "system", "hello", { modelGateway }),
+    /No API key found|Provider is not configured/,
+  );
+
   assert.equal(
-    await oneShot("pi-gateway-test", model, "direct-provider-key", "system", "hello", { modelGateway }),
+    await oneShot("pi-direct-test", directModel, "direct-provider-key", "system", "hello", { modelGateway }),
     "gateway",
   );
-  const directModel = { ...getRequiredModel("claude-opus-4-8"), baseUrl: modelGateway.url };
-  assert.equal(await oneShot("pi-direct-test", directModel, "direct-provider-key", "system", "hello"), "gateway");
   assert.deepEqual(requests, [
-    { gatewayKey: "gateway-secret", providerKey: "gateway-secret", model: "router/haiku" },
+    { gatewayKey: "gateway-secret", providerKey: "gateway-secret", model: "router/haiku", marker: "preserved" },
     { providerKey: "direct-provider-key", model: "claude-opus-4-8" },
   ]);
   const routed = modelGatewayRequest(modelGateway, model);
   assert.equal(routed?.model.id, "claude-haiku-4-5");
   assert.equal(routed?.target, "router/haiku");
-  assert.deepEqual(transportFromModel(model), { modelId: "claude-haiku-4-5" });
+  assert.deepEqual(transportFromModel(model), {
+    modelId: "claude-haiku-4-5",
+    headers: { "x-model-marker": "preserved" },
+  });
+  const harness = createPiHarness({ defaultModelId: "claude-haiku-4-5", modelGateway });
+  const compact = harness.models.compactHistory!;
+  const input: Parameters<typeof compact>[0] = {
+    session: { id: "summary-session" } as Parameters<typeof compact>[0]["session"],
+    history: [
+      {
+        sessionId: "summary-session",
+        seq: 136,
+        parentSeq: null,
+        type: "user",
+        payload: { text: "what? local recovery what?" },
+        scopeLabel: "personal:test",
+        createdAt: 0,
+      },
+    ],
+    recordModelCall: () => {},
+  };
+  assert.equal(await compact(input), "gateway");
+  assert.deepEqual(requests.at(-1), {
+    gatewayKey: "gateway-secret",
+    providerKey: "gateway-secret",
+    model: "router/haiku",
+  });
+  const body = JSON.parse(lastBody) as { messages: Array<{ content: Array<{ text?: string }> }> };
+  const prompt = body.messages
+    .flatMap((message) => message.content)
+    .map((block) => block.text ?? "")
+    .join("\n");
+  assert.ok(prompt.indexOf("</conversation>") > prompt.indexOf("user#136"));
+  assert.match(prompt.slice(prompt.indexOf("</conversation>")), /Create a structured context checkpoint summary/);
+  stopReason = "max_tokens";
+  await assert.rejects(compact(input), /did not complete \(length\)/);
 });
 
 test("Pi assistant error messages fail the turn instead of becoming a blank reply", () => {
@@ -411,6 +613,39 @@ test("piTurnError recovers the session's structured error when the agent loop re
 
   const err = piTurnError(session, new Error("An unknown error occurred"));
   assert.match(err.message, /Model provider API error \(overloaded_error\): Overloaded/);
+});
+
+test("transient Pi provider errors stay retryable and keep their message for the final failure", () => {
+  const failed = (errorMessage: string) =>
+    ({
+      getLastAssistantText: () => undefined,
+      messages: [{ role: "assistant", stopReason: "error", errorMessage, content: [] }],
+    }) as unknown as Parameters<typeof piTurnError>[0];
+
+  for (const errorMessage of [
+    '529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+    '500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}',
+    "429 rate limit exceeded",
+    "fetch failed",
+  ]) {
+    const err = piTurnError(failed(errorMessage), new Error("An unknown error occurred"));
+    assert.ok(err instanceof ProviderTurnError, errorMessage);
+    assert.ok(!(err instanceof NonRetryableTurnError), errorMessage);
+    assert.equal(turnFailureMessage(err), err.message);
+    assert.throws(() => piLastAssistantTextOrThrow(failed(errorMessage)), ProviderTurnError);
+  }
+
+  for (const errorMessage of [
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low."}}',
+    "429 insufficient_quota",
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 215003 tokens > 200000 maximum"}}',
+    "prompt is too long: 215003 tokens > 200000 maximum",
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"thinking.budget_tokens must be at least 1500"}}',
+    '400 {"type":"invalid_request_error","message":"max_tokens must be at most 50000"}',
+    '429 {"type":"error","error":{"type":"rate_limit_error","message":"quota exceeded"}}',
+  ]) {
+    assert.ok(piTurnError(failed(errorMessage), new Error("x")) instanceof NonRetryableTurnError, errorMessage);
+  }
 });
 
 test("piTurnError falls back to the thrown error when the session has no structured error", () => {
@@ -688,6 +923,14 @@ test("isProviderRefusal matches Anthropic's ToS-refusal wording and nothing else
     true,
   );
   assert.equal(isProviderRefusal("This request seems to violate Anthropic’s usage policy."), true);
+  assert.equal(
+    isProviderRefusal(
+      "This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy. To learn more, see https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback.",
+    ),
+    true,
+  );
+  assert.equal(isProviderRefusal("The model refused to complete the request"), true);
+  assert.equal(isProviderRefusal("Gateway model is unavailable: claude-opus-5-5"), true);
   assert.equal(isProviderRefusal("Anthropic API error (overloaded_error): Overloaded"), false);
   assert.equal(isProviderRefusal("prompt is too long: 250000 tokens > 200000 maximum"), false);
   assert.equal(isProviderRefusal(undefined), false);
@@ -725,6 +968,12 @@ test("refusal fallback drawdown: Fable -> Opus, Opus -> Sonnet, never the refuse
   assert.equal(refusalFallbackModelId("claude-fable-5-1"), "claude-opus-5");
   assert.equal(refusalFallbackModelId("claude-fable-5"), "claude-opus-5");
   assert.equal(refusalFallbackModelId("claude-opus-5"), "claude-sonnet-5");
+  assert.equal(refusalFallbackModelId("claude-opus-5", "gpt-6-sol"), "gpt-6-sol");
+  assert.equal(refusalFallbackModelId("gpt-6-sol", "gpt-6-sol"), "claude-opus-5");
+  assert.equal(
+    refusalFallbackModelId("claude-opus-5", "not-a-pi-model", (id) => id !== "not-a-pi-model"),
+    "claude-sonnet-5",
+  );
   for (const id of REFUSAL_FALLBACK_MODEL_IDS) {
     assert.notEqual(refusalFallbackModelId(id), id);
     assert.equal(resolveModel(id)?.provider, "anthropic");
@@ -737,4 +986,26 @@ test("resolveConfiguredModelId: an unresolvable default is rejected too, so auxi
   assert.doesNotThrow(() =>
     getRequiredModel(auxiliaryModelFor(resolveConfiguredModelId(undefined, "anthropic/claude-sonnet-4-5"))),
   );
+});
+
+test("Pi judge uses supported reasoning effort when configured with Astra", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  let request: { model?: string; reasoning?: { effort?: string } } | undefined;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const encoded = new Headers(init?.headers).get("content-encoding") === "zstd";
+    const text = encoded ? zstdDecompressSync(init?.body as Uint8Array).toString() : String(init?.body);
+    request = JSON.parse(text);
+    return new Response(JSON.stringify({ error: { message: "offline judge test" } }), { status: 400 });
+  }) as typeof fetch;
+  const harness = createPiHarness({
+    judgeModelId: "gpt-6-astra",
+    resolveProviderKeys: async () => ({ openai: "sk-offline-test-key" }),
+  });
+  await assert.rejects(harness.models.judge!("Judge the answer.", "answer"), /offline judge test/);
+  assert.ok(request);
+  assert.equal(request.model, "gpt-6-astra");
+  assert.equal(request.reasoning?.effort, "low");
 });

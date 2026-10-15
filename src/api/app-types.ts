@@ -1,4 +1,12 @@
+import type { ExternalSlackPolicies } from "../resolution/external-slack.ts";
+import type { InviteMailer } from "../admin/invite-email.ts";
+import type { DeploymentInvitation } from "../deploy/email-access.ts";
+import type { AdmittedWork } from "../util/admitted-work.ts";
+import type { EventBus } from "../util/event-bus.ts";
+import type { RunStreamEvent } from "../runs/run-stream-events.ts";
+import type { ResourceSearchStore, ResourceSearchHit } from "../search/resource-search.ts";
 import type { ModelOverlayStore } from "../model/model-overlay-store.ts";
+import type { SwarmService } from "../swarms/swarm-service.ts";
 import type {
   DeliveryProvenance,
   Grant,
@@ -49,7 +57,7 @@ import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import { type AdminService } from "../admin/admin-service.ts";
 import type { CronStore, CreateCronInput, CronPatch } from "../cron/cron-store.ts";
 import type { CronFireRecord } from "../cron/fire-store.ts";
-import type { WebhookStore, CreateWebhookInput } from "../webhooks/webhook-store.ts";
+import type { WebhookStore, WebhookEvent, CreateWebhookInput } from "../webhooks/webhook-store.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type {
   ChannelMembership,
@@ -91,8 +99,8 @@ import type { DeploymentLayerRuntime } from "../deployment/load-layer.ts";
 import { type ArtifactHome, type ArtifactType } from "./artifact-share.ts";
 import type {
   DeployService,
-  DeployFile,
   DeployInput,
+  RedeployInput,
   Reach,
   ReachOptions,
   DeploymentGrantee,
@@ -124,6 +132,8 @@ export interface DeploymentView {
   appliedVersion?: number;
   status: Deployment["status"];
   alwaysOn?: boolean;
+  embedAncestors?: string[];
+  public: boolean;
   lastAccessAt?: number;
   createdAt?: number;
   updatedAt?: number;
@@ -152,6 +162,8 @@ export function deploymentView(d: Deployment): DeploymentView {
     ...(d.appliedVersion !== undefined ? { appliedVersion: d.appliedVersion } : {}),
     status: d.status,
     ...(d.alwaysOn ? { alwaysOn: true } : {}),
+    ...(d.embedAncestors?.length ? { embedAncestors: d.embedAncestors } : {}),
+    public: d.public === true,
     ...(d.lastAccessAt !== undefined ? { lastAccessAt: d.lastAccessAt } : {}),
     ...(versions[0] ? { createdAt: versions[0].createdAt } : {}),
     ...(versions.at(-1) ? { updatedAt: versions.at(-1)!.createdAt } : {}),
@@ -216,7 +228,12 @@ interface SessionBackgroundView {
     expiresAt: number;
     lastFiredAt?: number;
   }>;
-  crons: Array<{ id: string; title?: string; nextFireAt?: number }>;
+  crons: Array<{
+    id: string;
+    title?: string;
+    nextFireAt?: number;
+    lastFire?: { firedAt: number; status?: CronFireLogEntry["status"] };
+  }>;
 }
 
 interface SessionBackgroundOutput {
@@ -258,18 +275,28 @@ export interface SessionSearchHit {
 }
 
 export interface App {
-  turn(req: TurnRequest): Promise<TurnResult>;
+  swarms?: SwarmService;
+  turn(req: TurnRequest, replay?: { signalDedupKey: string }): Promise<TurnResult>;
   getApproval(requestId: string, viewer?: string): Promise<(PendingApprovalRecord & { requestId: string }) | null>;
   subscribeSessionStates(cb: (event: SessionStateEvent) => void, opts?: SubscribeOptions): () => void;
   subscribeLedgerEvents(cb: (event: OwnedLedgerEvent) => void, opts?: SubscribeOptions): () => void;
   listSessionApprovals(sessionId: string, viewer: string): Promise<PendingApproval[]>;
   pendingApprovalForThread(threadRef: string, viewer?: string): Promise<TurnResult | null>;
+  subscribeRun(runId: string, listener: (event: RunStreamEvent) => void, onResync?: () => void): () => void;
+  syncRunStream(runId: string, offset: number): void;
   getRun(
     runId: string,
     viewer?: string,
   ): Promise<{
     status: Run["status"];
     result: TurnResult | null;
+    input?: {
+      runId: string;
+      seq: number | null;
+      text: string;
+      createdAt: number;
+      attachments?: Array<{ name: string; mimetype: string; sizeBytes: number }>;
+    };
     partial?: string;
     alive?: boolean;
     stale?: boolean;
@@ -283,10 +310,18 @@ export interface App {
     startedAt: number | null;
     finishedAt: number | null;
   } | null>;
+  getRunToolEntries(runId: string, viewer?: string, afterSeq?: number): Promise<SessionEntry[]>;
+  stopConversation(threadRef: string, viewer?: string): Promise<boolean>;
   activeRunForThread(
     threadRef: string,
     viewer?: string,
   ): Promise<{ runId: string; queued?: Array<{ runId: string; text: string; hasAttachments?: boolean }> } | null>;
+  editQueuedRun(
+    runId: string,
+    text: string,
+    expectedText: string,
+    viewer?: string,
+  ): Promise<{ edited: boolean; reason?: string }>;
   withdrawRun(runId: string, viewer?: string): Promise<{ withdrawn: boolean; reason?: string }>;
   signalRun(
     runId: string,
@@ -321,6 +356,10 @@ export interface App {
   listConversationPins(threadRef: string, reader: string): Promise<SessionPinView[] | null>;
   unpinConversationItem(threadRef: string, pinId: string): Promise<boolean | null>;
   listSessions(principalId: string): Promise<Session[]>;
+  searchResources(
+    principalId: string,
+    query: string,
+  ): Promise<{ hits: ResourceSearchHit[]; failed: string[]; limited: string[] }>;
   searchSessions(principalId: string, query: string, limit?: number): Promise<SessionSearchHit[]>;
   search(
     query: string,
@@ -344,9 +383,17 @@ export interface App {
   updateSession(
     sessionId: string,
     principalId: string,
-    patch: { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null },
+    patch: {
+      title?: string | null;
+      archived?: boolean;
+      pinned?: boolean;
+      color?: string | null;
+      status?: Session["status"];
+    },
   ): Promise<Session | null>;
   regenerateTitle(sessionId: string, principalId: string): Promise<{ title: string | null } | null>;
+  detachSession(sessionId: string, principalId: string): Promise<{ detached: true } | null>;
+  adoptSession(sessionId: string, parentSessionId: string, principalId: string): Promise<{ adopted: true } | null>;
   spawnSession(principalId: string, opts: { scopeId: ScopeId; title?: string }): Promise<{ session: Session } | null>;
   discardSession(sessionId: string, principalId: string): Promise<boolean>;
   forkSession(
@@ -361,6 +408,9 @@ export interface App {
   ): Promise<FileListItem | null>;
   listScopeResources(principalId: string, scope: ScopeId): Promise<ScopeResources | null>;
   managesScope(principalId: string, scope: ScopeId): Promise<boolean>;
+  currentScopeMembers(scope: ScopeId): Promise<Principal[] | undefined>;
+  isCurrentSharedScopeMember(principalId: string, scope: ScopeId): Promise<boolean>;
+  isOpenScopeMember(principalId: string, scope: ScopeId): Promise<boolean>;
   membershipControlsScope(scope: ScopeId): Promise<boolean>;
   authorizesCapabilityScope(
     claims: Pick<CapabilityClaims, "actorId" | "scopeId" | "scopeVersion" | "botActor" | "liveActor" | "members">,
@@ -386,7 +436,7 @@ export interface App {
     scopeId: ScopeId,
     content: string,
     actorId: string,
-    opts?: { allowSharedScope?: boolean },
+    opts?: { allowSharedScope?: boolean; expectedVersion?: number },
   ): Promise<number>;
   createCron(input: CreateCronInput): Promise<Cron>;
   getCron(id: string): Promise<Cron | null>;
@@ -399,10 +449,12 @@ export interface App {
   listCronFires(id: string, opts?: { limit?: number }): Promise<{ runs: CronFireLogEntry[]; total: number }>;
   cronFiresByThreadRefs(threadRefs: readonly string[]): Promise<CronFireRecord[]>;
   latestCronFireForThread(id: string, threadRef: string): Promise<CronFireLogEntry | undefined>;
+  setCronRuntime(id: string, runtime: Exclude<Cron["runtime"], undefined>): Promise<Cron | null>;
   setCronDestination(id: string, destination: Destination | undefined): Promise<Cron | null>;
   setCronRecipientConsent(id: string, recipientConsent: RecipientConsent): Promise<void>;
   createWebhook(input: CreateWebhookInput): Promise<Webhook>;
   getWebhook(id: string): Promise<Webhook | null>;
+  listWebhookEvents(id: string, viewer: string): Promise<Array<WebhookEvent & { sessionId?: string }>>;
   listWebhooks(): Promise<Webhook[]>;
   setWebhookEnabled(id: string, enabled: boolean): Promise<void>;
   setWebhookRecipientConsent(id: string, recipientConsent: RecipientConsent): Promise<void>;
@@ -452,6 +504,7 @@ export interface App {
     syncedAt?: number,
     channelRosterIds?: string[],
     revocations?: ChannelMembership[],
+    partial?: boolean,
   ): Promise<boolean>;
   upsertGroups(
     groupMembers: GroupMembership[],
@@ -477,10 +530,7 @@ export interface App {
   reachNow(input: ReachNowInput): Promise<ReachNowResult>;
   resolveReachTarget(target: ReachTarget, authorityId: string, opts?: ReachOpts): Promise<ReachResolution>;
   deploy(input: DeployInput): Promise<Deployment>;
-  redeploy(
-    id: string,
-    input: { entrypoint: string; files: DeployFile[]; env?: Record<string, string> },
-  ): Promise<Deployment>;
+  redeploy(id: string, input: RedeployInput): Promise<Deployment>;
   listDeployments(): Promise<Deployment[]>;
   getDeployment(idOrName: string): Promise<Deployment | null>;
   listDeploymentsForViewer(principalId: string): Promise<ViewerDeployment[]>;
@@ -526,6 +576,8 @@ export interface App {
   renameDeployment(id: string, name: string): Promise<Deployment>;
   setDeploymentDisplayName(id: string, displayName: string): Promise<Deployment>;
   setDeploymentAlwaysOn(id: string, alwaysOn: boolean): Promise<Deployment>;
+  setDeploymentEmbedAncestors(id: string, embedAncestors: string[]): Promise<Deployment>;
+  setDeploymentPublic(idOrName: string, isPublic: boolean, actor: { createdBy: string }): Promise<Deployment>;
   keepAlwaysOnWarm(): Promise<number>;
   reachDeployment(id: string, principalId: string, opts?: ReachOptions): Promise<Reach>;
   deploymentLogsFor(
@@ -539,6 +591,14 @@ export interface App {
     permission: Permission | null,
     actor: { createdBy: string },
   ): Promise<DeploymentGrantee[]>;
+  inviteToDeployment(
+    idOrName: string,
+    email: string,
+    actorId: string,
+  ): Promise<{
+    grantees: DeploymentGrantee[];
+    invitation: DeploymentInvitation;
+  }>;
   deploymentGrantees(idOrName: string): Promise<DeploymentGrantee[]>;
   deploymentGitRepoPath(id: string): Promise<string | null>;
   runDeploymentGitPush<T>(id: string, runReceivePack: () => Promise<{ result: T; ok: boolean }>): Promise<T>;
@@ -556,8 +616,13 @@ export interface App {
 }
 
 export interface AppDeps {
+  externalSlackPolicies?: ExternalSlackPolicies;
+  admittedWork?: AdmittedWork;
+  resourceSearch?: ResourceSearchStore;
+  swarms?: SwarmService;
   identity: IdentityService;
   publicWebUrl?: string;
+  inviteMailer?: InviteMailer;
   sessions: SessionStore;
   screenSecurity?: SecurityScreenProbe;
   orchestrator: Orchestrator;
@@ -566,6 +631,7 @@ export interface AppDeps {
   maxAttempts: number;
   runWaitMs?: number;
   turnStream?: TurnStream;
+  runStreamEvents?: EventBus<RunStreamEvent>;
   runActivity?: RunActivityStore;
   signals?: RunSignalStore;
   tasks?: TaskStore;
@@ -595,6 +661,7 @@ export interface AppDeps {
   emailAuthMembers?: DirectoryMember[];
   projects?: ProjectStore;
   deploy: DeployService;
+  deployAppsDomain?: string;
   deploymentLayer?: DeploymentLayerRuntime;
   files: FileArtifactStore;
   approvals?: DurableMap<PendingApprovalRecord>;
@@ -609,7 +676,7 @@ export interface AppDeps {
   engaged?: EngagedRegistry;
   surfaceCache?: SurfaceCache;
   channelPolicy?: ChannelPolicyStore;
-  ambientJudge?: (systemPrompt: string, prompt: string) => Promise<string | undefined>;
+  ambientJudge?: (systemPrompt: string, prompt: string, signal?: AbortSignal) => Promise<string | undefined>;
   ambientCursors?: DurableMap<{ lastJudgedTs: string; lastJudgedAt?: number }>;
   ambientJudgments?: AmbientJudgmentStore;
   ackEmojiPicks?: AckEmojiPickStore;

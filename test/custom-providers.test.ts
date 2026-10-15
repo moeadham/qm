@@ -5,6 +5,7 @@ import {
   resolveCustomModel,
   isCustomModelId,
   customModelCatalog,
+  customModelsJson,
   validateCustomProviderSpec,
 } from "../src/model/custom-providers.ts";
 import { builtInModelCatalog } from "../src/model/model-catalog.ts";
@@ -49,6 +50,21 @@ test("anthropic-protocol providers produce anthropic-messages models with defaul
   assert.equal(model.api, "anthropic-messages");
   assert.equal(model.contextWindow, 128_000);
   assert.equal(model.cost.input, 0);
+});
+
+test("openai-responses survives both custom model mappings", () => {
+  setCustomProviders([
+    {
+      id: "responses-gateway",
+      name: "Responses Gateway",
+      protocol: "openai-responses",
+      baseUrl: "https://responses.example.com/v1",
+      models: [{ id: "responses-model" }],
+    },
+  ]);
+  assert.equal(resolveCustomModel("responses-model")?.api, "openai-responses");
+  const generated = customModelsJson() as { providers: Record<string, { api: string }> };
+  assert.equal(generated.providers["responses-gateway"]?.api, "openai-responses");
 });
 
 test("resolveModel falls back to custom models; built-ins shadow custom ids", () => {
@@ -189,4 +205,52 @@ test("catalog cache invalidates immediately when the custom registry changes", a
   }
   const cleared = await selectableModelCatalog(fetcher);
   assert.ok(!cleared.some((m) => m.id === "fresh-model"), "removal visible immediately too");
+});
+
+for (const field of ["contextWindow", "maxTokens"] as const) {
+  test(`custom provider ${field} must be a positive safe integer`, () => {
+    for (const value of [0, -1, 2048.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+      assert.throws(
+        () => validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "acme-large", [field]: value }] }),
+        /positive safe integer/,
+        `${field}=${value}`,
+      );
+    }
+    assert.doesNotThrow(() =>
+      validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "acme-large", [field]: 8192 }] }),
+    );
+    assert.doesNotThrow(() =>
+      validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "acme-large", input: 0.25, output: 0 }] }),
+    );
+  });
+}
+
+for (const protocol of ["openai", "openai-responses", "anthropic"] as const) {
+  for (const reasoning of [undefined, false, true]) {
+    test(`custom ${protocol} reasoning=${reasoning} survives persistence and runtime mappings`, async () => {
+      const spec = { ...GATEWAY, protocol, models: [{ ...GATEWAY.models[0]!, reasoning }] };
+      const backing = createMemoryMap<StoredCustomProvider>();
+      const store = createCustomProviderStore({ backing, keyMaterial: "reasoning-test" });
+      await store.upsert(spec, "local", "admin@example.com");
+      const reloaded = createCustomProviderStore({ backing, keyMaterial: "reasoning-test" });
+      setCustomProviders(await reloaded.enabled());
+      const model = resolveCustomModel("acme-large")!;
+      assert.equal(model.reasoning, reasoning ?? false);
+      const json = customModelsJson() as {
+        providers: Record<string, { models: Array<{ reasoning: boolean; cost: typeof model.cost }> }>;
+      };
+      assert.equal(json.providers[spec.id]!.models[0]!.reasoning, reasoning ?? false);
+      assert.deepEqual(json.providers[spec.id]!.models[0]!.cost, model.cost);
+      assert.deepEqual((await reloaded.statuses())[0]!.models, spec.models);
+    });
+  }
+}
+
+test("custom provider reasoning rejects non-boolean capabilities", () => {
+  for (const reasoning of ["true", "false", 0, 1, null, {}]) {
+    assert.throws(
+      () => validateCustomProviderSpec({ ...GATEWAY, models: [{ id: "acme-large", reasoning } as never] }),
+      /reasoning must be a boolean/,
+    );
+  }
 });

@@ -2,10 +2,16 @@ import { relative } from "node:path";
 import type { ScopeId } from "../../types.ts";
 import type { HarnessModelUtilities } from "../../harness/harness.ts";
 import type { WorkspaceStore } from "../../workspace/workspace-store.ts";
-import { type MemoryService, ccCaptureToPersonal } from "../memory-service.ts";
+import { replaceRecords, type MemoryService } from "../memory-service.ts";
 import type { MemoryStrategy } from "../strategy.ts";
 import { bullets, capTail, dateStr, normalize } from "../notebook.ts";
-import { type Burst, createBurstBuffer, DEFAULT_CAPTURE_MAX_TURNS, extractFacts } from "./per-turn.ts";
+import {
+  type Burst,
+  createBurstBuffer,
+  DEFAULT_CAPTURE_MAX_TURNS,
+  extractFacts,
+  burstCaptureContext,
+} from "./per-turn.ts";
 import { createKeyedQueue } from "../../util/async.ts";
 
 const LOG_DIR = "memory/log";
@@ -77,7 +83,10 @@ export function createScratchPromote(deps: ScratchPromoteDeps): { strategy: Memo
 
   async function rewriteMarker(scopeId: ScopeId, edit: (body: string) => string | null): Promise<string | null> {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const head = base.readHead && base.replaceIfRevision ? await base.readHead(scopeId) : null;
+      const head =
+        base.readHead && (base.replaceIfRevision || base.replaceRecordsIfRevision)
+          ? await base.readHead(scopeId)
+          : null;
       const body = head ? head.content : await base.read(scopeId);
       const next = edit(body);
       if (next === null) return null;
@@ -91,6 +100,23 @@ export function createScratchPromote(deps: ScratchPromoteDeps): { strategy: Memo
   }
 
   async function bumpMarker(scopeId: ScopeId, by: number): Promise<number> {
+    if (base.replaceRecordsIfRevision) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const head = await base.readHead?.(scopeId);
+        if (!head?.records) break;
+        const count = (head.records.pendingScratchCaptures ?? Number(head.content.match(MARKER_RE)?.[1] ?? 0)) + by;
+        if (
+          await base.replaceRecordsIfRevision(
+            scopeId,
+            { ...head.records, pendingScratchCaptures: count },
+            head.revision,
+          )
+        )
+          return count;
+      }
+      const head = await base.readHead?.(scopeId);
+      if (head?.records) return head.records.pendingScratchCaptures ?? 0;
+    }
     let count = 0;
     const committed = await rewriteMarker(scopeId, (body) => {
       const m = body.match(MARKER_RE);
@@ -102,12 +128,6 @@ export function createScratchPromote(deps: ScratchPromoteDeps): { strategy: Memo
     const body = await base.read(scopeId);
     const m = body.match(MARKER_RE);
     return m ? Number(m[1]) : 0;
-  }
-
-  async function resetMarker(scopeId: ScopeId): Promise<void> {
-    await rewriteMarker(scopeId, (body) =>
-      MARKER_RE.test(body) ? body.replace(MARKER_RE, "<!-- captures-since-promote: 0 -->") : null,
-    );
   }
 
   async function readLogWindow(
@@ -125,6 +145,12 @@ export function createScratchPromote(deps: ScratchPromoteDeps): { strategy: Memo
 
   const memory: MemoryService = {
     ...base,
+    withDisclosure: undefined,
+    replaceRecordsIfRevision: undefined,
+    async readHead(scopeId) {
+      const head = await base.readHead?.(scopeId);
+      return { content: head?.content ?? (await base.read(scopeId)), revision: head?.revision ?? "" };
+    },
     async recall(scopeId) {
       const longTerm = stripMarker(await base.recall(scopeId));
       const parts = longTerm ? [longTerm] : [];
@@ -134,7 +160,10 @@ export function createScratchPromote(deps: ScratchPromoteDeps): { strategy: Memo
       return parts.join("\n\n");
     },
 
-    async capture(scopeId, facts, at) {
+    async capture(scopeId, facts, at, _author, context) {
+      if (context?.conversationScopeId && context.conversationScopeId !== scopeId) return 0;
+      if (context?.inheritedRecords?.some((record) => record.sources.some((source) => source.scopeId !== scopeId)))
+        return 0;
       return perScope(scopeId, async () => {
         const clean = facts.map((f) => f.replace(/\s+/g, " ").trim()).filter(Boolean);
         if (!clean.length) return 0;
@@ -157,7 +186,6 @@ export function createScratchPromote(deps: ScratchPromoteDeps): { strategy: Memo
 
         const count = await bumpMarker(scopeId, added.length);
         if (deps.consolidateAfter > 0 && count >= deps.consolidateAfter) {
-          await resetMarker(scopeId);
           await strategy.maintain!(scopeId).catch(() => {});
         }
         return added.length;
@@ -180,11 +208,10 @@ export function createScratchPromote(deps: ScratchPromoteDeps): { strategy: Memo
   };
 
   async function flushBurst(burst: Burst): Promise<void> {
-    const facts = await extractFacts(deps.harness, burst.turns);
+    const { facts, sensitivity } = await extractFacts(deps.harness, burst.turns);
     if (!facts.length) return;
     const at = Date.now();
-    await memory.capture(burst.scopeId, facts, at);
-    await ccCaptureToPersonal(memory, burst.conversationScopeId, burst.actorId, facts, at, burst.conversationLabel);
+    await memory.capture(burst.scopeId, facts, at, burst.actorId, { ...burstCaptureContext(burst), sensitivity });
   }
 
   const strategy: MemoryStrategy = {
@@ -199,23 +226,36 @@ export function createScratchPromote(deps: ScratchPromoteDeps): { strategy: Memo
       const now = Date.now();
       const window = await readLogWindow(scopeId, now, LOG_RETENTION_DAYS);
       if (window.length && deps.harness.oneShot) {
-        const head = base.readHead && base.replaceIfRevision ? await base.readHead(scopeId) : null;
+        const head =
+          base.readHead && (base.replaceIfRevision || base.replaceRecordsIfRevision)
+            ? await base.readHead(scopeId)
+            : null;
         const raw = head ? head.content : await base.read(scopeId);
         const longTerm = stripMarker(raw);
         const scratch = window.map(({ date, body }) => `## ${date}\n${body}`).join("\n\n");
         const out = (
-          (await deps.harness.oneShot(
-            PROMOTION_PROMPT,
-            `Current notebook:\n${longTerm || "(empty)"}\n\nScratch log:\n${scratch}`,
-          )) ?? ""
+          (await deps.harness
+            .oneShot(PROMOTION_PROMPT, `Current notebook:\n${longTerm || "(empty)"}\n\nScratch log:\n${scratch}`)
+            .catch(() => "")) ?? ""
         ).trim();
-        if (!out || out.length > MAX_PROMOTED_NOTEBOOK_CHARS) return;
-        if (!/^none$/i.test(out)) {
-          if (head) {
-            await base.replaceIfRevision!(scopeId, out, head.revision);
-          } else {
-            await base.replace(scopeId, out);
-          }
+        const promoted = out && out.length <= MAX_PROMOTED_NOTEBOOK_CHARS && !/^none$/i.test(out);
+        const next = promoted ? out : longTerm;
+        if (head) {
+          if (head.records && base.replaceRecordsIfRevision) {
+            if (
+              !(await base.replaceRecordsIfRevision(
+                scopeId,
+                {
+                  ...(next === longTerm ? head.records : replaceRecords(scopeId, head.records, next)),
+                  pendingScratchCaptures: 0,
+                },
+                head.revision,
+              ))
+            )
+              return;
+          } else if (!(await base.replaceIfRevision!(scopeId, next, head.revision))) return;
+        } else {
+          await base.replace(scopeId, next);
         }
       }
       const cutoff = dateStr(now - LOG_RETENTION_DAYS * 86_400_000);

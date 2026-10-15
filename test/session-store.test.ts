@@ -1,3 +1,4 @@
+import { assertPersonalConversationParity } from "./support/personal-conversation-parity.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMemorySessionStore } from "../src/sessions/memory-session-store.ts";
@@ -6,6 +7,7 @@ import { acquireLeaseWithin, cronIdOf, sessionCategory, sessionOrigin } from "..
 import { parseSessionWakeRef } from "../src/api/routes/admin/origins.ts";
 import { scopeId } from "../src/types.ts";
 import { assertParticipantSessionParity } from "./support/participant-session-parity.ts";
+import { assertSpendRollupParity } from "./support/spend-rollup-parity.ts";
 import { byScopeId, rollupsFromSummaries } from "./support/scope-rollup-oracle.ts";
 
 test("sessionOrigin classifies trigger threads by prefix", () => {
@@ -704,6 +706,17 @@ for (const [name, make] of backends) {
     );
   });
 
+  test(`${name}: bounded participant listing returns recent rows and keeps the unbounded API`, async () => {
+    const store = make();
+    for (let i = 0; i < 5; i++) {
+      const session = await store.getOrCreateByThread(`bounded:${i}`, "dm", scopeId("personal", "bounded-user"));
+      await store.addParticipant(session.id, "bounded-user");
+    }
+    assert.equal((await store.listByParticipant("bounded-user")).length, 5);
+    assert.equal((await store.listByParticipant("bounded-user", { limit: 2 })).length, 2);
+    assert.equal((await store.listByParticipant("bounded-user", { limit: 0 })).length, 0);
+  });
+
   test(`${name}: listByParticipant powers unified history`, async () => {
     const store = make();
     const s1 = await store.getOrCreateByThread("t1", "dm", scopeId("personal", "U1"));
@@ -719,6 +732,10 @@ for (const [name, make] of backends) {
     const store = make();
     await assertParticipantSessionParity(store, `parity-${name}-a`);
     await assertParticipantSessionParity(store, `parity-${name}-b`);
+  });
+
+  test(`${name}: spendRollup groups model-call cost by UTC day, scope, origin and model`, async () => {
+    await assertSpendRollupParity((now) => createMemorySessionStore({ now }), `spend-${name}`);
   });
 
   test(`${name}: countSessions and distinctParticipants aggregate without loading rows`, async () => {
@@ -1114,4 +1131,8 @@ test("renewLease keeps a live turn's lock fresh and refuses stale or superseded 
   const taken = await store.acquireLease(s.id, "turn");
   assert.ok(taken.lease, "an expired lease can still be taken over");
   assert.equal(await store.renewLease(lease!), false, "the superseded holder cannot renew the new lock");
+});
+
+test("personal conversation counts exclude synthetic and inherited chats", async () => {
+  await assertPersonalConversationParity(createMemorySessionStore(), "personal-count");
 });

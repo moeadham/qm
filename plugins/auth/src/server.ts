@@ -1,16 +1,18 @@
+import { reportBackendError } from "../../chassis/src/error-reporting.ts";
 import { createHmac } from "node:crypto";
 import { coreRememberedSessions, type RememberedSessions, type RememberedSession } from "./sessions.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readBody, PayloadTooLargeError, sendBuffered, serveEmojiFavicon } from "../../chassis/src/http.ts";
+import { readBody, PayloadTooLargeError, sendBuffered, serveFavicon } from "../../chassis/src/http.ts";
 import { errMessage } from "../../chassis/src/errors.ts";
 import type { AuthConfig } from "./config.ts";
-import { validEmail } from "./config.ts";
+import { passwordConfigured, validEmail } from "./config.ts";
+import { verifyPassword } from "./password.ts";
 import { claimOnce, withinRateLimit, ClaimStoreUnavailableError, type ClaimStore } from "../../chassis/src/claims.ts";
 import { coreEmailAllowed } from "../../chassis/src/external-members.ts";
 import { mintIdToken, pkceMatches, safeEqual, subjectFor, TokenSigner, type AuthRequest } from "./tokens.ts";
 import { ID_TOKEN_ALG, type SigningKey } from "./keys.ts";
 import { renderSignInEmail, type Mailer } from "./email.ts";
-import { confirmSignInPage, emailFormPage, linkSentPage, problemPage, CONFIRM_PAGE_CSP, PAGE_CSP } from "./pages.ts";
+import { confirmSignInPage, signInPage, linkSentPage, problemPage, CONFIRM_PAGE_CSP, PAGE_CSP } from "./pages.ts";
 
 const MAX_FORM_BYTES = 8 * 1024;
 const ID_TOKEN_TTL_S = 300;
@@ -24,6 +26,7 @@ export interface AuthDeps {
   sessions?: RememberedSessions;
   mailer: Mailer | null;
   brandName?: () => string;
+  trustedSignInLabel?: string;
   emailAllowed?: (email: string) => Promise<boolean>;
   now?: () => number;
   onBackgroundTask?: (task: Promise<void>) => void;
@@ -122,6 +125,20 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
   const now = deps.now ?? Date.now;
   const notify = deps.onBackgroundTask ?? ((task: Promise<void>) => void task.catch(() => undefined));
   const formAction = `${cfg.publicPath}/authorize`;
+  const passwords = passwordConfigured(cfg);
+  const signInForm = (
+    requestToken: string,
+    extra: { email?: string; problem?: string; passwordProblem?: string } = {},
+  ): string =>
+    signInPage({
+      brandName: brandName(),
+      trustedSignInLabel: deps.trustedSignInLabel,
+      action: formAction,
+      requestToken,
+      emailLink: mailer !== null,
+      password: passwords,
+      ...extra,
+    });
   const linkTtlMinutes = Math.max(1, Math.round(cfg.linkTtlS / 60));
   let inFlightSends = 0;
   const background = (task: () => Promise<void>): void => {
@@ -138,7 +155,17 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
   };
 
   const problem = (res: ServerResponse, status: number, heading: string, msg: string, detail?: string): void =>
-    sendHtml(res, status, problemPage({ brandName: brandName(), heading, msg, ...(detail ? { detail } : {}) }));
+    sendHtml(
+      res,
+      status,
+      problemPage({
+        brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
+        heading,
+        msg,
+        ...(detail ? { detail } : {}),
+      }),
+    );
 
   const emailUnavailable = (res: ServerResponse): void =>
     problem(
@@ -146,6 +173,14 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       503,
       "Email delivery isn't configured",
       "Your administrator needs to configure email delivery before you can request a sign-in link.",
+    );
+
+  const passwordUnavailable = (res: ServerResponse): void =>
+    problem(
+      res,
+      503,
+      "Password sign-in isn't configured",
+      "Your administrator has not set up any password accounts on this deployment.",
     );
 
   const signInUrl = ((): string | undefined => {
@@ -162,6 +197,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       400,
       problemPage({
         brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
         heading: "This sign-in link no longer works",
         msg: "Sign-in links work once and expire quickly. Request a fresh one and open it right away.",
         ...(signInUrl ? { retryUrl: signInUrl } : {}),
@@ -254,13 +290,66 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       res.writeHead(302, noStore({ location: destination.toString() }));
       return void res.end();
     }
-    if (!mailer) return emailUnavailable(res);
+    if (!mailer && !passwords) return emailUnavailable(res);
     const sealed = await signer.sealRequest(parsed.request, cfg.requestTtlS, now());
-    return sendHtml(
-      res,
-      200,
-      emailFormPage({ brandName: brandName(), action: formAction, requestToken: sealed.token }),
-    );
+    return sendHtml(res, 200, signInForm(sealed.token));
+  }
+
+  async function passwordSubmit(
+    req: IncomingMessage,
+    res: ServerResponse,
+    request: AuthRequest,
+    form: URLSearchParams,
+  ): Promise<void> {
+    if (!passwords) return passwordUnavailable(res);
+    const email = normalizeEmail(form.get("email") ?? "");
+    const password = form.get("password") ?? "";
+    const reject = async (status: number, passwordProblem: string): Promise<void> => {
+      const sealed = await signer.sealRequest(request, cfg.requestTtlS, now());
+      sendHtml(res, status, signInForm(sealed.token, { email, passwordProblem }));
+    };
+    if (!validEmail(email) || !password) return reject(400, "Enter your email address and password.");
+    const nowMs = now();
+    const ip = clientIpOf(req);
+    try {
+      const within = async (kind: string, value: string, limit: number): Promise<boolean> =>
+        withinRateLimit(claims, { secret: cfg.tokenSecret, kind, value, limit, windowS: cfg.sendWindowS, nowMs });
+      if (!(await within("password-ip", ip, cfg.passwordLimitPerIp))) {
+        console.warn("[auth] password sign-in refused: per-address attempt limit reached for the requesting client");
+        return reject(429, "Too many sign-in attempts. Wait a while, then try again.");
+      }
+      if (!(await within("password-account", email, cfg.passwordLimitPerEmail))) {
+        console.warn("[auth] password sign-in refused: per-account attempt limit reached");
+        return reject(429, "Too many sign-in attempts. Wait a while, then try again.");
+      }
+    } catch (e) {
+      if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+      reportBackendError(e);
+      return problem(
+        res,
+        503,
+        "Sign-in is temporarily unavailable",
+        "The sign-in service cannot reach its backend. Try again in a minute.",
+      );
+    }
+    const matched = await verifyPassword(password, cfg.passwordUsers.get(email));
+    if (!matched || !(await emailAllowed(email))) {
+      console.warn(`[auth] password sign-in refused for ${email}`);
+      return reject(401, "That email address or password is incorrect.");
+    }
+    let session: RememberedSession & { token: string };
+    try {
+      session = await sessions.create(email, cfg.sessionIdleS, cfg.sessionAbsoluteS);
+    } catch {
+      return problem(
+        res,
+        503,
+        "Sign-in is temporarily unavailable",
+        "The sign-in service cannot remember this browser. Try again in a minute.",
+      );
+    }
+    console.log(`[auth] password sign-in for ${email}`);
+    return issueCode(res, request, email, session.authTime, sessionCookie(session.token, session));
   }
 
   async function sendLink(request: AuthRequest, email: string, ip: string, sender: Mailer): Promise<void> {
@@ -282,6 +371,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       }
     } catch (e) {
       if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+      reportBackendError(e);
       console.error(
         "[auth] sign-in link suppressed: core is unreachable, so rate limits cannot be enforced — sign-in fails closed until core is healthy (this is a core outage, not a rate limit)",
       );
@@ -295,12 +385,13 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       );
       console.log(`[auth] sign-in link sent to ${email} (${receipt})`);
     } catch (e) {
+      reportBackendError(e);
       console.error(`[auth] sign-in link to ${email} could not be delivered: ${errMessage(e)}`);
     }
   }
 
   async function authorizeSubmit(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!mailer) return emailUnavailable(res);
+    if (!mailer && !passwords) return emailUnavailable(res);
     let raw: string;
     try {
       raw = await readBody(req, MAX_FORM_BYTES);
@@ -319,22 +410,24 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
         "Sign-in pages are only valid for a short while. Start again from the page you were trying to reach.",
       );
     }
+    if (form.get("method") === "password" || form.has("password")) return passwordSubmit(req, res, request, form);
+    if (!mailer) return emailUnavailable(res);
     const email = normalizeEmail(form.get("email") ?? "");
     if (!validEmail(email)) {
       const sealed = await signer.sealRequest(request, cfg.requestTtlS, now());
-      return sendHtml(
-        res,
-        400,
-        emailFormPage({
-          brandName: brandName(),
-          action: formAction,
-          requestToken: sealed.token,
-          problem: "That doesn't look like an email address.",
-        }),
-      );
+      return sendHtml(res, 400, signInForm(sealed.token, { problem: "That doesn't look like an email address." }));
     }
     const ip = clientIpOf(req);
-    sendHtml(res, 200, linkSentPage({ brandName: brandName(), email, ttlMinutes: linkTtlMinutes }));
+    sendHtml(
+      res,
+      200,
+      linkSentPage({
+        brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
+        email,
+        ttlMinutes: linkTtlMinutes,
+      }),
+    );
     background(() => sendLink(request, email, ip, mailer));
   }
 
@@ -342,7 +435,11 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
     return sendHtml(
       res,
       200,
-      confirmSignInPage({ brandName: brandName(), action: `${cfg.publicPath}/verify` }),
+      confirmSignInPage({
+        brandName: brandName(),
+        trustedSignInLabel: deps.trustedSignInLabel,
+        action: `${cfg.publicPath}/verify`,
+      }),
       CONFIRM_PAGE_CSP,
     );
   }
@@ -361,6 +458,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       linkClaimed = await claimOnce(claims, `link:${opened.jti}`, opened.expiresAtMs);
     } catch (e) {
       if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+      reportBackendError(e);
       return problem(
         res,
         503,
@@ -427,6 +525,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       codeClaimed = await claimOnce(claims, `code:${opened.jti}`, opened.expiresAtMs);
     } catch (e) {
       if (!(e instanceof ClaimStoreUnavailableError)) throw e;
+      reportBackendError(e);
       return sendJson(res, 503, { error: "temporarily_unavailable" });
     }
     if (!codeClaimed) return sendJson(res, 400, { error: "invalid_grant" });
@@ -507,7 +606,7 @@ export function createAuthHandler(deps: AuthDeps): (req: IncomingMessage, res: S
       }
     }
     if (method === "GET" && (path === "/favicon.ico" || path === "/favicon.svg")) {
-      return serveEmojiFavicon(res, "✉️", "max-age=86400");
+      return serveFavicon(res, { svg: cfg.faviconSvg, emoji: "✉️" }, "max-age=86400");
     }
     if (method === "GET" && path === "/.well-known/jwks.json") {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=300" });

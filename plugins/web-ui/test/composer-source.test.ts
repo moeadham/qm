@@ -2,50 +2,63 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+const picker = readFileSync(new URL("../src/model-picker.ts", import.meta.url), "utf8");
+
 const composer = readFileSync(new URL("../src/composer.ts", import.meta.url), "utf8");
 
-test("scope-default buttons render when any runtime setting differs from the scope default", () => {
-  assert.match(composer, /const runtimeToggled =\s*!runtimePending/);
-  assert.match(composer, /composerState\.effortLevel !== effectiveEffort/);
-  assert.match(composer, /fastOn !== effectiveFast/);
-  assert.match(composer, /\$\{\s*runtimeToggled\s*\? html`[\s\S]{0,800}?>\s*Make default\s*<\/button>/);
-  assert.match(composer, /\$\{\s*runtimeToggled && activeRuntimeConfig\?\.scopeOverride/);
+test("preset default actions live on the row while inheritance remains in the footer", () => {
+  const row = picker.slice(picker.indexOf("function loadoutRow"), picker.indexOf("function cancelLoadoutClose"));
+  const loadout = picker.slice(picker.indexOf("function render"), picker.indexOf("function menuArrowKeys"));
+  assert.ok(row.includes('class="loadout-make-default"'));
+  assert.ok(row.includes("effortLevel: settings.effort"));
+  assert.ok(row.includes("fastMode: settings.fast"));
+  assert.ok(!loadout.includes("Make default"));
+  assert.ok(loadout.includes("changeScopeRuntime({ inherit: true }, agent)"));
 });
 
-test("composer-right keeps its control order: make default, use org default, model, harness, send", () => {
-  const runtime = composer.slice(
-    composer.indexOf("const runtimeControls ="),
-    composer.indexOf("return html`", composer.indexOf("const runtimeControls =")),
+test("compact and full composers share one left-side picker with Fast inside its menu", () => {
+  assert.ok(
+    /const runtimeControls = modelPicker.render\(agent, selectedModel, inputBlocked\)/.test(composer),
+    "compact surfaces must retain the full model and effort picker",
   );
-  const rendered = composer.slice(composer.indexOf('class="composer-right"'));
-  assert.match(rendered, /showRuntimeControls \? runtimeControls : nothing/);
-  const right = runtime + rendered;
-  const makeDefault = right.indexOf("Make default");
-  const orgDefault = right.indexOf("Use org default");
-  const model = right.indexOf('kind: "model"');
-  const harness = right.indexOf('kind: "harness"');
-  const send = right.indexOf("sendControls(agent)");
-  for (const [name, at] of [
-    ["Make default", makeDefault],
-    ["Use org default", orgDefault],
-    ["model picker", model],
-    ["harness picker", harness],
-    ["send controls", send],
-  ] as const) {
-    assert.ok(at >= 0, `${name} missing from composer-right`);
-  }
-  assert.ok(makeDefault < orgDefault, "Make default should precede Use org default");
-  assert.ok(orgDefault < model, "Use org default should precede the model picker");
-  assert.ok(model < harness, "the model picker should precede the harness picker");
-  assert.ok(harness < send, "the harness picker should precede the send controls");
+  const leftStart = composer.indexOf('class="composer-left"');
+  const rightStart = composer.indexOf('class="composer-right"');
+  assert.ok(leftStart >= 0 && rightStart > leftStart);
+  assert.ok(composer.slice(leftStart, rightStart).includes("${runtimeControls}"));
+  assert.ok(composer.slice(rightStart).includes("${sendControls(agent)}"));
+  assert.ok(composer.slice(rightStart).includes("composer-mic"));
+  const loadout = picker.slice(picker.indexOf("function render"), picker.indexOf("function menuArrowKeys"));
+  assert.ok(/role="menuitemcheckbox"\s+aria-label="Fast"/.test(loadout));
+  assert.equal((picker.match(/@click=\$\{\(\) => toggleFastMode\(agent\)\}/g) ?? []).length, 1);
+});
+
+test("switching setups preserves prior tweaks and validates effort and Fast for the selected model", () => {
+  const apply = composer.slice(
+    composer.indexOf("function applyLoadout"),
+    composer.indexOf("function composerShortcut"),
+  );
+  const remember = apply.indexOf("rememberActiveTweaks(previous)");
+  const select = apply.indexOf("selectModel(entry.value, agent)");
+  assert.ok(remember >= 0 && select > remember, "save the prior model's tweaks before switching");
+  const normalize = composer.slice(
+    composer.indexOf("function normalizeLoadoutEntry"),
+    composer.indexOf("function seededLoadout"),
+  );
+  assert.ok(normalize.includes("effortLevelsForHarness(option.harnessId, option.model)"));
+  assert.ok(/levels.some\([\s\S]*?\? entry.effort/.test(normalize));
+  assert.ok(apply.includes("normalizeLoadoutEntry(entry, option)"));
+  assert.ok(
+    /entry.fast && harnessSupportsFastMode\(option.harnessId\) && modelSupportsFastMode\(scopeKey\(\), option.model.id\)/.test(
+      normalize,
+    ),
+    "a stored Fast preference cannot enable an unsupported model",
+  );
+  assert.ok(apply.includes("saveLoadout(loadout, loadoutKey)"));
 });
 
 test("attaching files is allowed while a turn is streaming", () => {
-  // The attach button and drop/paste paths must not gate on isStreaming —
-  // only on runtime readiness and pending approvals.
   assert.match(composer, /const attachingDisabled = inputBlocked;/);
   assert.doesNotMatch(composer, /attachingDisabled = inputBlocked \|\| agent\.state\.isStreaming/);
-  // pickFiles, addFiles, and the large-paste path no longer check isStreaming.
   const guards = composer.match(/isStreaming/g) ?? [];
   const pickFiles = composer.slice(
     composer.indexOf("function pickFiles"),
@@ -61,27 +74,13 @@ test("attaching files is allowed while a turn is streaming", () => {
 });
 
 test("a mid-turn submit queues — attachments cannot ride a queued message and stay for the next", () => {
-  // Mid-turn Enter queues through core (queueDraft), so the steer-button attachment note is gone;
-  // the queue button gates only on draft text, never on the run slot.
   assert.match(composer, /\$\{tip\("Queue for after this turn"\)\}/);
   assert.doesNotMatch(composer, /attachments stay for your next message/);
 });
 
-test("a steer whose run already ended is recovered, never silently dropped", () => {
-  // steerQueued must inspect the signal outcome and route a failed steer through recovery.
-  assert.match(composer, /const outcome = await ctx\.chat\.signalLiveRun\("steer", queued\.text\);/);
-  assert.match(composer, /if \(!outcome\.ok\) recoverEndedRunSteer\(agent, queued\.text, outcome\);/);
-  // Replayed by core → detach from the stale stream and attach to the fresh run.
-  assert.match(composer, /function recoverEndedRunSteer\(/);
-  assert.match(composer, /attachWhenIdle\(agent, 0\);/);
-  // Not stored anywhere → the text goes back through a normal send.
-  assert.match(composer, /resendWhenIdle\(agent, text, 0\);/);
-  assert.match(composer, /if \(composerState\.draft === text\) void sendPrompt\(agent\);/);
-});
-
 test("scope runtime defaults include effort and fast mode", () => {
-  assert.match(composer, /effortLevel: composerState\.effortLevel/);
-  assert.match(composer, /fastMode: fastOn/);
-  assert.match(composer, /config\.effective\.effortLevel/);
-  assert.match(composer, /config\.effective\.fastMode === true/);
+  assert.match(picker, /effortLevel: settings\.effort/);
+  assert.match(picker, /fastMode: settings\.fast/);
+  assert.match(composer, /getRuntimeConfig\(scopeKey\(\)\)\?\.effective\.effortLevel/);
+  assert.match(composer, /getRuntimeConfig\(scopeKey\(\)\)\?\.effective\.fastMode === true/);
 });

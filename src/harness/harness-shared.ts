@@ -8,10 +8,11 @@ import {
 import type { TaskStatus, TaskStore } from "../tasks/task-store.ts";
 import type { ScopeId, SessionEntry } from "../types.ts";
 import { createAgentTools, type AgentToolsOptions, type ToolContextRef } from "./agent-tools.ts";
+import { rehydrateOpenGoal } from "./goal.ts";
 import type { HarnessLlmRequestRecord, HarnessModelUtilities, HarnessTurnInput, HarnessTurnResult } from "./harness.ts";
 import { sanitizeTitle, TITLE_GENERATION_PROMPT, titleUserPrompt } from "./pi-harness.ts";
-import { tapeCheckpointPayload, tapeEntryMirrorRecord } from "../sessions/session-store.ts";
-import { swallow } from "../util/errors.ts";
+import { tapeCheckpointPayload, tapeEntryMirrorRecord, type NewTapeRecord } from "../sessions/session-store.ts";
+import { swallow, swallowAs } from "../util/errors.ts";
 
 export interface HarnessToolPlumbing {
   scratchExec?: boolean;
@@ -24,6 +25,7 @@ export interface HarnessToolPlumbing {
   execTimeoutCeilingMs?: number;
   backgroundJobTtlMs?: number;
   backgroundJobTtlMaxMs?: number;
+  sandboxCapabilityTtlMs?: number;
 }
 
 export type BridgedTool = {
@@ -35,6 +37,39 @@ export type BridgedTool = {
     args: unknown,
   ): Promise<{ content?: Array<{ type?: string; text?: string }>; terminate?: boolean }>;
 };
+
+export interface SteerIntake {
+  text: string;
+  ts?: string;
+  attachments?: HarnessTurnInput["attachments"];
+  acknowledge?: () => Promise<void>;
+}
+
+export async function recordSteerIntake(
+  turn: HarnessTurnInput,
+  steer: SteerIntake,
+): Promise<Pick<NewTapeRecord, "entrySeq" | "meta">> {
+  const entry = await turn.emit({
+    type: "user",
+    payload: {
+      text: steer.text,
+      ...(steer.ts ? { ts: steer.ts } : {}),
+      steered: true,
+      ...(steer.attachments?.length ? { attachments: steer.attachments } : {}),
+    },
+    scopeLabel: turn.scopeLabel,
+  });
+  await steer.acknowledge?.().catch(swallowAs("steer acknowledge", undefined));
+  return {
+    entrySeq: entry.seq,
+    meta: {
+      bareText: steer.text,
+      ...(steer.ts ? { ts: steer.ts } : {}),
+      ...(steer.attachments?.length ? { attachments: steer.attachments } : {}),
+      entryCreatedAt: entry.createdAt,
+    },
+  };
+}
 
 export async function tapeReplyCheckpoint(
   turn: Pick<HarnessTurnInput, "tape" | "scopeLabel">,
@@ -76,10 +111,12 @@ export function harnessToolContext(turn: HarnessTurnInput): ToolContextRef {
     pausedOnApproval: false,
     silentRequested: false,
     pollFire: Boolean(turn.pollFire),
+    goal: turn.goal ?? rehydrateOpenGoal(turn.history),
     emit: turn.emit,
     scopeLabel: turn.scopeLabel,
     orgScopeId: turn.orgScopeId,
     screenToolResult: turn.screenToolResult,
+    verifyGoal: turn.verifyGoal,
     toolApprovalGate: turn.toolApprovalGate,
   };
 }
@@ -96,15 +133,29 @@ export function harnessToolOptions(opts: HarnessToolPlumbing, turn?: HarnessTurn
     execTimeoutCeilingMs: opts.execTimeoutCeilingMs,
     backgroundJobTtlMs: opts.backgroundJobTtlMs,
     backgroundJobTtlMaxMs: opts.backgroundJobTtlMaxMs,
+    sandboxCapabilityTtlMs: opts.sandboxCapabilityTtlMs,
     ...(turn
       ? {
           readOnly: turn.readOnly,
+          sessionTools: Boolean(turn.tools.sessionSyscalls),
           surfaceTools: turn.surfaceTools,
+          delegateWork: turn.delegateWork,
           surfaceName: turn.surfaceName,
-          credentialExecServices: turn.credentialExecServices,
+          ...(turn.clientTools?.length ? { clientTools: turn.clientTools } : {}),
         }
       : { surfaceTools: true, surfaceName: "slack" }),
   };
+}
+
+export function nativeChildToolAllowed(name: string, args?: unknown): boolean {
+  if (!["execute", "files", "apps", "memory", "history", "background"].includes(name)) return false;
+  if (args === undefined || (name !== "apps" && name !== "files")) return true;
+  const action = args && typeof args === "object" ? (args as Record<string, unknown>).action : undefined;
+  if (name === "apps") return action === "publish";
+  if (action === "read" || action === "write") return true;
+  return (
+    action === "share" && typeof (args as Record<string, unknown>).path === "string" && !("id" in (args as object))
+  );
 }
 
 export function bridgedTools(ref: ToolContextRef, options: AgentToolsOptions): BridgedTool[] {
@@ -182,7 +233,7 @@ export function oneShotModelUtilities(
 ): Pick<HarnessModelUtilities, "oneShot" | "judge" | "screenSecurity" | "generateTitle" | "summarizeApproval"> {
   return {
     oneShot: (system, prompt) => single(system, prompt),
-    judge: (system, prompt) => single(system, prompt, undefined, undefined, judgeModelId),
+    judge: (system, prompt, signal) => single(system, prompt, signal, undefined, judgeModelId),
     screenSecurity: async ({ payload, signal, recordModelCall, recordLlmRequest }) =>
       parseSecurityScreenVerdict(
         await single(SECURITY_SCREEN_SYSTEM_PROMPT, payload, signal, {

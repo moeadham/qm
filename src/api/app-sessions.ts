@@ -1,3 +1,13 @@
+import { createCurrentScopeMembers } from "../resolution/scope-membership.ts";
+import { notifyDeploymentShared } from "../deploy/share-notice.ts";
+import { deploymentShareScope } from "../deploy/email-access.ts";
+import {
+  sessionTreeRoot,
+  sessionTreeRunCount,
+  SUBAGENT_TREE_RUN_CAP,
+  workingSessionThreadRefs,
+} from "../sessions/session-syscalls.ts";
+import { isSessionStatus } from "../sessions/session-status.ts";
 import type { PendingApprovalRecord } from "../types.ts";
 import { orgId as orgIdOf } from "../config.ts";
 import { parseScopeId, scopeId } from "../types.ts";
@@ -6,14 +16,17 @@ import { entryWithinTenure, transcriptEntries, windowedTranscript } from "../ses
 import { createTranscriptSource } from "../harness/tape-projection.ts";
 import { appendCoverageImport } from "../harness/replay.ts";
 import { swallowAs } from "../util/errors.ts";
+import { latestGoalRecord } from "../harness/goal.ts";
 import { SEARCH_HIT_LIMIT, entrySearchText, searchSnippet, searchTerms } from "../sessions/entry-search.ts";
 import { supportsProcessSessions } from "../sandbox/sandbox.ts";
 import { processIsGone } from "../sandbox/process-poll.ts";
-import { cronRef, deployRef, encodeRef, fileRef, skillRef } from "../acl/resource-ref.ts";
+import { cronIsActive, cronTiedTo } from "../cron/cron-store.ts";
+import { cronRef, deployRef, encodeRef, fileRef, parseRef, skillRef } from "../acl/resource-ref.ts";
 import { samePerson } from "../directory/person.ts";
 import { AdminError } from "../admin/admin-service.ts";
 import { type ArtifactHome } from "./artifact-share.ts";
 import { randomUUID } from "node:crypto";
+import { isOpenScopeMember } from "../resolution/sharing-access.ts";
 import { MAX_ATTACHMENT_BYTES, mimeFromName, safeAttachmentName } from "../core/attachments.ts";
 import { projectIdFromGroupRef, projectScopeId } from "../projects/project-store.ts";
 
@@ -34,14 +47,15 @@ interface TranscriptWindow {
 }
 
 function tailWindowLimit(window?: TranscriptWindow): number | undefined {
-  if (window?.tailTurns === undefined || window.sinceSeq !== undefined || window.beforeSeq !== undefined)
-    return undefined;
+  if (window?.tailTurns === undefined || window.sinceSeq !== undefined) return undefined;
   return Math.min(window.tailTurns * ENTRIES_PER_TURN_ESTIMATE, TAIL_WINDOW_ENTRY_CAP);
 }
 
 function coversTailWindow(entries: readonly { type: string }[], tailTurns: number): boolean {
   return entries.filter((e) => e.type === "user").length >= tailTurns;
 }
+
+const GOAL_LOOKBACK_ENTRIES = 2000;
 
 export function createSessionMethods(
   deps: AppDeps,
@@ -71,9 +85,14 @@ export function createSessionMethods(
   | "setProjectSlackChannel"
   | "listScopeResources"
   | "managesScope"
+  | "isOpenScopeMember"
+  | "isCurrentSharedScopeMember"
+  | "currentScopeMembers"
   | "membershipControlsScope"
   | "authorizesCapabilityScope"
   | "updateSession"
+  | "detachSession"
+  | "adoptSession"
   | "regenerateTitle"
   | "spawnSession"
   | "discardSession"
@@ -102,6 +121,7 @@ export function createSessionMethods(
     syncProjectChannelRoster,
     approvalRecordIsCurrent,
     principalCanAccessCurrentScope,
+    principalCanWriteScope,
     principalGitPermission,
     principalCanManageScope,
     membershipControlsScope,
@@ -201,14 +221,18 @@ export function createSessionMethods(
     async getSession(sessionId, window) {
       const session = await deps.sessions.get(sessionId);
       if (!session) return null;
-      const limit = tailWindowLimit(window);
-      let read = await transcripts.forRender(sessionId, limit !== undefined ? { limit } : undefined);
+      let limit = tailWindowLimit(window);
+      const [initialRead, pinRecords] = await Promise.all([
+        transcripts.forRender(sessionId, { limit, beforeSeq: window?.beforeSeq, sinceSeq: window?.sinceSeq }),
+        deps.sessions.listPins(sessionId),
+      ]);
+      let read = initialRead;
       let all = transcriptEntries(read.entries);
-      if (limit !== undefined && read.earlier > 0 && !coversTailWindow(all, window!.tailTurns!)) {
-        read = await transcripts.forRender(sessionId);
+      while (limit !== undefined && read.earlier > 0 && !coversTailWindow(all, window!.tailTurns!)) {
+        limit *= 2;
+        read = await transcripts.forRender(sessionId, { limit, beforeSeq: window?.beforeSeq });
         all = transcriptEntries(read.entries);
       }
-      const pinRecords = await deps.sessions.listPins(sessionId);
       const w = windowedTranscript(all, window);
       const earlier = w.earlier + read.earlier;
       const pins = await decoratedPins(pinRecords, all, (seq) => storedEntryAt(sessionId, seq));
@@ -242,14 +266,22 @@ export function createSessionMethods(
     async getSessionForViewer(sessionId, principalId, window) {
       const session = await sessionForViewer(sessionId, principalId);
       if (!session) return null;
-      const limit = tailWindowLimit(window);
-      let read = await transcripts.forViewer(sessionId, principalId, limit !== undefined ? { limit } : undefined);
+      let limit = tailWindowLimit(window);
+      const [initialRead, pinRecords] = await Promise.all([
+        transcripts.forViewer(sessionId, principalId, {
+          limit,
+          beforeSeq: window?.beforeSeq,
+          sinceSeq: window?.sinceSeq,
+        }),
+        deps.sessions.listPins(sessionId),
+      ]);
+      let read = initialRead;
       let visible = transcriptEntries(read.entries);
-      if (limit !== undefined && read.earlier > 0 && !coversTailWindow(visible, window!.tailTurns!)) {
-        read = await transcripts.forViewer(sessionId, principalId);
+      while (limit !== undefined && read.earlier > 0 && !coversTailWindow(visible, window!.tailTurns!)) {
+        limit *= 2;
+        read = await transcripts.forViewer(sessionId, principalId, { limit, beforeSeq: window?.beforeSeq });
         visible = transcriptEntries(read.entries);
       }
-      const pinRecords = await deps.sessions.listPins(sessionId);
       const w = windowedTranscript(visible, window);
       const earlier = w.earlier + read.earlier;
       const pins = await decoratedPins(pinRecords, visible, (seq) => viewerStoredEntryAt(sessionId, principalId, seq));
@@ -375,7 +407,6 @@ export function createSessionMethods(
     },
 
     async listSessions(principalId) {
-      const workingThreadRefs = new Set(await deps.runs.activeSessionIds());
       const all = await sessionsForViewer(principalId);
       const visibleById = new Map(all.map((session) => [session.id, session]));
       const approvalRows: PendingApprovalRecord[] = [];
@@ -384,6 +415,7 @@ export function createSessionMethods(
         if (session && (await approvalRecordIsCurrent(record, session))) approvalRows.push(record);
       }
       const waiting = new Set(approvalRows.filter((r) => r.blocksInput !== false).map((r) => r.sessionId));
+      const workingThreadRefs = await workingSessionThreadRefs(deps.sessions, deps.runs, waiting);
       const sessions = all.filter(
         (s) =>
           s.hasEntries !== false || Boolean(s.title?.trim()) || workingThreadRefs.has(s.threadRef) || waiting.has(s.id),
@@ -401,12 +433,39 @@ export function createSessionMethods(
       }
       const cronCounts = new Map<string, number>();
       for (const c of await deps.crons.list()) {
-        if (!c.enabled || c.archived || !c.destination) continue;
-        cronCounts.set(c.destination.target, (cronCounts.get(c.destination.target) ?? 0) + 1);
+        if (!cronIsActive(c)) continue;
+        for (const ref of new Set([c.destination?.target, c.sessionRef])) {
+          if (ref) cronCounts.set(ref, (cronCounts.get(ref) ?? 0) + 1);
+        }
+      }
+      const failedChildren = new Set<string>();
+      for (const s of sessions) {
+        if (!s.parentSessionId || workingThreadRefs.has(s.threadRef) || waiting.has(s.id)) continue;
+        const run = await deps.runs.latestForThread(s.threadRef);
+        if (run?.status === "failed" || run?.result?.status === "failed") failedChildren.add(s.id);
+      }
+      const goals = new Map<
+        string,
+        { objective: string; activeMs: number; runningSince?: number; floor?: Record<string, number> }
+      >();
+      for (const s of sessions) {
+        if (!workingThreadRefs.has(s.threadRef)) continue;
+        const since = Math.max(0, (await deps.sessions.latestEntrySeq(s.id)) - GOAL_LOOKBACK_ENTRIES);
+        const goal = latestGoalRecord(await deps.sessions.getEntries(s.id, { sinceSeq: since }));
+        if (!goal) continue;
+        const runningSince = (await deps.runs.latestForThread(s.threadRef))?.startedAt ?? undefined;
+        if (goal.status === "active")
+          goals.set(s.id, {
+            objective: goal.objective,
+            activeMs: goal.activeMs ?? 0,
+            ...(runningSince ? { runningSince: Math.max(runningSince, goal.createdAt) } : {}),
+            ...(goal.floor ? { floor: { ...goal.floor } } : {}),
+          });
       }
       if (
         workingThreadRefs.size === 0 &&
         waiting.size === 0 &&
+        failedChildren.size === 0 &&
         jobCounts.size === 0 &&
         watchCounts.size === 0 &&
         cronCounts.size === 0
@@ -416,9 +475,11 @@ export function createSessionMethods(
         ...s,
         ...(workingThreadRefs.has(s.threadRef) ? { working: true } : {}),
         ...(waiting.has(s.id) ? { awaitingInput: true } : {}),
+        ...(failedChildren.has(s.id) ? { lastTurnFailed: true } : {}),
         ...(jobCounts.has(s.threadRef) ? { backgroundJobs: jobCounts.get(s.threadRef)! } : {}),
         ...(watchCounts.has(s.threadRef) ? { watches: watchCounts.get(s.threadRef)! } : {}),
         ...(cronCounts.has(s.threadRef) ? { crons: cronCounts.get(s.threadRef)! } : {}),
+        ...(goals.has(s.id) ? { goal: goals.get(s.id)! } : {}),
       }));
     },
 
@@ -476,14 +537,20 @@ export function createSessionMethods(
           expiresAt: m.expiresAt,
           ...(m.lastFiredAt !== undefined ? { lastFiredAt: m.lastFiredAt } : {}),
         }));
-      const crons = (await deps.crons.list())
-        .filter((c) => c.enabled && !c.archived && c.destination?.target === session.threadRef)
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .map((c) => ({
-          id: c.id,
-          ...(c.title !== undefined ? { title: c.title } : {}),
-          ...(c.nextFireAt !== undefined ? { nextFireAt: c.nextFireAt } : {}),
-        }));
+      const crons = await Promise.all(
+        (await deps.crons.list())
+          .filter((c) => cronIsActive(c) && cronTiedTo(c, session.threadRef))
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .map(async (c) => {
+            const last = (await deps.crons.listFires(c.id, { limit: 1 })).runs[0];
+            return {
+              id: c.id,
+              ...(c.title !== undefined ? { title: c.title } : {}),
+              ...(c.nextFireAt !== undefined ? { nextFireAt: c.nextFireAt } : {}),
+              ...(last ? { lastFire: { firedAt: last.firedAt, ...(last.status ? { status: last.status } : {}) } } : {}),
+            };
+          }),
+      );
       return { jobs, watches, crons };
     },
 
@@ -493,7 +560,10 @@ export function createSessionMethods(
       const sandbox = deps.sandbox;
       const rec = await deps.processes.get(processId);
       if (!rec || rec.kind !== "background" || rec.sessionRef !== session.threadRef) return null;
-      const handle = await sandbox.provision([{ scopeId: rec.scopeId, mode: "rw", mountPath: "" }]);
+      const handle = await sandbox.provision(
+        [{ scopeId: rec.scopeId, mode: "rw", mountPath: "" }],
+        rec.sandboxId ? { sandboxId: rec.sandboxId } : undefined,
+      );
       try {
         const read = await sandbox.readProcess(handle, processId, { sinceCursor, maxBytes: 65_536, waitMs: 0 });
         return {
@@ -712,6 +782,30 @@ export function createSessionMethods(
       return principalCanManageScope(principalId, scope);
     },
 
+    currentScopeMembers: createCurrentScopeMembers(
+      {
+        managedGroups: deps.projects,
+        directory: deps.directory,
+        identity: deps.identity,
+      },
+      true,
+    ),
+    isCurrentSharedScopeMember(principalId, scope) {
+      const { kind } = parseScopeId(scope);
+      return kind === "channel" || kind === "group"
+        ? principalCanWriteScope(principalId, scope)
+        : Promise.resolve(false);
+    },
+
+    isOpenScopeMember(principalId, scope) {
+      return isOpenScopeMember({
+        actorId: principalId,
+        scope,
+        config: deps.config,
+        isCurrentSharedScopeMember: principalCanWriteScope,
+      });
+    },
+
     membershipControlsScope(scope) {
       return membershipControlsScope(scope);
     },
@@ -721,9 +815,76 @@ export function createSessionMethods(
     },
 
     async updateSession(sessionId, principalId, patch) {
-      if (!(await sessionForViewer(sessionId, principalId))) return null;
-      await deps.sessions.updateParticipantView(sessionId, principalId, patch);
+      const session = await sessionForViewer(sessionId, principalId);
+      if (!session) return null;
+      const { status, ...view } = patch;
+      if (status !== undefined) {
+        const participants = await deps.sessions.participantWindowsOf(sessionId);
+        if (!participants.some((p) => p.principalId === principalId && p.validTo === null)) return null;
+        if (!isSessionStatus(status)) throw new Error("invalid session status");
+        await deps.sessions.updateStatus(sessionId, status ? { emoji: status.emoji, text: status.text.trim() } : null);
+      }
+      await deps.sessions.updateParticipantView(sessionId, principalId, view);
+      if (status !== undefined) {
+        deps.sessionStateBus?.emit({
+          threadRef: session.threadRef,
+          sessionId,
+          participants: await deps.sessions.participantsOf(sessionId),
+          state: "metadata",
+          at: Date.now(),
+        });
+      }
       return sessionForViewer(sessionId, principalId);
+    },
+
+    async detachSession(sessionId, principalId) {
+      const detach = async () => {
+        const session = await sessionForViewer(sessionId, principalId);
+        if (!session?.parentSessionId || !(await principalCanWriteScope(principalId, session.scopeId))) return null;
+        await deps.sessions.setParentSession(sessionId, null);
+        return { detached: true as const };
+      };
+      return deps.advisoryLock
+        ? deps.advisoryLock.withLock("session-tree-admission", () =>
+            deps.advisoryLock!.withLock("session-run-admission", detach),
+          )
+        : detach();
+    },
+
+    async adoptSession(sessionId, parentSessionId, principalId) {
+      const adopt = async () => {
+        const child = await sessionForViewer(sessionId, principalId);
+        const parent = await sessionForViewer(parentSessionId, principalId);
+        if (!child?.spawnMeta || !parent || child.scopeId !== parent.scopeId || child.id === parent.id) return null;
+        if (parent.threadRef.startsWith("swarm:")) return null;
+        if (!(await principalCanWriteScope(principalId, child.scopeId))) return null;
+        const seen = new Set([child.id]);
+        let ancestor = parent;
+        while (true) {
+          if (seen.has(ancestor.id)) return null;
+          seen.add(ancestor.id);
+          if (!ancestor.parentSessionId) break;
+          const next = await deps.sessions.get(ancestor.parentSessionId);
+          if (!next) return null;
+          ancestor = next;
+        }
+        const root = await sessionTreeRoot(deps.sessions, parent);
+        const childRoot = await sessionTreeRoot(deps.sessions, child);
+        if (
+          root.id !== childRoot.id &&
+          (await sessionTreeRunCount(deps.sessions, deps.runs, root)) +
+            (await sessionTreeRunCount(deps.sessions, deps.runs, child)) >
+            SUBAGENT_TREE_RUN_CAP
+        )
+          return null;
+        await deps.sessions.setParentSession(child.id, parent.id);
+        return { adopted: true as const };
+      };
+      return deps.advisoryLock
+        ? deps.advisoryLock.withLock("session-tree-admission", () =>
+            deps.advisoryLock!.withLock("session-run-admission", adopt),
+          )
+        : adopt();
     },
 
     async regenerateTitle(sessionId, principalId) {
@@ -873,6 +1034,19 @@ export function createSessionMethods(
     },
 
     async grant(g) {
+      if (parseRef(g.ref).kind === "deploy") {
+        g = {
+          ...g,
+          granteeScopeId: await deploymentShareScope(
+            g.granteeScopeId,
+            g.permission,
+            async (email) =>
+              deps.identity.isInternal(deps.identity.classify(email)) &&
+              (await h.directoryMember(email))?.type === "internal",
+          ),
+        };
+        await deps.deploy.assertShareAllowed(g.ownerScopeId, g.granteeScopeId, g.permission);
+      }
       await deps.acl.grant(g, await artifactAuthor(g.ownerScopeId, g.ref));
       deps.auditLog.record({
         at: Date.now(),
@@ -881,6 +1055,15 @@ export function createSessionMethods(
         resource: g.ref,
         scopeLabel: g.granteeScopeId,
       });
+      const ref = parseRef(g.ref);
+      if (ref.kind === "deploy")
+        await notifyDeploymentShared(
+          deps,
+          deps.deploy.getDeployment(ref.id),
+          g.granteeScopeId,
+          g.permission,
+          g.grantedBy,
+        );
     },
     async revokeGrant(ownerScopeId, ref, granteeScopeId, revokedBy) {
       await deps.acl.revoke(ownerScopeId, ref, granteeScopeId, revokedBy, await artifactAuthor(ownerScopeId, ref));
@@ -1002,7 +1185,11 @@ export function createSessionMethods(
         try {
           await deps.config.refreshScope(scopeIdValue);
           snapshot = await deps.config.captureSoulSnapshot(scopeIdValue);
-          const version = await deps.config.setSoulLatest(scopeIdValue, content, actorId);
+          const version =
+            opts?.expectedVersion === undefined
+              ? await deps.config.setSoulLatest(scopeIdValue, content, actorId)
+              : await deps.config.setSoulIfVersion(scopeIdValue, opts.expectedVersion, content, actorId);
+          if (version === null) throw new Error("Guidance changed; read it and retry the edit.");
           deps.auditLog.record({
             at: Date.now(),
             principalId: actorId,
@@ -1013,6 +1200,7 @@ export function createSessionMethods(
           return version;
         } catch (error) {
           if (snapshot !== undefined) deps.config.restoreSoulCacheSnapshot(scopeIdValue, snapshot);
+          if (opts?.expectedVersion !== undefined) await deps.config.refreshScope(scopeIdValue);
           throw error;
         }
       };

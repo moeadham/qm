@@ -6,6 +6,12 @@ credentials unset, then run `qm admin-login` after deployment. It prints a priva
 single-use login link valid for five minutes. The selected account must already
 have `org_admin` access. Other users need email or an external identity provider.
 
+A deployment can also start with password sign-in: hash a password with
+`node plugins/auth/src/hash-password.ts admin@example.com` and store the result
+with `qm secrets set AUTH_PASSWORD_USERS ...`. The address must also be allowed
+to sign in. Treat this as an onboarding aid and move to email links or an
+identity provider once the deployment is running (see `plugins/auth/README.md`).
+
 Email sign-in needs one transport. SMTP is the default recommendation: any existing mail account or
 relay works and there is no DNS wait. Pick Resend only when the operator
 prefers it and has DNS control over a domain they are happy to send from.
@@ -108,10 +114,14 @@ recipient.
 ## Invitation emails for external users
 
 Admins invite people outside the organization from the admin Users tab or by
-chatting with QM. Core emails those invitations through Resend, so the CLI
-delivers `RESEND_API_KEY` and `AUTH_EMAIL_FROM` to core as well as to the
-broker. Both are optional on core: without them the invitation is still created
-and the admin shares the sign-in link by hand. Core also receives
+chatting with QM. Core uses the same configured SMTP or Resend mailer as the
+sign-in broker. The CLI shares `AUTH_EMAIL_FROM`, `AUTH_EMAIL_TRANSPORT`, and the
+selected transport settings and credentials with core, including SMTP port/TLS
+settings and secret-store aliases. Explicit core settings take precedence.
+SMTP does not require a Resend key. Mail delivery is optional: without a configured
+transport the invitation is still created and the admin shares the sign-in link
+by hand. Existing deployments need the updated CLI, a secrets push, and updated
+core/portal images to activate the shared transport. Core also receives
 `AUTH_ALLOWED_EMAIL_DOMAIN`, so an address in the organization's own domain is
 refused as an external user; those people sign in directly.
 

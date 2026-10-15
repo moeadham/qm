@@ -23,7 +23,7 @@ test("a box-size change re-arms the composer measure via ResizeObserver (fires a
 
 test("bottom-follow's skip path performs zero layout reads", () => {
   const fn = viewport.slice(viewport.indexOf("  function follow("));
-  const skip = fn.indexOf("if (!scroller || !following || frame !== null) return;");
+  const skip = fn.indexOf("if (!scroller || !following || contentUpdates.size > 0 || frame !== null) return;");
   const firstRead = fn.indexOf("const priorTop = element.scrollTop;");
   assert.ok(skip >= 0 && skip < firstRead);
   assert.match(viewport, /if \(changed\) syncSticky\(\);/);
@@ -54,4 +54,20 @@ test("both pagination paths adjust their anchor without smooth scrolling", () =>
     /const prev = scrollerNow\.style\.scrollBehavior;\s*scrollerNow\.style\.scrollBehavior = "auto";\s*scrollerNow\.scrollTop = priorTop \+ \(scrollerNow\.scrollHeight - priorHeight\);\s*scrollerNow\.style\.scrollBehavior = prev;/g,
   );
   assert.equal(anchors?.length, 2);
+});
+
+test("chat layout waits for markdown custom elements before measuring the transcript", () => {
+  const fn = chat.match(/function drawActiveChat\([\s\S]*?\n {2}\}/)?.[0] ?? "";
+  const deferred = fn.match(/requestAnimationFrame\(\(\) => \{[\s\S]*?\n {4}\}\);/)?.[0] ?? "";
+  assert.match(deferred, /decorateTextCodeBlocks\(host\)/);
+  assert.match(deferred, /ctx\.composer\.resizeComposer\(\)/);
+  assert.match(deferred, /scrollTranscript\(opts\.forceScroll\)/);
+  assert.doesNotMatch(fn.replace(deferred, ""), /resizeComposer\(|scrollTranscript\(/);
+});
+
+test("deferred chat layout cannot scroll a replacement or detached session", () => {
+  const fn = chat.match(/function drawActiveChat\([\s\S]*?\n {2}\}/)?.[0] ?? "";
+  const guard = fn.indexOf("if (chatState.host !== host || chatState.agent !== agent || !host.isConnected) return;");
+  const measure = fn.indexOf("ctx.composer.resizeComposer()");
+  assert.ok(guard >= 0 && guard < measure);
 });

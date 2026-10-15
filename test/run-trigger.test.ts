@@ -60,6 +60,7 @@ describe("runTrigger: a monitor fire runs first-class live and delivers its own 
     assert.equal(req?.addressed, true, "and is addressed so it must reply-or-decline (shed fallback delivers)");
     assert.deepEqual(req?.triggerDestination, toChannel, "the post tool aims at the arming thread");
     assert.equal(req?.idempotencyKey, "monitor:m1:exit");
+    assert.deepEqual(req?.origin, { kind: "automation", useOwnerModelAuth: true });
     assert.equal((await d.deliveries.pending("slack")).length, 0);
   });
 
@@ -233,6 +234,9 @@ describe("runTrigger: an autonomous cron does NOT go live (it may be conditional
     assert.deepEqual(requests[0]?.unattendedGrants, ["admin.sessions.read"]);
     assert.equal(requests[1]?.unattendedGrants, undefined);
     assert.equal(requests[2]?.unattendedGrants, undefined);
+    assert.deepEqual(requests[0]?.origin, { kind: "automation", useOwnerModelAuth: true });
+    assert.equal(requests[1]?.origin, undefined);
+    assert.deepEqual(requests[2]?.origin, { kind: "automation", useOwnerModelAuth: true });
   });
 
   it("a failed fire's error notice carries friendly copy while the fire history keeps the raw reason", async () => {

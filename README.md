@@ -1,21 +1,47 @@
 # Moe’s QM fork
 
 I try to keep this fork up to date with [upstream](https://github.com/yc-software/qm).
-The [patched version](https://github.com/moeadham/qm/tree/upgrade/v0.1.12-staging) currently adds:
+The [patched version](https://github.com/moeadham/qm/tree/main) adds:
 
-- **Models:** refreshed Claude/Codex runtimes and model lists, including Opus 5.5 and GPT-6.
-- **Subscriptions:** Codex model selection and reliable saved chat selections.
-- **Automation:** subscription authentication for scheduled tasks and Claude ↔ Codex subagents.
-- **Web schedules:** removes incorrect instructions blocking scheduled replies in web chats.
+- **Models:** refreshed Claude/Codex runtimes and model lists.
+- **Subscriptions:** Claude and Codex stay available together; crons, watches, and subagents use owner subscriptions.
+- **Speech:** streaming web dictation through AllModels, with microphone selection and live transcription.
 - **Email:** invitations use the configured SMTP or Resend transport.
 
 ---
 
 # qm
 
-A multiplayer agent harness for work. In Slack and on the web.
+<p align="center">
+  <img src="docs/images/qm-logo.png" alt="QM" width="120">
+</p>
 
-![The QM web UI: two concurrent sessions, a sidebar of personal files, crons, keychain, deploys, memory, and skills](./docs/screenshots/web-ui-hero.png)
+<div align="center">
+
+**A multiplayer agent harness for work. In Slack and on the web.**<br>
+Run it in your own cloud, with your own models and keys.
+
+[![CI](https://img.shields.io/github/actions/workflow/status/yc-software/qm/cicd.yml?branch=main&label=CI&style=flat-square)](https://github.com/yc-software/qm/actions/workflows/cicd.yml)
+[![license](https://img.shields.io/badge/license-MIT-4c1?style=flat-square)](./LICENSE)
+[![node](https://img.shields.io/badge/node-24.15%2B-3178c6?style=flat-square)](./package.json)
+[![npm](https://img.shields.io/npm/v/@yc-software/qm?label=npm&color=000&style=flat-square)](https://www.npmjs.com/package/@yc-software/qm)
+
+[Deploy](#deploy-it-for-your-org) · [How it works](#how-it-works) · [Security model](#security-and-secrets) · [Customize](#customize-your-instance) · [Contribute](#contributing) · [Documentation](#going-deeper)
+
+</div>
+
+## Overview
+
+Most agents are designed like personal assistants. You can make one work for a whole
+company, but it quickly gets complex. QM is designed for startups. Employees each get
+their own isolated workspace, and can also collaborate with the agent in channels, group messages, and projects.
+
+Each person and each room has its own scoped memory, files, keychain view, permissions,
+crons, web apps, and durable sandbox.
+
+It's built with open source in mind. Pick your own harness and model and switch between
+them. Pi, OpenCode, Codex, and Claude Code all drive the same core, so a deployment
+isn't tied to any single vendor.
 
 ## Setup
 
@@ -25,33 +51,18 @@ You can also try out a 3rd-party hosted version of QM [here](https://www.agent37
 
 If you're an infra provider interested in offering a hosted version of QM, feel free to reach out.
 
-## What is QM?
-
-Most agents are designed like personal assistants. You can make one work for a whole
-company, but it quickly gets complex. QM is designed for startups. Employees each get
-their own isolated workspace and work independently without affecting each other, and
-they can also collaborate with the agent in channels, group messages, and projects.
-
-Each person and each room has its own scoped memory, files, keychain view, permissions,
-crons, web apps, and durable sandbox.
-
-It's built with open source in mind. Pick your own harness and model and switch between
-them — Pi, OpenCode, Codex, and Claude Code all drive the same core, so a deployment
-isn't tied to any single vendor.
-
 ## Features
 
 - **Personal and shared scopes.** People customize the agent to be _theirs_, and still
   work with it collaboratively in Slack channels and projects.
 - **Slack and web.** The same identity and configuration carries between Slack and the
   web app.
-- **Admin control.** Set org-level configuration, a security posture, and which
+- **Admin control.** Set org-level configuration, security and sharing postures. Choose which
   harnesses and models are available.
 - **Web apps.** Spin up custom internal apps and publish them to the right people.
 - **Shared skills.** Skills are scope-owned and shareable by grant, with admin-gated
   promotion to the whole org and skill packs imported from git repositories.
-- **Background work.** Crons, watches, and inbound webhooks run work while nobody's
-  watching.
+- **Background work.** Crons, watches, and inbound webhooks work while you're away.
 
 ## What you can do with it
 
@@ -81,18 +92,21 @@ flowchart LR
 ```
 
 For durability, set `DATABASE_URL` and `SESSION_STORE=postgres` — without it, sessions
-live in process memory and vanish on restart. To exercise a branch end to end — core,
-Slack, web, admin, portal, against a real model and real Postgres — run
-`npm run dev-instance`.
+live in process memory and vanish on restart. To exercise a branch against a real model and real Postgres, run
+`npm run dev-instance:web` for web/admin or `npm run dev-instance:slack` for Slack.
+Use `npm run dev-instance:both` when testing both surfaces together. Bare
+`npm run dev-instance` defaults to web for new instances and preserves the surface
+on reload. Switch an existing instance with an explicit surface command.
 
-## Architecture
+## How it works
 
 Every turn runs through a central core, which can use a variety of models and harnesses
 to generate the response. A Postgres persistence layer holds user data, session history,
 and other durable state. The agent has a small, fixed tool surface; one of those tools is
 `execute`, which runs commands in the scope's own isolated sandbox — its durable computer,
-where installed tools stay installed. The web UI, the admin panel, and the public portal
-are optional plugins over the core's HTTP API;
+where installed tools stay installed. The web UI and admin panel share one service; the portal and optional built-in
+auth broker share another. These modules communicate with core over its HTTP API.
+See [combined services](docs/combined-services.md) for configuration and migration;
 Slack is an optional in-process plugin that core starts
 and supervises through a direct service client.
 
@@ -114,13 +128,24 @@ can only tighten:
 
 - **Strict** — every harness tool call pauses for human approval, except the two
   no-effect turn enders.
-- **Auto** (default) — a classifier screens provenance-labelled external data and tool
-  results before they reach the model; a deployment can point that at its own screening
-  proxy.
-- **Dangerous** — no content screening, no pauses between tool calls.
+- **Auto** (default) — blocks private-network access.
+- **Dangerous** — no tool approval gates, and content screening only observes.
+
+Content screening is a deployment setting, `securityScreen.mode`: `off` (default),
+`observe`, or `enforce`, with `securityScreen.classifier` choosing the built-in
+`model` or an external `proxy`. When on, it classifies external content under every
+posture. `observe` only records verdicts in the audit log. `enforce` quarantines
+flagged content pending release approval, except under Dangerous, which caps
+screening at `observe`.
 
 The predeclared command policy — approval rules and hard denials for things like
 recursive deletes or destructive SQL — applies in every posture, Dangerous included.
+
+Sharing posture is independent:
+
+- **Isolated** (default) — resources stay in their scope unless explicitly shared.
+- **Open** — on a live authenticated internal human turn, the speaker's opted-in personal
+  files, artifacts, skills, and memory may be read in an opted-in shared room.
 
 [`SECURITY.md`](./SECURITY.md) has the threat model, the operator assumptions, and the
 known limitations.
@@ -152,55 +177,88 @@ not a public issue.
 
 ## Customize your instance
 
-The deployment repository above carries config and a sandbox layer, and never needs a
-source checkout. Some organizations want the opposite trade: the whole codebase in one
-place, so engineers and coding agents read core and customizations together, while the
-customizations themselves stay private. For that, keep a **private fork**: a standalone
-private repository whose history begins as a clone of qm and whose core stays identical
-to upstream.
+Choose how you want to customize QM:
 
-Populate it once, then clone it to work in:
+- **Config, tools, skills, and services:** use the deployment repository above. It
+  pins `@yc-software/qm` and uses that release's runtime images; no source copy is needed.
+- **Changes to QM itself:** keep your own source fork, public or private. You may
+  modify any part of core, including the runtime, plugins, CLI, docs, and CI.
+  Contributing those changes upstream is optional.
+
+### Create a source fork
+
+For a private source fork, create a standalone private repository, outside GitHub's
+fork network. Seed only `main` and explicitly set it as the default branch:
 
 ```bash
 gh repo create <org>/qm-private --private
-
-git clone --bare git@github.com:yc-software/qm qm-seed.git
-git -C qm-seed.git push --mirror git@github.com:<org>/qm-private
-rm -rf qm-seed.git
-
-git clone git@github.com:<org>/qm-private
-git -C qm-private remote add upstream git@github.com:yc-software/qm
+git clone --single-branch --branch main --no-tags git@github.com:yc-software/qm qm-private
+git -C qm-private remote rename origin upstream
+git -C qm-private remote add origin git@github.com:<org>/qm-private
+git -C qm-private push -u origin main
+gh repo edit <org>/qm-private --default-branch main
 ```
 
-Create the private fork with a plain clone, as shown above, and never with GitHub's fork
-feature. The word "fork" here names the concept — a downstream copy that diverges
-deliberately and merges from upstream — not GitHub's Fork button. A GitHub fork inherits
-the visibility of the repository it came from, so a fork of a public repository cannot be
-made private. A GitHub fork also shares one object network with the repository it came
-from, so commits pushed to the fork stay fetchable by SHA from the public side. Many
-organizations disallow forking private repositories as well. A plain clone has none of
-these problems, and it costs one thing: the clone is an ordinary repository, so upstream's
-CI workflows run live in your own account. Expect to supply the secrets those workflows
-need, or disable the ones you do not want running.
+Do not seed with `git push --mirror`: it copies unrelated upstream branches and tags,
+leaves default-branch selection implicit, and can delete destination-only refs on later
+pushes. The `upstream` remote supplies source updates without copying those refs to your
+repository. For a public source fork, GitHub's Fork button is also an option. A GitHub
+fork of a public repository cannot be private; keep private work outside that network.
 
-Everything specific to your organization goes in `deploy/layers/<org>/` — config, sandbox
-tools and skills, plugin images, infrastructure — in the same shape `qm init` produces. See
-[`deploy/layers/README.md`](./deploy/layers/README.md). Core stays byte-identical to
-upstream, which is what keeps merges small.
+Review inherited workflows before enabling Actions or adding credentials. Choose the CI
+checks you want, and disable or adapt upstream release and publishing workflows for your
+own package and image registries. Copying the source does not configure production
+deployment CI.
 
-Two skills maintain the boundary in both directions. `update-qm` merges upstream qm into
-the private fork and opens the sync PR; `upstream-pr` sends an organization-agnostic fix back to
-qm, cutting the branch from `upstream/main` and checking the outgoing diff, commit
-messages, and screenshots for organization identifiers before it pushes. Nothing under
-`deploy/layers/` ever travels upstream.
+### Customize and run your source
+
+Keep deployment configuration, tools, skills, plugin images, and infrastructure in
+`deploy/layers/<org>/` in a private source fork, or in a separate private deployment
+repository when your source is public. Never commit secrets. See
+[`deploy/layers/README.md`](./deploy/layers/README.md) for initialization and layout.
+Keep deployment data separate from core code, but change core wherever your desired
+behavior requires it.
+
+From the source checkout, install dependencies with `npm ci` and use the in-tree CLI.
+After completing the provider setup in [`deployment.md`](./deployment.md), build and
+deploy your modified services explicitly:
+
+```bash
+node cli/bin/qm.ts check --config <deployment-dir>/qm.config.jsonc
+node cli/bin/qm.ts plan --config <deployment-dir>/qm.config.jsonc --build-from .
+node cli/bin/qm.ts up --config <deployment-dir>/qm.config.jsonc --build-from .
+node cli/bin/qm.ts check --config <deployment-dir>/qm.config.jsonc --live
+```
+
+Use this checkout's CLI when changing the CLI itself. Without `--build-from`, the
+normal deployment path selects published images, so editing source alone does not
+change the deployed runtime. If you publish custom images instead, configure their
+immutable references through `imageOverrides`. Follow the provider guide for sandbox
+image builds; service builds do not replace that step.
+
+### Keep it current
+
+For a source fork, `update-qm` merges upstream changes while preserving intentional
+local behavior. Land sync PRs with their merge ancestry intact, never squash or rebase
+them. Conflicts are expected maintenance work, not a requirement to discard
+customizations. Use `upstream-pr` only when you want to contribute a generic change;
+it prepares a clean upstream branch without private deployment data or history.
+
+For a package deployment, upgrade the exact `@yc-software/qm` dependency and lockfile,
+review contract changes and generated assets, then validate and deploy. There is no
+upstream source history to merge.
 
 ## Going deeper
 
 - [`docs/getting-started.md`](./docs/getting-started.md) — first run, end to end
 - [`cli/README.md`](./cli/README.md) — the `qm` CLI and the deployment directory contract
 - [`docs/deploy-directory.md`](./docs/deploy-directory.md) — the deployment directory in full
+- [`docs/principal-links.md`](./docs/principal-links.md) — one person, several sign-ins: linking principals
 - [`docs/porter.md`](./docs/porter.md) — running qm on Porter
+- [`docs/superserve.md`](./docs/superserve.md) — using Superserve for agent sandboxes
 - [`.env.example`](./.env.example) — every knob, documented in place
+- [`docs/swarms.md`](./docs/swarms.md) — durable agent pools, scoped messages, and blank Modal workers
+- [`docs/model-gateway.md`](./docs/model-gateway.md) — discover and route models through a gateway
 - [`plugins/`](./plugins) — the surfaces (Slack, web UI, admin, portal)
 
 ## License

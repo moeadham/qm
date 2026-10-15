@@ -124,6 +124,7 @@ test("GET /v1/admin/resources returns a manifest entry for every registered reso
     assert.equal(byId.get("base-model")?.target, "any");
     assert.ok((byId.get("base-model")?.enumValues?.length ?? 0) > 0);
     assert.deepEqual(byId.get("security-posture")?.enumValues, ["dangerous", "auto", "strict"]);
+    assert.deepEqual(byId.get("sharing-posture")?.enumValues, ["isolated", "open"]);
     assert.equal(byId.get("service-credentials")?.target, "org");
     assert.equal(byId.get("service-credentials")?.secret, true);
     assert.equal(byId.has("import"), false);
@@ -244,7 +245,7 @@ test("branding governance validates, round-trips through surface-config, clears,
     ).json()) as { branding?: { accent?: string; orgName?: string } };
     assert.equal(readBack.branding?.accent, "#6366f1");
     assert.equal(readBack.branding?.orgName, "Acme Corp");
-    assert.deepEqual(await surfaceBranding(), { accent: "#6366f1", mark: "Q", selfLabel: "qm" });
+    assert.deepEqual(await surfaceBranding(), { orgName: "Acme Corp", accent: "#6366f1", mark: "Q", selfLabel: "qm" });
     assert.equal(
       (await fetch(url, { method: "PUT", headers: ADMIN, body: JSON.stringify({ mark: "<b>xy" }) })).status,
       200,
@@ -413,15 +414,15 @@ test("feature flag table changes one scope live without restart", async () => {
   const srv = start();
   try {
     const endpoint = `${srv.base}/v1/admin/scopes/org:default-org/feature-flags`;
-    assert.equal(await srv.built.featureFlags.enabled("command_scoped_credentials", "channel:C1"), false);
+    assert.equal(await srv.built.featureFlags.enabled("inbox_loops", "channel:C1"), false);
     const enable = await fetch(endpoint, {
       method: "PUT",
       headers: ADMIN,
-      body: JSON.stringify({ featureName: "command_scoped_credentials", scopeId: "channel:C1", on: true }),
+      body: JSON.stringify({ featureName: "inbox_loops", scopeId: "channel:C1", on: true }),
     });
     assert.equal(enable.status, 200);
-    assert.equal(await srv.built.featureFlags.enabled("command_scoped_credentials", "channel:C1"), true);
-    assert.equal(await srv.built.featureFlags.enabled("command_scoped_credentials", "channel:C2"), false);
+    assert.equal(await srv.built.featureFlags.enabled("inbox_loops", "channel:C1"), true);
+    assert.equal(await srv.built.featureFlags.enabled("inbox_loops", "channel:C2"), false);
     const read = await fetch(`${srv.base}/v1/admin/scopes/org:default-org`, { headers: ADMIN });
     const flags = ((await read.json()) as { featureFlags: Array<{ enabledScopes: string[] }> }).featureFlags;
     assert.deepEqual(flags[0]?.enabledScopes, ["channel:C1"]);
@@ -509,6 +510,49 @@ test("security posture round-trips through durable scoped governance", async () 
       body: JSON.stringify({ posture: "YOLO" }),
     });
     assert.equal(invalid.status, 400);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("sharing posture round-trips through scoped governance with organization and room vetoes", async () => {
+  const srv = start();
+  try {
+    const org = "org:default-org";
+    const personal = "personal:U1";
+    const room = "channel:C1";
+    const read = async (scope: string) => {
+      const response = await fetch(`${srv.base}/v1/admin/scopes/${scope}`, { headers: ADMIN });
+      assert.equal(response.status, 200);
+      return (await response.json()) as { sharingPosture: string };
+    };
+    const put = async (scope: string, posture: string) =>
+      fetch(`${srv.base}/v1/admin/scopes/${scope}/sharing-posture`, {
+        method: "PUT",
+        headers: ADMIN,
+        body: JSON.stringify({ posture }),
+      });
+
+    assert.equal((await read(org)).sharingPosture, "isolated");
+    assert.equal((await put(org, "open")).status, 200);
+    assert.equal((await read(room)).sharingPosture, "open");
+    assert.equal((await put(personal, "isolated")).status, 200);
+    assert.equal((await read(personal)).sharingPosture, "isolated");
+    assert.equal((await put(room, "isolated")).status, 200);
+    assert.equal((await read(room)).sharingPosture, "isolated");
+    assert.equal((await put(org, "isolated")).status, 200);
+    assert.equal((await put(room, "open")).status, 200);
+    assert.equal((await read(room)).sharingPosture, "isolated");
+    assert.equal((await put(org, "invalid")).status, 400);
+    const reset = await fetch(`${srv.base}/v1/admin/scopes/${room}/sharing-posture`, {
+      method: "PUT",
+      headers: ADMIN,
+      body: JSON.stringify({ inherit: true }),
+    });
+    assert.equal(reset.status, 200);
+    assert.equal(await srv.built.config.getSharingPostureOwnDurable(room), null);
+    assert.equal((await put(org, "open")).status, 200);
+    assert.equal((await read(room)).sharingPosture, "open");
   } finally {
     await srv.close();
   }
@@ -638,13 +682,13 @@ test("admin runtime saves reasoning level and fast mode with the default model",
     assert.equal(unsupported.status, 200);
     assert.equal((await srv.built.config.getRuntimeSelectionDurable("org:default-org"))?.fastMode, false);
 
-    const unsupportedHarness = await fetch(url, {
+    const openCode = await fetch(url, {
       method: "PUT",
       headers: ADMIN,
       body: JSON.stringify({ harnessId: "opencode", modelId: "claude-opus-5", effortLevel: "auto", fastMode: true }),
     });
-    assert.equal(unsupportedHarness.status, 200);
-    assert.equal((await srv.built.config.getRuntimeSelectionDurable("org:default-org"))?.fastMode, false);
+    assert.equal(openCode.status, 200);
+    assert.equal((await srv.built.config.getRuntimeSelectionDurable("org:default-org"))?.fastMode, true);
 
     for (const body of [
       { harnessId: "pi", modelId: "claude-opus-5", effortLevel: "extreme", fastMode: true },
@@ -889,6 +933,50 @@ test("historical cutover policies remain visible and clearable without layer too
     });
     assert.equal(clear.status, 200);
     assert.equal(await srv.built.deviceFlowCutover.resolve(scope, "retired"), "ephemeral_only");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("org purpose runtimes round-trip, validate, and clear independently", async () => {
+  const srv = start();
+  const scopeUrl = `${srv.base}/v1/admin/scopes/org:default-org`;
+  const get = async () =>
+    (await (await fetch(`${scopeUrl}?view=models`, { headers: ADMIN })).json()) as Record<string, unknown>;
+  const put = (resource: string, body: unknown, scope = "org:default-org", headers = ADMIN) =>
+    fetch(`${srv.base}/v1/admin/scopes/${scope}/${resource}`, { method: "PUT", headers, body: JSON.stringify(body) });
+  try {
+    assert.equal((await get()).cronRuntime, null);
+    assert.equal((await get()).subagentRuntime, null);
+    for (const purpose of ["cron", "subagent", "fallback"] as const) {
+      const resource = `${purpose}-runtime`;
+      const choice = { harnessId: "pi", modelId: "claude-opus-5", effortLevel: "low", fastMode: false };
+      assert.equal(
+        (await put(resource, choice, "org:default-org", { ...ADMIN, "x-admin-actor": "nobody@default-org" })).status,
+        403,
+      );
+      assert.equal((await put(resource, choice, "personal:alice")).status, 400);
+      for (const bad of [
+        { ...choice, harnessId: "invalid" },
+        { ...choice, harnessId: "codex" },
+        { ...choice, modelId: "invalid" },
+        { ...choice, effortLevel: "invalid" },
+        { ...choice, fastMode: "yes" },
+        { ...choice, modelId: "claude-fable-5", fastMode: true },
+        { modelId: choice.modelId },
+      ])
+        assert.equal((await put(resource, bad)).status, 400);
+      assert.equal((await put(resource, choice)).status, 200);
+      assert.deepEqual((await get())[`${purpose}Runtime`], choice);
+      assert.equal((await put(resource, { harnessId: "pi", modelId: choice.modelId })).status, 200);
+      assert.deepEqual((await get())[`${purpose}Runtime`], { harnessId: "pi", modelId: choice.modelId });
+      assert.equal((await put(resource, { inherit: true })).status, 200);
+      assert.equal((await get())[`${purpose}Runtime`], null);
+      assert.equal((await put(resource, choice)).status, 200);
+      assert.equal((await put(resource, null)).status, 200);
+      assert.equal((await get())[`${purpose}Runtime`], null);
+    }
+    assert.equal((await get()).runtime, null);
   } finally {
     await srv.close();
   }

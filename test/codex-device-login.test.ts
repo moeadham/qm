@@ -11,11 +11,11 @@ function idToken(accountId: string): string {
 }
 
 /** Fake `codex app-server` that serves the device-login RPCs and writes auth.json on approval. */
-function loginBinary(dir: string, opts: { succeed: boolean; delayMs?: number }): string {
+function loginBinary(dir: string, opts: { succeed: boolean; delayMs?: number; failBeforePrompt?: boolean }): string {
   const path = join(dir, `codex-login-${opts.succeed ? "ok" : "fail"}`);
   writeFileSync(
     path,
-    `#!${process.execPath}
+    `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
@@ -26,12 +26,16 @@ rl.on("line", (line) => {
   if (msg.method === "initialize") return send({ id: msg.id, result: {} });
   if (msg.method === "initialized") return;
   if (msg.method === "account/login/start") {
+    if (${JSON.stringify(opts.failBeforePrompt ?? false)}) {
+      send({ method: "account/login/completed", params: { loginId: "login-1", success: false, error: "denied before prompt" } });
+      return setTimeout(() => send({ id: msg.id, result: { type: "chatgptDeviceCode", loginId: "login-1", verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-1234" } }), 50);
+    }
     send({ id: msg.id, result: { type: "chatgptDeviceCode", loginId: "login-1", verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-1234" } });
     return setTimeout(() => {
       if (${JSON.stringify(opts.succeed)}) {
         fs.writeFileSync(path.join(process.env.CODEX_HOME, "auth.json"), JSON.stringify({
           auth_mode: "chatgpt",
-          tokens: { access_token: "acc-1", refresh_token: "ref-1", id_token: ${JSON.stringify(idToken("acct_9"))}, account_id: "acct_9" },
+          tokens: { access_token: ${JSON.stringify("e30." + Buffer.from(JSON.stringify({ exp: 2000000000 })).toString("base64url") + ".sig")}, refresh_token: "ref-1", id_token: ${JSON.stringify(idToken("acct_9"))}, account_id: "acct_9" },
         }));
         send({ method: "account/login/completed", params: { loginId: "login-1", success: true, error: null } });
       } else {
@@ -61,7 +65,7 @@ test("device login: start returns the prompt, poll is pending then yields tokens
   const tokens = await login.poll(prompt.deviceAuthId);
   assert.notEqual(tokens, "pending");
   if (tokens === "pending") return;
-  assert.equal(tokens.accessToken, "acc-1");
+  assert.equal(tokens.expiresAt, 2000000000000);
   assert.equal(tokens.refreshToken, "ref-1");
   assert.equal(tokens.accountId, "acct_9");
   // The login is one-shot: after harvest it is gone.
@@ -79,4 +83,15 @@ test("device login: a denied login surfaces the provider error and cleans up", a
   await new Promise((r) => setTimeout(r, 120));
   await assert.rejects(() => login.poll(prompt.deviceAuthId), /denied by user/);
   await assert.rejects(() => login.poll(prompt.deviceAuthId), /expired or unknown/);
+});
+
+test("device login contains provider failure before the start response", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-device-login-test-"));
+  const login = createCodexDeviceLogin({ binaryPath: loginBinary(dir, { succeed: false, failBeforePrompt: true }) });
+  t.after(async () => {
+    await login.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const prompt = await login.start();
+  await assert.rejects(() => login.poll(prompt.deviceAuthId), /denied before prompt/);
 });

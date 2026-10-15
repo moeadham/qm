@@ -170,7 +170,7 @@ test("processRun heartbeats the lease while the turn runs, and the beat stops wi
 });
 
 test("a retryable turn failure requeues the run, rethrows, and stops the heartbeat", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
   const store = createMemoryRunStore();
   const { runs, beats } = spyHeartbeats(store.runs);
 
@@ -195,6 +195,7 @@ test("a retryable turn failure requeues the run, rethrows, and stops the heartbe
   assert.equal(requeued?.status, "pending", "an ordinary failure goes back on the queue");
   assert.equal(requeued?.attempts, 1);
 
+  assert.equal(await runs.claim("w2", 9_000), null);
   t.mock.timers.tick(30_000);
   await microtasks();
   assert.equal(beats.length, 1, "no heartbeat leaks past the failure");
@@ -221,7 +222,8 @@ test("a retryable turn failure requeues the run, rethrows, and stops the heartbe
   );
 });
 
-test("finalAttempt marks the attempt whose error would park the run, from the claim-time budget", async () => {
+test("finalAttempt marks the attempt whose error would park the run, from the claim-time budget", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const { runs } = createMemoryRunStore();
   const seen: OrchestratorInput[] = [];
   const orchestrator = fakeOrchestrator(async (input) => {
@@ -236,6 +238,8 @@ test("finalAttempt marks the attempt whose error would park the run, from the cl
   assert.equal(seen[0]?.finalAttempt, false, "budget remains — the orchestrator must not record a terminal failure");
   assert.equal((await runs.get(first!.id))?.status, "pending");
 
+  assert.equal(await runs.claim("w1", 5_000), null);
+  t.mock.timers.tick(60_000);
   const second = await runs.claim("w1", 5_000);
   await assert.rejects(processRun(deps, second!), /hiccup/);
   assert.equal(seen[1]?.finalAttempt, true, "the last budgeted attempt is marked — an error now is terminal");
@@ -421,4 +425,67 @@ test("a NonRetryableTurnError keeps its human-readable reason on the stored resu
   const run = await runs.claim("w1", 5_000);
   await assert.rejects(processRun({ runs, orchestrator, leaseTtlMs: 5_000 }, run!));
   assert.equal((await runs.get(run!.id))?.result?.reason, "Codex turn exceeded 300s wall clock");
+});
+
+for (const rejects of [false, true]) {
+  test(`shutdown requeues without spending the error budget when cancellation ${rejects ? "throws" : "returns"}`, async () => {
+    const { runs } = createMemoryRunStore();
+    const enq = (await runs.enqueue({ sessionId: "s1", request: turn, maxAttempts: 1 })).run;
+    const run = await runs.claim("old", 5_000);
+    const shutdown = new AbortController();
+    const entered = Promise.withResolvers<void>();
+    const orchestrator = fakeOrchestrator(async (input) => {
+      entered.resolve();
+      await new Promise<void>((resolve) => input.cancel!.addEventListener("abort", () => resolve(), { once: true }));
+      if (rejects) throw new Error("cancelled operation");
+      return { status: "silent", stopped: true };
+    });
+    const work = processRun({ runs, orchestrator, leaseTtlMs: 5_000 }, run!, { shutdown: shutdown.signal });
+    const settled = rejects ? assert.rejects(work, /cancelled operation/) : work;
+    await entered.promise;
+    shutdown.abort();
+    await settled;
+    const handedBack = (await runs.get(enq.id))!;
+    assert.equal(handedBack.status, "pending");
+    assert.equal(handedBack.errorAttempts, 0);
+    assert.equal(handedBack.result, null);
+    assert.equal(handedBack.leaseToken, null);
+    assert.ok(await runs.claim("replacement", 5_000));
+  });
+}
+
+test("explicit user Stop still completes instead of retrying", async () => {
+  const { runs } = createMemoryRunStore();
+  const enq = (await runs.enqueue({ sessionId: "s1", request: turn })).run;
+  const run = await runs.claim("w1", 5_000);
+  const shutdown = new AbortController();
+  await processRun(
+    { runs, leaseTtlMs: 5_000, orchestrator: fakeOrchestrator(async () => ({ status: "silent", stopped: true })) },
+    run!,
+    { shutdown: shutdown.signal },
+  );
+  assert.equal((await runs.get(enq.id))?.status, "done");
+  assert.equal((await runs.get(enq.id))?.errorAttempts, 0);
+  assert.equal(await runs.claim("replacement", 5_000), null);
+});
+
+test("failed shutdown handback retains the lease for expiry without charging an error", async () => {
+  const { runs } = createMemoryRunStore();
+  const enq = (await runs.enqueue({ sessionId: "s1", request: turn, maxAttempts: 1 })).run;
+  const run = await runs.claim("w1", 5_000);
+  const shutdown = new AbortController();
+  const originalToken = run!.leaseToken;
+  runs.releaseLease = async () => {
+    throw new Error("database unavailable");
+  };
+  const orchestrator = fakeOrchestrator(async () => {
+    shutdown.abort();
+    return { status: "silent", stopped: true };
+  });
+  await processRun({ runs, orchestrator, leaseTtlMs: 5_000 }, run!, { shutdown: shutdown.signal });
+  const retained = (await runs.get(enq.id))!;
+  assert.equal(retained.status, "running");
+  assert.equal(retained.leaseToken, originalToken);
+  assert.equal(retained.errorAttempts, 0);
+  assert.equal(await runs.claim("replacement", 5_000), null);
 });

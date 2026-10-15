@@ -323,3 +323,75 @@ test("linear rejects signed untimed deliveries without firing a turn", async () 
   await flush();
   assert.equal(calls.length, 1);
 });
+
+const historyWebhook = {
+  ownerScopeId: scopeId("personal", "U1"),
+  owner: "U1",
+  createdBy: "U1",
+  action: "summarize",
+  verification: { scheme: "github" as const, secret: SECRET },
+};
+
+test("history records the agent payload once per delivery without request headers", async () => {
+  const { webhooks, receiver } = harness();
+  const wh = await webhooks.create(historyWebhook);
+  const req = githubReq(JSON.stringify({ message: "<script>alert(1)</script>", long: "x".repeat(20_000) }));
+  await Promise.all([receiver.deliver(wh.id, req), receiver.deliver(wh.id, req)]);
+  await flush();
+  const events = await webhooks.listEvents(wh.id);
+  assert.equal(events.length, 1);
+  assert.match(events[0]?.payload ?? "", /truncated/);
+  assert.ok(events[0]!.payload.length < 16_100);
+  assert.equal(JSON.stringify(events).includes(SECRET), false);
+  assert.equal(JSON.stringify(events).includes("x-hub-signature"), false);
+});
+
+test("history excludes rejected signatures, handshakes and filtered deliveries", async () => {
+  const { webhooks, receiver } = harness();
+  const wh = await webhooks.create({
+    ...historyWebhook,
+    filters: [{ path: "action", in: ["opened"] }],
+  });
+  const bad = githubReq('{"action":"opened"}');
+  bad.headers["x-hub-signature-256"] = "invalid";
+  await receiver.deliver(wh.id, bad);
+  await receiver.deliver(wh.id, githubReq("{}", "ping", "ping"));
+  await receiver.deliver(wh.id, githubReq('{"action":"closed"}'));
+  await flush();
+  assert.deepEqual(await webhooks.listEvents(wh.id), []);
+});
+
+test("history capture failure rejects before acknowledging or starting a turn", async () => {
+  const { webhooks, calls, receiver } = harness();
+  const wh = await webhooks.create(historyWebhook);
+  webhooks.recordEvent = async () => {
+    throw new Error("history unavailable");
+  };
+  await assert.rejects(receiver.deliver(wh.id, githubReq("{}")), /history unavailable/);
+  await flush();
+  assert.equal(calls.length, 0);
+});
+
+test("webhook fire accounting failures remain contained when recording the failure also rejects", async (t) => {
+  const { webhooks, calls, receiver } = harness();
+  const wh = await webhooks.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    owner: "U1",
+    createdBy: "U1",
+    action: "triage",
+    verification: { scheme: "github", secret: SECRET },
+  });
+  const record = t.mock.method(webhooks, "recordFire", async () => {
+    throw new Error("database unavailable");
+  });
+  const errors = t.mock.method(console, "error", () => {});
+  assert.deepEqual(await receiver.deliver(wh.id, githubReq("{}")), { status: 202 });
+  await flush();
+  assert.equal(record.mock.callCount(), 2);
+  assert.ok(errors.mock.calls.some(({ arguments: args }) => String(args[0]).includes("persist fire failure")));
+  record.mock.restore();
+  assert.deepEqual(await receiver.deliver(wh.id, githubReq('{"next":true}', "d-2")), { status: 202 });
+  await flush();
+  assert.equal(calls.length, 2);
+  assert.equal((await webhooks.get(wh.id))?.lastError, undefined);
+});

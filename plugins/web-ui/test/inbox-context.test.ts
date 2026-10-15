@@ -21,7 +21,14 @@ test("conversation details include the waiting message after prior context with 
     const { contextTpl, toInboxItem } = await vite.ssrLoadModule("/src/inbox.ts");
     const { render } = await vite.ssrLoadModule("lit");
     const host = dom.window.document.getElementById("main")!;
-    for (const source of ["slack", "gmail"]) {
+    for (const [source, payloadSource] of [
+      ["slack", undefined],
+      ["gmail", undefined],
+      [undefined, "slack"],
+      [undefined, "gmail"],
+      ["slack", "gmail"],
+      ["gmail", "slack"],
+    ]) {
       for (const context of [
         undefined,
         [],
@@ -34,6 +41,7 @@ test("conversation details include the waiting message after prior context with 
           state: "held",
           source,
           sourcePayload: {
+            source: payloadSource,
             title: "Conversation",
             from: "Sam",
             snippet: "Latest waiting message",
@@ -44,6 +52,7 @@ test("conversation details include the waiting message after prior context with 
           updatedAt: 3000,
           thread: [],
         });
+        assert.equal(item.source, source ?? payloadSource);
         render(contextTpl(item), host);
         assert.deepEqual(
           [...host.querySelectorAll(".inbox-context-text")].map((el) => el.textContent?.trim()),
@@ -65,6 +74,39 @@ test("conversation details include the waiting message after prior context with 
         assert.equal(item.context, context);
       }
     }
+    const slack = toInboxItem({
+      id: "thread-item",
+      loopId: "loop-1",
+      dedupeKey: "GPRIVATE:1.0",
+      state: "held",
+      source: "slack",
+      sourcePayload: {
+        from: "Alex",
+        snippet: "Original mention",
+        slack: { channelId: "GPRIVATE", ts: "1.0" },
+        context: [{ author: "Other", text: "UNRELATED CHANNEL TAIL" }],
+      },
+      sourceAt: 1000,
+      updatedAt: 1000,
+      thread: [],
+    });
+    render(contextTpl(slack), host);
+    assert.doesNotMatch(host.textContent!, /UNRELATED CHANNEL TAIL/);
+    slack.sourceContextFetched = true;
+    slack.sourceContextPartial = true;
+    slack.context = [
+      { author: "Alex", text: "Relevant introduction", nearby: true },
+      { author: "Alex", text: "Original mention" },
+      { author: "Taylor", text: "Thread reply", reply: true },
+    ];
+    render(contextTpl(slack), host);
+    assert.deepEqual(
+      [...host.querySelectorAll(".inbox-context-text")].map((el) => el.textContent?.trim()),
+      ["Relevant introduction", "Original mention", "Thread reply"],
+    );
+    assert.equal(host.querySelectorAll(".inbox-thread-reply").length, 1);
+    assert.equal(host.querySelectorAll(".inbox-nearby-context").length, 1);
+    assert.match(host.textContent!, /Showing part of this conversation/);
   } finally {
     await vite.close();
     dom.window.close();

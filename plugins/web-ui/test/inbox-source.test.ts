@@ -8,10 +8,9 @@ const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
 const shellState = readFileSync(new URL("../src/shell-state.ts", import.meta.url), "utf8");
 const server = readFileSync(new URL("../server/index.ts", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/shell.css", import.meta.url), "utf8");
-const draftReview = readFileSync(new URL("../src/draft-review.ts", import.meta.url), "utf8");
 
 test("inbox is a first-class view with a draggable sidebar entry", () => {
-  assert.match(shellState, /"chats",\s*"inbox",\s*"contexts"/);
+  assert.match(shellState, /"chats",\s*"inbox",\s*"calendar",\s*"contexts"/);
   assert.match(shell, /case "inbox":\s*void renderInbox\(\);/);
   assert.match(shell, /data-view="inbox"/);
   assert.match(shell, /application\/x-webui-inbox/);
@@ -19,13 +18,11 @@ test("inbox is a first-class view with a draggable sidebar entry", () => {
 });
 
 test("inbox access rides the existing permissions plumbing", () => {
-  assert.match(shell, /can\("inbox"\) \? inboxNavRow\(\) : nothing/);
-  assert.match(shellState, /if \(view === "inbox"\) return can\("inbox"\);/);
+  assert.match(shell, /can\("inbox"\) \? html`\$\{inboxNavRow\(\)\}/);
+  assert.match(shellState, /if \(view === "inbox" \|\| view === "calendar"\) return can\("inbox"\);/);
   assert.match(server, /process\.env\.INBOX_USERS/);
-  assert.match(server, /INBOX_USERS\.has\("all"\) \|\| INBOX_USERS\.has\(principalId\.trim\(\)\.toLowerCase\(\)\)/);
+  assert.match(server, /principalInAllowlist\(principalId, configuredUsers\)/);
   assert.match(server, /if \(isInboxUser\(user\)\) permissions\.push\("inbox"\);/);
-  assert.match(draftReview, /if \(!can\("inbox"\)\)/);
-  assert.match(draftReview, /can\("inbox"\) \? inboxOpenCount\(id\) : 0/);
   assert.match(inbox, /if \(!can\("inbox"\)\) return;/);
 });
 
@@ -49,11 +46,6 @@ test("an inbox drag paints drop zones on every existing pane", () => {
     /render\(paneDrag \? paneZonesTpl\(this\.panelId\) : nothing/,
     "zones render for any pane drag, inbox included",
   );
-  assert.match(
-    inbox,
-    /beginPaneKindDrag\("draftReview", surface\.viewId\)/,
-    "draft review enters the shared drag path",
-  );
   assert.match(shell, /beginPaneKindDrag\("inboxView", "all"\)/, "the sidebar row drags the whole inbox");
   assert.doesNotMatch(inbox, /beginPaneKindDrag\("inboxView"/, "view chips are plain tabs, not drag handles");
 });
@@ -61,28 +53,45 @@ test("an inbox drag paints drop zones on every existing pane", () => {
 test("email items edit like an email; slack items like slack", () => {
   assert.match(inbox, /<span>To<\/span>/);
   assert.match(inbox, /<span>Subject<\/span>/);
-  assert.match(inbox, /Send it/, "send lives in the composer as a suggested action");
-  assert.match(inbox, /inbox-chat-suggest/, "suggested actions render inside the ask composer");
-  assert.match(inbox, /Send the drafted reply in Gmail/);
-  assert.match(inbox, /Send the drafted reply to Slack/);
+  assert.match(inbox, /Send it/, "send is a suggested action");
+  assert.match(
+    readFileSync(new URL("../src/assistant-sidebar.ts", import.meta.url), "utf8"),
+    /inbox-chat-suggest/,
+    "suggested actions render beside edit prompts",
+  );
+  assert.match(inbox, /submit\(event, "Send it"\)/);
   assert.match(inbox, /rows=\$\{gmail \? 7 : 3\}/, "email drafts get a taller editor than slack replies");
 });
 
 test("the address keeps naming the open item, even after switchView writes the bare view path", () => {
   assert.match(
     inbox,
-    /if \(fullSurface\.selectedId && !openItem && inboxState\.loaded\) fullSurface\.selectedId = null;\s*(\/\*[\s\S]*?\*\/\s*)?syncItemUrl\(fullSurface\.selectedId\);/,
+    /syncInboxUrl\(openSentEmail\?\.id \?\? fullSurface\.selectedId\);/,
     "every draw re-states the URL from the selection it just rendered",
   );
+  assert.match(inbox, /await openSentEmailById\(id, drawAll\);/, "unknown inbox ids resolve through sent mail");
   assert.match(
     shell,
-    /const next = deepLinkPath\(UI_BASE, appState\.currentView, sessionId, contextsState\.selected\);/,
+    /(?:const|let) next = deepLinkPath\(UI_BASE, appState\.currentView, sessionId, contextsState\.selected\);/,
     "syncUrlFromState carries no item id, which is what the inbox has to heal after",
   );
   const draw = inbox.match(/function drawFull\(\): void \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(draw, /pendingItemId/, "a deep link reaches the draw as pendingItemId");
-  assert.match(inbox, /function syncItemUrl\(itemId: string \| null, push = false\)/);
+  assert.match(inbox, /function syncInboxUrl\(itemId: string \| null, push = false\)/);
   assert.match(inbox, /if \(appState\.currentView !== "inbox"\) return;/, "and never writes from another view");
+});
+
+test("inbox tabs own stable routes that survive refresh and history navigation", () => {
+  assert.match(inbox, /itemId \?\? inboxViewSegment\(fullViewId\)/);
+  assert.match(inbox, /if \(segment === "email"\) return "gmail"/);
+  assert.match(inbox, /if \(surface === fullSurface\) selectInboxView\(v\.id, true\)/);
+  assert.match(inbox, /export function routeInboxHistory\(segment: string \| null\)/);
+  assert.match(shell, /if \(wanted === "inbox"\) routeInboxHistory\(wantedItem\)/);
+  assert.match(shell, /else routeInboxHistory\(item\)/);
+});
+
+test("initial inbox selection is restored after the shell resets the active view", () => {
+  assert.match(shell, /switchView\(wanted as View\);\s*if \(wanted === "inbox"\) routeInboxHistory\(wantedItem\);/);
 });
 
 test("every draft links back to the session that produced it", () => {
@@ -100,28 +109,48 @@ test("drafts persist on blur and send uses the current edit", () => {
     "every item mutation addresses the ledger item under its own loop",
   );
   assert.match(inbox, /postAction\(item, "edit", \{\s*proposal,/, "a blurred edit revises the proposal");
-  assert.match(
-    inbox,
-    /postAction\(item, "send", \{\s*proposal: draft,\s*\.\.\.\(basedOnAt !== undefined \? \{ expectedProposalAt: basedOnAt \} : \{\}\),\s*\}\)/,
-    "send carries the current edit and the draft version it was based on",
-  );
+  assert.doesNotMatch(inbox, /postAction\(item, "send"/);
+  assert.match(inbox, /await persistDraftNow\(item.id\);/);
   assert.match(inbox, /postAction\(item, status === "dismissed" \? "dismiss" : "reopen"\)/);
 });
 
-test("the inbox reads the loop's ledger, not a bespoke inbox endpoint", () => {
-  assert.doesNotMatch(inbox, /\/api\/inbox\/items/, "the bespoke item routes are gone");
-  assert.match(inbox, /api<\{ items: LedgerItem\[\] \}>\(`\/api\/loops\/\$\{encodeURIComponent\(loopId\)\}\/items`\)/);
-  assert.match(inbox, /inboxState\.loopId = found\.loop\?\.id \?\? null;/);
-  assert.match(inbox, /if \(entry\.state === "actioned"\) return "sent";/);
-  assert.match(inbox, /return entry\.actionKind === "replied" \? "replied" : "dismissed";/);
-  assert.match(inbox, /const payload = entry\.sourcePayload;/, "source fields are read out of the opaque payload");
+test("the inbox reads a paginated combined feed and retains original item references", () => {
+  assert.match(inbox, /api<Feed>\(`\/api\/inbox\?\$\{qs\}`\)/);
+  assert.match(inbox, /feedWindows/);
+  assert.match(inbox, /loopId: entry\.loopId/);
+  assert.match(inbox, /loadDeepLink/);
+});
+
+test("load more is a text button at the end of the filter row, not a full-width bar above the list", () => {
+  assert.match(inbox, /const hasMore = !!feedWindows\.get\(surface\.viewId\)\?\.nextCursor;/);
+  assert.match(inbox, /showEmailFilter \|\| hasMore\s*\? html`\s*<div class="inbox-filter-bar">/);
+  assert.match(
+    inbox,
+    /class="inbox-load-more"[\s\S]*?refreshInbox\(\{ more: true, viewId: surface\.viewId \}\)[\s\S]*?Load more/,
+  );
+  assert.doesNotMatch(inbox, /<button class="btn"[^\n]*>Load more/);
+  assert.match(inbox, /<button class="inbox-load-more" type="button"[^\n]*handled:[^\n]*>Load more handled<\/button>/);
+  assert.match(css, /\.inbox-filter-bar \{\s*display: flex;/);
+  assert.match(css, /\.inbox-load-more \{\s*margin-left: auto;/);
+  assert.match(css, /\.inbox-filter-bar:not\(:has\(\.inbox-filter\)\) \{\s*padding-bottom: 0;/);
+});
+
+test("localhost can overlay private inbox seed data without checking it into source", () => {
+  assert.match(inbox, /fetch\("\/inbox-seed\.local\.json", \{ cache: "no-store" \}\)/);
+  assert.match(
+    inbox,
+    /if \(!\["localhost", "127\.0\.0\.1", "\[::1\]"\]\.includes\(location\.hostname\)\) return \[\];/,
+  );
+  assert.match(inbox, /const localItems = await fetchLocalInboxItems\(\);/);
+  assert.match(inbox, /if \(localItems\.length\) inboxState\.items = localItems/);
+  assert.match(inbox, /api<Feed>\(`\/api\/inbox\?\$\{qs\}`\)/);
 });
 
 test("each item carries a follow-up chat with the agent", () => {
-  assert.match(inbox, /export function chatTpl\(item: InboxItem\): TemplateResult/);
+  assert.match(inbox, /export function chatTpl\(item: InboxItem, compact = false\): TemplateResult/);
   assert.match(inbox, /actionPath\(item, "followup"\)/);
-  assert.match(inbox, /body: JSON\.stringify\(\{ message: text \}\)/);
-  assert.match(inbox, /\$\{chatTpl\(item\)\}/, "the chat pane hangs off the draft editor");
+  assert.match(inbox, /message: text,/);
+  assert.match(inbox, /\$\{draftMessageTpl\(item\)\}/, "the draft is a message in the conversation");
   assert.match(inbox, /item\.thread\.map\(/, "the thread transcript renders");
   assert.match(inbox, /draftEdits\.delete\(item\.id\);/, "a revised proposal supersedes the local edit");
   assert.match(css, /\.inbox-chat-log \{/);
@@ -182,6 +211,42 @@ test("the inbox stylesheet exists and scopes to inbox- classes", () => {
   assert.match(css, /\.nav-badge \{/);
 });
 
+test("the inbox list spans the same desktop content width as the item detail", () => {
+  assert.match(
+    css,
+    /\.content-wide-page \{[\s\S]*--content-wide-width: calc\(var\(--content-primary-width\) \+ var\(--content-gap\) \+ var\(--content-aside-width\)\);/,
+  );
+  assert.match(css, /\.inbox-page \.inbox-surface \{\s*width: min\(var\(--content-wide-width\), 100%\);/);
+  assert.match(
+    css,
+    /\.content-wide-page > \.pane-head \{\s*width: min\(var\(--content-wide-width\), 100%\);\s*max-width: none;/,
+  );
+  assert.match(css, /\.inbox-thread-page > \.inbox-item-surface/);
+});
+
+test("inbox item hover behaves like a sidebar conversation hover", () => {
+  assert.match(css, /\.session:hover \{\s*background: var\(--conversation-hover\);/);
+  assert.match(css, /--inbox-row-hover: color-mix\(in srgb, var\(--foreground\) 4%, var\(--background\)\);/);
+  assert.match(css, /\.inbox-item-summary:hover,[\s\S]*?background: var\(--inbox-row-hover\);/);
+  const reveal = css.match(/\.inbox-item-summary:hover \.inbox-item-dismiss,[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(reveal, /opacity: 1;/);
+  assert.doesNotMatch(reveal, /background:|color:|pointer-events:/);
+  assert.match(css, /\.inbox-item-summary:has\(\.inbox-item-dismiss:hover\) \{\s*background: none;/);
+});
+
+test("inbox dividers do not collide with rounded hovered rows", () => {
+  assert.match(css, /\.inbox-item:not\(:last-child\)::after \{[\s\S]*?margin: 0 12px;/);
+  assert.match(
+    css,
+    /\.inbox-item:hover::after,\s*\.inbox-item:has\(\+ \.inbox-item:hover\)::after \{\s*background: transparent;/,
+  );
+  assert.doesNotMatch(css, /\.inbox-item \{\s*border-bottom:/);
+});
+
+test("clipped email snippets do not trigger a native hover tooltip", () => {
+  assert.match(css, /\.src-gmail \.inbox-item-snippet \{\s*pointer-events: none;/);
+});
+
 test("a send refused because the agent redrafted keeps the person's edit and shows the new draft", () => {
   assert.match(inbox, /status === 409 && \/draft changed\/i\.test\(e\.message\)/);
   assert.match(inbox, /await refetchItem\(item\);/);
@@ -197,7 +262,7 @@ test("an edit remembers the draft version it started from, and both edit and sen
     inbox,
     /postAction\(item, "edit", \{\s*proposal,\s*\.\.\.\(basedOnAt !== undefined \? \{ expectedProposalAt: basedOnAt \} : \{\}\),/,
   );
-  assert.match(inbox, /const basedOnAt = edited\?\.basedOnAt \?\? item\.draftAt;/);
+  assert.match(inbox, /expectedProposalAt: current.draftAt/);
   assert.match(inbox, /if \(isDraftConflict\(e\)\) return explainDraftConflict\(item, true\);/);
 });
 
@@ -207,15 +272,35 @@ test("draft header links stay together after the label", () => {
   assert.doesNotMatch(css, /\.inbox-draft-head \.inbox-external-link \{[^}]*margin-left: auto;/);
 });
 
-test("suggested draft actions yield to typed instructions without reflow", () => {
-  assert.match(inbox, /inbox-chat-composer \$\{pending\.trim\(\) \? "has-text" : ""\}/);
-  assert.match(inbox, /if \(had !== Boolean\(box\.value\.trim\(\)\)\) drawAll\(\);/);
-  assert.match(css, /\.inbox-chat-composer\.has-text \.inbox-chat-suggest \{\s*visibility: hidden;/);
-  assert.doesNotMatch(inbox, /inbox-draft-actions|function sendLabel/);
+test("draft header links share one text size", () => {
+  assert.match(css, /\.inbox-session-link,\s*\.inbox-external-link \{[^}]*font-size: 11px;/);
+  assert.doesNotMatch(css, /\.inbox-session-link \{[^}]*font-size:/);
+});
+
+test("send stays available alongside typed instructions", () => {
+  assert.match(inbox, /embeddedComposer\(/);
+  assert.doesNotMatch(css, /\.inbox-chat-composer\.has-text \.inbox-chat-suggest/);
+  assert.match(inbox, /new CustomEvent\("composer-submit", \{ detail: instruction \}\)/);
 });
 
 test("conversation messages use the containing view's scroll instead of clipping the latest message", () => {
   const context = css.match(/\.inbox-context \{[^}]*\}/)?.[0] ?? "";
   assert.match(context, /flex: none;/);
   assert.doesNotMatch(context, /max-height:|overflow-y:/);
+});
+
+test("single email pages keep bottom breathing room", () => {
+  const surface = css.match(/\.inbox-item-surface \.inbox-scroll \{[^}]*\}/)?.[0] ?? "";
+  assert.match(surface, /padding-bottom: calc\(64px \+ env\(safe-area-inset-bottom\)\);/);
+});
+
+test("phone inbox composer gives instructions a full row without shrinking touch controls", () => {
+  const start = css.indexOf("  .inbox-chat-composer .composer-wrap .composer-input,");
+  assert.ok(start >= 0);
+  const phone = css.slice(css.lastIndexOf("@media", start), start + 180);
+  assert.match(phone, /^@media \(max-width: 860px\)/);
+  assert.match(
+    phone,
+    /\.inbox-chat-composer \.composer-wrap \.composer-input,\s*\.inbox-chat-composer \.composer-wrap \.composer-toolbar\s*\{\s*grid-column: 1 \/ -1;/,
+  );
 });

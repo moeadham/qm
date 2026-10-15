@@ -347,6 +347,7 @@ resource "aws_iam_role_policy" "github_deploy" {
           "ecs:ListTaskDefinitions",
           "ec2:DescribeSecurityGroups",
           "elasticloadbalancing:Describe*",
+          "cloudfront:ListDistributions",
           "rds:DescribeDBInstances",
           "servicediscovery:ListNamespaces",
           "servicediscovery:ListServices",
@@ -442,7 +443,7 @@ resource "aws_iam_role_policy" "github_deploy" {
       {
         Sid      = "InspectDeploymentCanaries"
         Effect   = "Allow"
-        Action   = ["ecs:DescribeTasks"]
+        Action   = ["ecs:DescribeTasks", "ecs:GetTaskProtection"]
         Resource = ["arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task/${var.cluster_name}/*"]
       },
       {
@@ -609,7 +610,7 @@ resource "aws_db_instance" "this" {
   identifier                = "${var.cluster_name}-core"
   engine                    = "postgres"
   engine_version            = "16"
-  instance_class            = "db.t4g.small"
+  instance_class            = var.db_instance_class
   allocated_storage         = 20
   db_name                   = var.db_name
   username                  = var.db_username
@@ -729,7 +730,7 @@ resource "aws_iam_role_policy" "task_objects" {
       },
       {
         Effect   = "Allow"
-        Action   = ["ecs:GetTaskProtection", "ecs:UpdateTaskProtection"]
+        Action   = ["ecs:GetTaskProtection", "ecs:UpdateTaskProtection", "ecs:DescribeTasks"]
         Resource = "arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task/${var.cluster_name}/*"
       },
       {
@@ -858,7 +859,7 @@ resource "aws_cloudfront_distribution" "portal" {
 
     forwarded_values {
       query_string = true
-      headers      = ["Accept", "Authorization", "CloudFront-Forwarded-Proto", "Content-Type", "Origin", "Referer", "Sec-Fetch-Site"]
+      headers      = ["Accept", "Authorization", "CloudFront-Forwarded-Proto", "Content-Type", "Origin", "Referer", "Sec-Fetch-Site", "X-Timestamp", "X-Signature", "X-Agent-Capability"]
       cookies { forward = "all" }
     }
   }
@@ -991,6 +992,10 @@ resource "aws_ecs_service" "service" {
     service {
       port_name      = each.key
       discovery_name = each.key
+      timeout {
+        idle_timeout_seconds        = 300
+        per_request_timeout_seconds = 0
+      }
       client_alias {
         dns_name = "${each.key}.${var.cloud_map_namespace}"
         port     = each.value.internal_port

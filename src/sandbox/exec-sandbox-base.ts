@@ -1,3 +1,4 @@
+import { cleanupFailedProvision } from "./sandbox.ts";
 import { randomUUID } from "node:crypto";
 import type { WorkspaceLayer } from "../types.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
@@ -47,6 +48,7 @@ export interface ExecSandboxBaseDeps {
   forgetInstance?(name: string): void;
   ensureEgress?(name: string): Promise<void>;
   installLayerTools?: LayerToolInstaller;
+  combineLayerToolPrep?: boolean;
 }
 
 export interface ExecSandboxBase {
@@ -78,7 +80,19 @@ export function createExecSandboxBase(deps: ExecSandboxBaseDeps): ExecSandboxBas
     return provisionQueue(`scratch:${key}`, async () => {
       scratchKeyByName.set(name, key);
       const active = activeScratch.get(name) ?? 0;
-      if (active === 0 && !deps.isProvisioned(name)) await deps.recreateScratch(name);
+      if (active === 0 && !deps.isProvisioned(name)) {
+        try {
+          await deps.recreateScratch(name);
+        } catch (error) {
+          deps.forgetInstance?.(name);
+          await cleanupFailedProvision(
+            { teardown: () => deps.deleteInstance(name) },
+            { id: name, rootDir: workspaceDir, scratch: true, backend: label },
+          );
+          scratchKeyByName.delete(name);
+          throw error;
+        }
+      }
       activeScratch.set(name, active + 1);
       return { name, coldStart: active === 0 };
     });
@@ -114,6 +128,7 @@ export function createExecSandboxBase(deps: ExecSandboxBaseDeps): ExecSandboxBas
         deps.forgetInstance?.(handle.id);
         if (tdOpts?.destroy) await deps.deleteInstance(handle.id);
         else await deps.deleteInstance(handle.id).catch(swallowAs(`${label}-sandbox: scratch delete`, undefined));
+        scratchKeyByName.delete(handle.id);
       });
     }
     if (!tdOpts?.destroy) return;
@@ -163,9 +178,18 @@ export function createExecSandboxBase(deps: ExecSandboxBaseDeps): ExecSandboxBas
       };
       if (Object.keys(env).length) handle.env = env;
       const credLinks = scratch ? "" : ` && ${ephemeralCredLinkScript(homeDir, deps.credentialPaths)}`;
-      const prep = await deps.exec(name, `mkdir -p ${shq(workspaceDir)}${credLinks}`, PREP_TIMEOUT_SEC);
-      if (prep.code !== 0)
-        throw new Error(`${label} provision prep failed: ${execFailureDetail(prep, PREP_TIMEOUT_SEC).slice(0, 200)}`);
+      const prepare = `mkdir -p ${shq(workspaceDir)}${credLinks}`;
+      const toolIo = {
+        exec: (script: string, t: number) => deps.exec(name, script, t),
+        writeAbs: (abs: string, data: Uint8Array) => deps.writeAbsBytes(name, abs, data),
+      };
+      if (deps.combineLayerToolPrep && deps.installLayerTools) {
+        await deps.installLayerTools(toolIo, prepare);
+      } else {
+        const prep = await deps.exec(name, prepare, PREP_TIMEOUT_SEC);
+        if (prep.code !== 0)
+          throw new Error(`${label} provision prep failed: ${execFailureDetail(prep, PREP_TIMEOUT_SEC).slice(0, 200)}`);
+      }
 
       await materializeRoLayers(
         workspace,
@@ -178,14 +202,11 @@ export function createExecSandboxBase(deps: ExecSandboxBaseDeps): ExecSandboxBas
         },
         { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label },
       );
-      await deps.installLayerTools?.({
-        exec: (script, t) => deps.exec(name, script, t),
-        writeAbs: (abs, data) => deps.writeAbsBytes(name, abs, data),
-      });
+      if (!deps.combineLayerToolPrep) await deps.installLayerTools?.(toolIo);
 
       return handle;
     } catch (err) {
-      await teardown(handle).catch(swallowAs(`${label}-sandbox: teardown after failed provision`, undefined));
+      await cleanupFailedProvision({ teardown }, handle);
       throw err;
     }
   }

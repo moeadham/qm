@@ -5,6 +5,7 @@ import {
   harnessCarriedModelAuth,
   baseModelProviders,
   boolEnv,
+  enabledSandboxBackends,
   loadConfig,
   numEnv,
   CONFIG_DEFAULTS,
@@ -19,6 +20,26 @@ const productionEnv = {
   CONNECTOR_SECRET_KEY: "connector-secret-0123456789abcdef",
   SANDBOX_BACKEND: "local",
 } as const;
+
+test("Sprites proxy transition URLs are optional and parsed independently of the primary", () => {
+  assert.equal(loadConfig({}).spritesSandbox.egressProxyAdditionalUrls, undefined);
+  const config = loadConfig({
+    SPRITES_EGRESS_PROXY_URL: "https://primary.example.com",
+    SPRITES_EGRESS_PROXY_ADDITIONAL_URLS: " https://old.example.com, ,https://next.example.com ",
+  });
+  assert.equal(config.spritesSandbox.egressProxyUrl, "https://primary.example.com");
+  assert.deepEqual(config.spritesSandbox.egressProxyAdditionalUrls, [
+    "https://old.example.com",
+    "https://next.example.com",
+  ]);
+});
+
+test("capability compression is explicitly enabled after verifier rollout", () => {
+  assert.equal(loadConfig({}).capabilityTokenCompression, false);
+  assert.equal(loadConfig({ CAPABILITY_TOKEN_COMPRESSION: "0" }).capabilityTokenCompression, false);
+  assert.equal(loadConfig({ CAPABILITY_TOKEN_COMPRESSION: "1" }).capabilityTokenCompression, true);
+  assert.throws(() => loadConfig({ CAPABILITY_TOKEN_COMPRESSION: "invalid" }), /CAPABILITY_TOKEN_COMPRESSION/);
+});
 
 test("ORG_BRAND_* parses into a validated branding default", () => {
   assert.equal(loadConfig({}).brandingDefault, undefined);
@@ -77,7 +98,11 @@ test("production and unauthenticated-core escape hatch are parsed once", () => {
 
 test("harness security posture defaults to auto and validates named modes", () => {
   assert.equal(loadConfig({}).securityPosture, "auto");
-  assert.equal(loadConfig({}).securityScreenBackend, "model");
+  assert.equal(loadConfig({}).securityScreen, "off");
+  assert.equal(loadConfig({}).securityScreenClassifier, "model");
+  assert.equal(loadConfig({ SECURITY_SCREEN: "Observe" }).securityScreen, "observe");
+  assert.equal(loadConfig({ SECURITY_SCREEN: "enforce" }).securityScreen, "enforce");
+  assert.throws(() => loadConfig({ SECURITY_SCREEN: "shadow" }), /SECURITY_SCREEN="shadow" is not recognized/);
   assert.equal(loadConfig({}).securityScreenProxy, undefined);
   assert.equal(loadConfig({}).securityScreenTimeoutMs, 15_000);
   assert.equal(loadConfig({ SECURITY_SCREEN_TIMEOUT_MS: "25" }).securityScreenTimeoutMs, 25);
@@ -87,25 +112,22 @@ test("harness security posture defaults to auto and validates named modes", () =
     () => loadConfig({ HARNESS_SECURITY_POSTURE: "permissive" }),
     /HARNESS_SECURITY_POSTURE="permissive" is not recognized/,
   );
+  const proxy = {
+    SECURITY_SCREEN: "observe",
+    SECURITY_SCREEN_CLASSIFIER: "proxy",
+    SECURITY_SCREEN_PROXY_PROVIDER: "example-screen",
+    SECURITY_SCREEN_PROXY_ENDPOINT: "https://screen.example.test/classify",
+    SECURITY_SCREEN_PROXY_TOKEN: "test-token",
+  };
   assert.throws(
-    () => loadConfig({ SECURITY_SCREEN_BACKEND: "proxy" }),
-    /requires SECURITY_SCREEN_PROXY_PROVIDER, SECURITY_SCREEN_PROXY_ENDPOINT, SECURITY_SCREEN_PROXY_TOKEN, and SECURITY_SCREEN_PROXY_ROLLOUT/,
+    () => loadConfig({ SECURITY_SCREEN_CLASSIFIER: "proxy" }),
+    /requires SECURITY_SCREEN_PROXY_PROVIDER, SECURITY_SCREEN_PROXY_ENDPOINT, and SECURITY_SCREEN_PROXY_TOKEN/,
   );
-  assert.deepEqual(
-    loadConfig({
-      SECURITY_SCREEN_BACKEND: "proxy",
-      SECURITY_SCREEN_PROXY_PROVIDER: "example-screen",
-      SECURITY_SCREEN_PROXY_ENDPOINT: "https://screen.example.test/classify",
-      SECURITY_SCREEN_PROXY_TOKEN: "test-token",
-      SECURITY_SCREEN_PROXY_ROLLOUT: "enforce",
-    }).securityScreenProxy,
-    {
-      provider: "example-screen",
-      endpoint: "https://screen.example.test/classify",
-      token: "test-token",
-      shadow: false,
-    },
-  );
+  assert.deepEqual(loadConfig(proxy).securityScreenProxy, {
+    provider: "example-screen",
+    endpoint: "https://screen.example.test/classify",
+    token: "test-token",
+  });
   for (const timeout of ["0", "-1", "1.5", "2147483648"]) {
     assert.throws(
       () => loadConfig({ SECURITY_SCREEN_TIMEOUT_MS: timeout }),
@@ -114,18 +136,11 @@ test("harness security posture defaults to auto and validates named modes", () =
   }
   assert.throws(
     () => loadConfig({ SECURITY_SCREEN_PROXY_PROVIDER: "example-screen" }),
-    /requires SECURITY_SCREEN_BACKEND=proxy/,
+    /requires SECURITY_SCREEN_CLASSIFIER=proxy/,
   );
   for (const provider of ["Bad Provider", "surface", "origin", "-leading", `${"x".repeat(64)}`]) {
     assert.throws(
-      () =>
-        loadConfig({
-          SECURITY_SCREEN_BACKEND: "proxy",
-          SECURITY_SCREEN_PROXY_PROVIDER: provider,
-          SECURITY_SCREEN_PROXY_ENDPOINT: "https://screen.example.test/classify",
-          SECURITY_SCREEN_PROXY_TOKEN: "test-token",
-          SECURITY_SCREEN_PROXY_ROLLOUT: "shadow",
-        }),
+      () => loadConfig({ ...proxy, SECURITY_SCREEN_PROXY_PROVIDER: provider }),
       /SECURITY_SCREEN_PROXY_PROVIDER/,
     );
   }
@@ -136,27 +151,32 @@ test("harness security posture defaults to auto and validates named modes", () =
     "https://screen.example.test./classify",
   ]) {
     assert.throws(
-      () =>
-        loadConfig({
-          SECURITY_SCREEN_BACKEND: "proxy",
-          SECURITY_SCREEN_PROXY_PROVIDER: "example-screen",
-          SECURITY_SCREEN_PROXY_ENDPOINT: endpoint,
-          SECURITY_SCREEN_PROXY_TOKEN: "test-token",
-          SECURITY_SCREEN_PROXY_ROLLOUT: "shadow",
-        }),
+      () => loadConfig({ ...proxy, SECURITY_SCREEN_PROXY_ENDPOINT: endpoint }),
       /SECURITY_SCREEN_PROXY_ENDPOINT/,
     );
   }
+});
+
+test("retired security screen variables fail loudly unless they only said off", () => {
+  assert.equal(loadConfig({ SECURITY_SCREEN_BACKEND: "off" }).securityScreen, "off");
+  for (const env of [
+    { SECURITY_SCREEN_BACKEND: "proxy" },
+    { SECURITY_SCREEN_BACKEND: "off", SECURITY_SCREEN: "observe" },
+    { SECURITY_SCREEN_BACKEND: "off", SECURITY_SCREEN_ALL_POSTURES: "false" },
+    { SECURITY_SCREEN_ALL_POSTURES: "true" },
+    { SECURITY_SCREEN_PROXY_ROLLOUT: "shadow" },
+  ]) {
+    assert.throws(() => loadConfig(env), /retired.*SECURITY_SCREEN=off\|observe\|enforce/);
+  }
+});
+
+test("sharing posture defaults to isolated and accepts only isolated or open", () => {
+  assert.equal(loadConfig({}).sharingPosture, "isolated");
+  assert.equal(loadConfig({ HARNESS_SHARING_POSTURE: "Open" }).sharingPosture, "open");
+  assert.equal(loadConfig({ HARNESS_SHARING_POSTURE: "isolated" }).sharingPosture, "isolated");
   assert.throws(
-    () =>
-      loadConfig({
-        SECURITY_SCREEN_BACKEND: "proxy",
-        SECURITY_SCREEN_PROXY_PROVIDER: "example-screen",
-        SECURITY_SCREEN_PROXY_ENDPOINT: "https://screen.example.test/classify",
-        SECURITY_SCREEN_PROXY_TOKEN: "test-token",
-        SECURITY_SCREEN_PROXY_ROLLOUT: "gradual",
-      }),
-    /SECURITY_SCREEN_PROXY_ROLLOUT/,
+    () => loadConfig({ HARNESS_SHARING_POSTURE: "dangerous" }),
+    /HARNESS_SHARING_POSTURE="dangerous" is not recognized/,
   );
 });
 
@@ -176,6 +196,19 @@ test("production names a mock harness rather than letting it pass as a real depl
   assert.equal(mock.length, 2, "production + unset and production + mock each warn once");
   assert.match(mock[0]!, /unset, which means mock/);
   assert.match(mock[1]!, /HARNESS is "mock"/);
+});
+
+test("Modal without an egress proxy warns that sandboxes run fail-open", () => {
+  const warnings: string[] = [];
+  const original = console.warn;
+  console.warn = (msg: unknown) => void warnings.push(String(msg));
+  try {
+    loadConfig({ MODAL_TOKEN_ID: "id", MODAL_TOKEN_SECRET: "secret" });
+    loadConfig({ MODAL_TOKEN_ID: "id", MODAL_TOKEN_SECRET: "secret", MODAL_EGRESS_PROXY_URL: "https://egress.test" });
+  } finally {
+    console.warn = original;
+  }
+  assert.equal(warnings.filter((w) => w.includes("MODAL_EGRESS_PROXY_URL")).length, 1);
 });
 
 test("a leftover *=sqlite env throws (no silent downgrade to ephemeral memory)", () => {
@@ -199,31 +232,30 @@ test("every boolean knob accepts the shared vocabulary (off means off)", () => {
     SEED_SKILLS: "off",
     EXECUTE_SCRATCH: "off",
     REACH_EXEC: "off",
-    COMMAND_SCOPED_CREDENTIALS: "off",
     PI_CAPTURE_REQUESTS: "off",
+    EAGER_PROVISION: "off",
   });
   assert.equal(off.seedSkills, false);
+  assert.equal(off.eagerProvisionEnabled, false);
   assert.equal(off.scratchExecEnabled, false);
   assert.equal(off.reachExecEnabled, false);
-  assert.equal(off.sharedOwnerAuthIsolation, false);
   assert.equal(off.piCaptureRequests, false);
 
   const on = loadConfig({
     SEED_SKILLS: "yes",
     EXECUTE_SCRATCH: "on",
     REACH_EXEC: "1",
-    SHARED_OWNER_AUTH_ISOLATION: "yes",
     PI_SYSTEM_CACHE_SPLIT: "on",
   });
   assert.equal(on.seedSkills, true);
   assert.equal(on.scratchExecEnabled, true);
   assert.equal(on.reachExecEnabled, true);
-  assert.equal(on.sharedOwnerAuthIsolation, true);
   assert.equal(on.piSystemCacheSplit, true);
 
   const unset = loadConfig({});
   assert.equal(unset.piCaptureRequests, true, "capture defaults on");
   assert.equal(unset.piSystemCacheSplit, false, "cache split defaults off");
+  assert.equal(unset.eagerProvisionEnabled, true, "eager provision defaults on");
 });
 
 test("numEnv: empty and non-numeric values fall back instead of poisoning config with NaN", () => {
@@ -280,6 +312,7 @@ test("production refuses missing, placeholder, or weak signing keys", () => {
 
 test("defaults come from CONFIG_DEFAULTS, set exactly once", () => {
   const def = loadConfig({});
+  assert.equal(CONFIG_DEFAULTS.workers, 16);
   assert.equal(def.workers, CONFIG_DEFAULTS.workers);
   assert.equal(def.rateLimitPerWindow, CONFIG_DEFAULTS.rateLimitPerWindow);
   assert.equal(def.rateLimitWindowMs, CONFIG_DEFAULTS.rateLimitWindowMs);
@@ -320,6 +353,11 @@ test("PUBLIC_API_URL is not treated as the human-facing web URL", () => {
   assert.equal(apiOnly.apiBaseUrl, "https://agent-api.example");
   assert.equal(apiOnly.publicUrl, "https://agent-api.example");
   assert.equal(apiOnly.publicWebUrl, undefined);
+
+  const disabledWeb = loadConfig({ PUBLIC_API_URL: "https://agent-api.example", PUBLIC_WEB_URL: "" });
+  assert.equal(disabledWeb.apiBaseUrl, "https://agent-api.example");
+  assert.equal(disabledWeb.publicUrl, "https://agent-api.example");
+  assert.equal(disabledWeb.publicWebUrl, undefined);
 
   const web = loadConfig({ PUBLIC_API_URL: "https://agent-api.example", PUBLIC_WEB_URL: "https://portal.example" });
   assert.equal(web.apiBaseUrl, "https://agent-api.example");
@@ -366,6 +404,18 @@ test("HARNESS=claude uses native Claude authentication and does not require an A
   assert.equal(loadConfig({ HARNESS: "claude", CLAUDE_MODEL: "claude-opus-4-8" }).claudeModel, "claude-opus-4-8");
 });
 
+test("SUPERSERVE_CONFIG_GENERATION accepts only nonnegative safe integers", () => {
+  for (const value of ["9007199254740993", "-1", "0.5", "NaN", "Infinity"]) {
+    assert.throws(() => loadConfig({ SUPERSERVE_CONFIG_GENERATION: value }), /SUPERSERVE_CONFIG_GENERATION/, value);
+  }
+  for (const value of [undefined, "", "  "]) {
+    assert.equal(loadConfig({ SUPERSERVE_CONFIG_GENERATION: value }).superserveSandbox.configGeneration, undefined);
+  }
+  for (const value of ["0", "7", " 42 ", String(Number.MAX_SAFE_INTEGER)]) {
+    assert.equal(loadConfig({ SUPERSERVE_CONFIG_GENERATION: value }).superserveSandbox.configGeneration, Number(value));
+  }
+});
+
 test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary variable is tolerated", () => {
   assert.equal(loadConfig({}).sandboxBackend, "local");
   assert.throws(
@@ -375,6 +425,116 @@ test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary
   assert.throws(() => loadConfig({ SANDBOX_BACKEND: "sprites" }), /SPRITES_TOKEN/);
   assert.throws(() => loadConfig({ SANDBOX_BACKEND: "agent37" }), /AGENT37_API_KEY/);
   assert.equal(loadConfig({ SANDBOX_BACKEND: "agent37", AGENT37_API_KEY: "sk_live_k" }).sandboxBackend, "agent37");
+  assert.throws(() => loadConfig({ SANDBOX_BACKEND: "superserve" }), /SUPERSERVE_API_KEY/);
+  assert.throws(
+    () => loadConfig({ SANDBOX_BACKEND: "superserve", SUPERSERVE_API_KEY: "ss_live_k" }),
+    /SUPERSERVE_TEMPLATE/,
+  );
+  assert.throws(
+    () => loadConfig({ SANDBOX_BACKEND: " superserve ", SUPERSERVE_API_KEY: "ss_live_k" }),
+    /SUPERSERVE_TEMPLATE/,
+  );
+  assert.throws(
+    () => loadConfig({ SANDBOX_BACKEND: " superserve ", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" }),
+    /SUPERSERVE_API_KEY/,
+  );
+  assert.equal(
+    loadConfig({
+      SANDBOX_BACKEND: "superserve",
+      SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+      SUPERSERVE_API_KEY: "ss_live_k",
+      SUPERSERVE_CONFIG_GENERATION: "7",
+    }).superserveSandbox.configGeneration,
+    7,
+    "a deployment that tracks its own rollouts stamps the generation its sandboxes carry",
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        SANDBOX_BACKEND: "superserve",
+        SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+        SUPERSERVE_API_KEY: "ss_live_k",
+        SUPERSERVE_CONFIG_GENERATION: "later",
+      }),
+    /SUPERSERVE_CONFIG_GENERATION/,
+  );
+  assert.equal(
+    loadConfig({
+      SANDBOX_BACKEND: "superserve",
+      SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+      SUPERSERVE_API_KEY: "ss_live_k",
+    }).sandboxBackend,
+    "superserve",
+  );
+  const superserveProd = {
+    ...productionEnv,
+    SANDBOX_BACKEND: "superserve",
+    SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+    SUPERSERVE_API_KEY: "ss_live_k",
+  };
+  assert.throws(
+    () => loadConfig(superserveProd),
+    /superserve sandbox backend requires DATABASE_URL in production/,
+    "without a durable store the generation and provisioning lock are per-process",
+  );
+  assert.throws(
+    () => loadConfig({ ...superserveProd, SANDBOX_BACKEND: "local" }),
+    /superserve sandbox backend requires DATABASE_URL in production/,
+    "the requirement follows the credentials that enable it, not just the primary backend",
+  );
+  assert.doesNotThrow(() => loadConfig({ ...superserveProd, DATABASE_URL: "postgres://qm@localhost/qm" }));
+  assert.doesNotThrow(
+    () =>
+      loadConfig({
+        SANDBOX_BACKEND: "superserve",
+        SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+        SUPERSERVE_API_KEY: "ss_live_k",
+      }),
+    "a single-process dev instance needs no durable store",
+  );
+  assert.ok(
+    !enabledSandboxBackends(loadConfig({ SANDBOX_BACKEND: "local", SUPERSERVE_API_KEY: "ss_live_k" })).includes(
+      "superserve",
+    ),
+    "a stray key without a template must not enable the secondary backend",
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        SANDBOX_BACKEND: "local",
+        SANDBOX_SCOPE_BACKENDS: '{"channel":"superserve"}',
+        SUPERSERVE_API_KEY: "ss_live_k",
+      }),
+    /SUPERSERVE_TEMPLATE/,
+    "a scope routed to superserve needs the template even when it is not the primary backend",
+  );
+  assert.doesNotThrow(() =>
+    loadConfig({
+      SANDBOX_BACKEND: "local",
+      SANDBOX_SCOPE_BACKENDS: '{"channel":"superserve"}',
+      SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+      SUPERSERVE_API_KEY: "ss_live_k",
+    }),
+  );
+  assert.ok(
+    enabledSandboxBackends(
+      loadConfig({ SANDBOX_BACKEND: "local", SUPERSERVE_API_KEY: "ss_live_k", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" }),
+    ).includes("superserve"),
+  );
+  assert.ok(
+    !enabledSandboxBackends(
+      loadConfig({ SANDBOX_BACKEND: "local", SUPERSERVE_API_KEY: "ss_live_k", SUPERSERVE_TEMPLATE: "   " }),
+    ).includes("superserve"),
+    "a blank template must not enable the secondary backend",
+  );
+  assert.equal(
+    loadConfig({
+      SANDBOX_BACKEND: "superserve",
+      SUPERSERVE_TEMPLATE: " qm-agent-1.0.0 ",
+      SUPERSERVE_API_KEY: "ss_live_k",
+    }).superserveSandbox?.template,
+    "qm-agent-1.0.0",
+  );
   const config = loadConfig({ SANDBOX_SECONDARY_BACKEND: "smolmachines" });
   assert.equal(config.sandboxBackend, "local");
   assert.ok(!("sandboxSecondaryBackend" in config));
@@ -508,6 +668,21 @@ test("DEPLOY_PROVIDER=porter refuses to boot without a cluster and tolerates a m
   );
 });
 
+test("PORTER_DEPLOY_VISIBILITY=internal is accepted and refuses an apps domain", () => {
+  const cluster = {
+    DEPLOY_PROVIDER: "porter",
+    PORTER_DEPLOY_API_TOKEN: "tok",
+    PORTER_DEPLOY_PROJECT_ID: "7",
+    PORTER_DEPLOY_CLUSTER_ID: "9",
+    PORTER_DEPLOY_VISIBILITY: "internal",
+  };
+  assert.equal(loadConfig(cluster).porterDeploy.visibility, "internal");
+  assert.throws(
+    () => loadConfig({ ...cluster, PORTER_DEPLOY_APPS_DOMAIN: "apps.example.com" }),
+    /PORTER_DEPLOY_APPS_DOMAIN/,
+  );
+});
+
 test("SANDBOX_BACKEND=porter locates the API and shares the deploy provider's token", () => {
   assert.throws(
     () => loadConfig({ SANDBOX_BACKEND: "porter", PORTER_DEPLOY_API_TOKEN: "tok" }),
@@ -617,6 +792,16 @@ test("the deploy-apps sign-in address defaults to the public web URL", () => {
   });
   assert.equal(derived.deployAppsLoginUrl, "https://qm.example.com");
   assert.equal(derived.deployAppsSessionSecret, "s");
+  assert.equal(derived.deployAppsLoginPath, "/auth/login");
+  assert.equal(
+    loadConfig({
+      DEPLOY_APPS_SESSION_SECRET: "s",
+      PUBLIC_WEB_URL: "https://qm.example.com",
+      DEPLOY_APPS_LOGIN_PATH: "/auth/trusted/login",
+    }).deployAppsLoginPath,
+    "/auth/trusted/login",
+  );
+  assert.throws(() => loadConfig({ DEPLOY_APPS_LOGIN_PATH: "//evil.example" }), /DEPLOY_APPS_LOGIN_PATH/);
   const explicit = loadConfig({
     DEPLOY_APPS_SESSION_SECRET: "s",
     DEPLOY_APPS_LOGIN_URL: "https://portal.example.com/",
@@ -669,6 +854,24 @@ test("Modal native retention and interval configuration are independent of legac
   assert.equal(config.modalSandbox.snapshotIntervalSec, 315360000);
 });
 
+test("Smolmachines lifecycle, egress, and snapshot knobs are parsed into Config", () => {
+  const config = loadConfig({
+    SMOLMACHINES_TOKEN: "smk_test",
+    SMOLMACHINES_AUTOSTOP_SEC: "900",
+    SMOLMACHINES_EGRESS_PROXY_URL: "https://proxy.example.com",
+    SMOLMACHINES_SNAPSHOT_S3_BUCKET: "qm-home-snapshots",
+    SMOLMACHINES_SNAPSHOT_INTERVAL_SEC: "300",
+  });
+  assert.equal(config.smolmachinesSandbox.autoStopSec, 900);
+  assert.equal(config.smolmachinesSandbox.egressProxyUrl, "https://proxy.example.com");
+  assert.equal(config.smolmachinesSandbox.snapshotS3Bucket, "qm-home-snapshots");
+  assert.equal(config.smolmachinesSandbox.snapshotIntervalSec, 300);
+  const bare = loadConfig({ SMOLMACHINES_TOKEN: "smk_test" });
+  assert.equal(bare.smolmachinesSandbox.autoStopSec, undefined);
+  assert.equal(bare.smolmachinesSandbox.snapshotS3Bucket, undefined);
+  assert.throws(() => loadConfig({ SMOLMACHINES_AUTOSTOP_SEC: "soon" }), /SMOLMACHINES_AUTOSTOP_SEC/);
+});
+
 test("Modal native activation is default-off and uses strict boolean configuration", () => {
   assert.equal(loadConfig({}).modalSandbox.nativeSnapshotsEnabled, false);
   for (const value of ["true", "on", "1"])
@@ -691,4 +894,75 @@ test("sandbox resource rollout requires explicit activation", () => {
     () => loadConfig({ ...productionEnv, SANDBOX_RESOURCES_ENABLED: "enable" }),
     /not a recognized boolean/,
   );
+});
+
+test("suggestion generation defaults on and can be explicitly disabled", () => {
+  assert.equal(loadConfig({}).suggestedActivitiesEnabled, true);
+  assert.equal(loadConfig({ SUGGESTED_ACTIVITIES_ENABLED: "true" }).suggestedActivitiesEnabled, true);
+  assert.equal(loadConfig({ SUGGESTED_ACTIVITIES_ENABLED: "false" }).suggestedActivitiesEnabled, false);
+  assert.throws(() => loadConfig({ SUGGESTED_ACTIVITIES_ENABLED: "maybe" }));
+});
+
+test("sandbox scope defaults parse exact scope kinds and reject malformed mappings", () => {
+  const credentials = {
+    SPRITES_TOKEN: "unit-test-sprites",
+    MODAL_TOKEN_ID: "unit-test-modal-id",
+    MODAL_TOKEN_SECRET: "unit-test-modal-secret",
+  };
+  assert.deepEqual(
+    loadConfig({ ...credentials, SANDBOX_SCOPE_BACKENDS: '{"personal":"modal","channel":"sprites"}' })
+      .sandboxScopeDefaults,
+    { personal: "modal", channel: "sprites" },
+  );
+  for (const value of [
+    "[]",
+    "null",
+    '{"personal:someone":"modal"}',
+    '{"personal":"missing"}',
+    '{"unknown":"sprites"}',
+    '{"personal":""}',
+  ])
+    assert.throws(() => loadConfig({ ...credentials, SANDBOX_SCOPE_BACKENDS: value }));
+});
+
+test("Fly shared application name is passed to the deployment provider", () => {
+  const config = loadConfig({
+    DEPLOY_PROVIDER: "fly",
+    FLY_DEPLOY_SHARED_APP_NAME: "qm-example-apps",
+    FLY_DEPLOY_WIREGUARD_PEERS: "[]",
+    FLY_DEPLOY_API_TOKEN: "test-token",
+    FLY_DEPLOY_DATA_VOLUME_SIZE_GB: "1",
+  });
+  assert.equal(config.flyDeploy.sharedAppName, "qm-example-apps");
+  assert.equal(config.flyDeploy.dataVolumeSizeGb, 1);
+});
+
+test("background ownership requires durable storage and an independent deployment authority", () => {
+  const env = {
+    BACKGROUND_DEPLOYMENT_ID: "core:release-a",
+    DATABASE_URL: "postgres://localhost/test",
+    CORE_SIGNING_SECRET: "source-signing-secret-0123456789abcdef",
+    DEPLOYMENT_CONTROL_SECRET: "deployment-control-secret-0123456789abcdef",
+  };
+  const config = loadConfig(env);
+  assert.equal(config.backgroundDeploymentId, env.BACKGROUND_DEPLOYMENT_ID);
+  assert.equal(config.deploymentControlSecret, env.DEPLOYMENT_CONTROL_SECRET);
+  assert.equal(config.backgroundWorkEnabled, true);
+  assert.equal(loadConfig({ ...env, BACKGROUND_WORK_ENABLED: "false" }).backgroundWorkEnabled, false);
+  assert.throws(() => loadConfig({ ...env, DATABASE_URL: "" }), /DATABASE_URL/);
+  assert.throws(() => loadConfig({ ...env, DEPLOYMENT_CONTROL_SECRET: "short" }), /distinct DEPLOYMENT_CONTROL_SECRET/);
+  assert.throws(
+    () => loadConfig({ ...env, DEPLOYMENT_CONTROL_SECRET: env.CORE_SIGNING_SECRET }),
+    /distinct DEPLOYMENT_CONTROL_SECRET/,
+  );
+  assert.throws(() => loadConfig({ ...env, BACKGROUND_DEPLOYMENT_ID: " " }), /BACKGROUND_DEPLOYMENT_ID/);
+  assert.throws(() => loadConfig({ ...env, CORE_SIGNING_SECRET: "short" }), /CORE_SIGNING_SECRET/);
+  assert.throws(() => loadConfig({ ...env, DEPLOYMENT_CONTROL_SECRET: " ".repeat(32) }), /DEPLOYMENT_CONTROL_SECRET/);
+});
+
+test("sandbox capability TTL is deployment-configurable with a 48-hour default", () => {
+  assert.equal(loadConfig({}).sandboxCapabilityTtlMs, 48 * 3_600_000);
+  assert.equal(loadConfig({ SANDBOX_CAPABILITY_TTL_HOURS: "168" }).sandboxCapabilityTtlMs, 168 * 3_600_000);
+  assert.equal(loadConfig({ SANDBOX_CAPABILITY_TTL_HOURS: "none" }).sandboxCapabilityTtlMs, 0);
+  assert.throws(() => loadConfig({ SANDBOX_CAPABILITY_TTL_HOURS: "-5" }), /SANDBOX_CAPABILITY_TTL_HOURS/);
 });

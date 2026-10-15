@@ -1,3 +1,4 @@
+import type { ExternalSlackPolicies } from "../../resolution/external-slack.ts";
 import type { RuntimeService } from "../../harness/runtime-types.ts";
 import type { SandboxResources } from "../../sandbox/sandbox-resources.ts";
 import type { AwsRoleBroker } from "../../auth/aws-role-broker.ts";
@@ -14,12 +15,13 @@ import type {
 import type { TurnOrigin } from "../turn-origin.ts";
 import type { IdentityService } from "../../identity/identity-service.ts";
 import type { ResolutionService } from "../../resolution/resolution-service.ts";
-import type { OrgBranding, ScopedConfigStore } from "../../resolution/config-store.ts";
+import type { ModelAccount, OrgBranding, ScopedConfigStore } from "../../resolution/config-store.ts";
 import type { UserModelCredentialStore } from "../../model/user-model-credential-store.ts";
-import type { ManagedGroupDirectory } from "../../resolution/scope-membership.ts";
+import type { IsCurrentSharedScopeMember, ManagedGroupDirectory } from "../../resolution/scope-membership.ts";
 import type { DirectoryStore } from "../../directory/directory-store.ts";
 import type { EnvironmentStore } from "../../environments/environment-store.ts";
 import type { SessionStore } from "../../sessions/session-store.ts";
+import type { SessionSyscallsFactory } from "../../sessions/session-syscalls.ts";
 import type { DeliveryStore } from "../../delivery/delivery-store.ts";
 import type { WorkspaceStore } from "../../workspace/workspace-store.ts";
 import type { Sandbox } from "../../sandbox/sandbox.ts";
@@ -45,6 +47,7 @@ import type { AdminService } from "../../admin/admin-service.ts";
 import type { ErrorLog } from "../../admin/error-log.ts";
 import type { MetricsSink } from "../../admin/metrics-sink.ts";
 import type { ToolLedger } from "../../runs/tool-ledger.ts";
+import type { RunSignalStore } from "../../runs/run-signal-store.ts";
 import type { TurnStream } from "../../runs/turn-stream.ts";
 import type { RunActivityStore } from "../../runs/run-activity-store.ts";
 import type { RunStore } from "../../runs/run-store.ts";
@@ -63,6 +66,7 @@ import type { BrokeredLayerTool, LayerCredentialTool, DeploymentLayerRuntime } f
 import type { FileArtifactStore } from "../../files/file-artifact-store.ts";
 import type { DeployService } from "../../deploy/deploy-service.ts";
 import type { AclStore } from "../../acl/acl-store.ts";
+import type { SwarmService, SwarmTurn } from "../../swarms/swarm-service.ts";
 import type { ChannelPolicyStore } from "../../surface-cache/channel-policy-store.ts";
 import type { SurfaceCache } from "../../surface-cache/types.ts";
 
@@ -80,15 +84,21 @@ export interface OrchestratorInput extends Omit<
   | "securityScreenData"
   | "triggerDestination"
   | "ownerKeychainUnion"
+  | "ownerResourcesRequireOpen"
   | "unprompted"
   | "liveActor"
 > {
+  modelAccount?: ModelAccount;
   surface?: string;
+  privateSessionMessage?: true;
+  delegatingRunId?: string;
+  sessionMessageDepth?: number;
   actor: Principal;
   conversation: Conversation;
   origin: TurnOrigin;
   runId?: string;
   attempt?: number;
+  runLeaseToken?: string;
 
   runStartedAt?: number;
   finalAttempt?: boolean;
@@ -97,9 +107,12 @@ export interface OrchestratorInput extends Omit<
   queueMs?: number;
   sessionParticipantIds?: readonly string[];
   scopeVersion?: string;
+  swarm?: SwarmTurn;
 }
 
 export interface OrchestratorDeps {
+  externalSlackPolicies?: ExternalSlackPolicies;
+  swarms?: SwarmService;
   refreshModels?: () => Promise<void>;
   identity: IdentityService;
   resolution: ResolutionService;
@@ -112,6 +125,7 @@ export interface OrchestratorDeps {
   resolveBaseModelId?: () => string | undefined;
   sessionTapeMode?: "shadow" | "serve";
   sessions: SessionStore;
+  sessionSyscalls?: SessionSyscallsFactory;
   workspace: WorkspaceStore;
   files: FileArtifactStore;
   sandbox: Sandbox;
@@ -129,10 +143,12 @@ export interface OrchestratorDeps {
   securityScreenTimeoutMs?: number;
   securityScreener?: SecurityScreener;
   backgroundJobTtlMs?: number;
+  sandboxCapabilityTtlMs?: number;
   backgroundJobTtlMaxMs?: number;
   harness: Harness;
   signingSecret?: string;
   capabilitySecret?: string;
+  capabilityTokenCompression?: boolean;
   apiBaseUrl?: string;
   publicWebUrl?: string;
   /** The public base for an inbound webhook URL (PUBLIC_WEB_URL ?? api url) — what the webhook
@@ -154,6 +170,7 @@ export interface OrchestratorDeps {
   errors?: ErrorLog;
   metrics?: MetricsSink;
   ledger?: ToolLedger;
+  signals?: RunSignalStore;
   turnStream?: TurnStream;
   runActivity?: RunActivityStore;
   runs?: RunStore;
@@ -165,12 +182,17 @@ export interface OrchestratorDeps {
   webhooks?: WebhookStore;
   control?: ControlService;
   runtime?: RuntimeService;
+  validateScheduledRuntime?: (
+    scope: import("../../types.ts").ScopeId,
+    choice: import("../../harness/harness.ts").RuntimeChoice,
+    purpose?: import("../../resolution/config-store.ts").RuntimePurpose,
+    actorId?: string,
+  ) => Promise<string | null>;
   livenessCache?: LivenessCache;
   connectorTokens?: ConnectorTokenStore;
   connectorStatusCache?: ConnectorStatusCache;
   resolveConnectorClient?: OAuthClientResolver;
   scratchExec?: boolean;
-  sharedOwnerAuthIsolation?: boolean;
   deviceFlowCutover?: DeviceFlowCutoverStore;
   featureFlags?: FeatureFlagStore;
   credentialUsage?: CredentialUsageSink;
@@ -178,6 +200,8 @@ export interface OrchestratorDeps {
   serviceCreds?: ServiceCredentialStore;
   deliveries?: DeliveryStore;
   directory?: DirectoryStore;
+  isCurrentSharedScopeMember?: IsCurrentSharedScopeMember;
+  currentScopeMembers?: import("../../resolution/scope-membership.ts").CurrentScopeMembers;
   managedGroups?: Pick<ManagedGroupDirectory, "recognizes" | "members" | "version" | "withVersion" | "slackChannel">;
   reachExec?: boolean;
   eagerProvision?: boolean;
@@ -189,6 +213,7 @@ export interface OrchestratorDeps {
   surfaceContext?: SurfaceContextPuller;
   surfaceSearch?: SurfaceSearchStore;
   surfaceCache?: SurfaceCache;
+  slackContextSource?: "live" | "shadow" | "mirror";
   channelPolicy?: ChannelPolicyStore;
   surfaceDebugFooter?: boolean;
 }

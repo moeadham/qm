@@ -6,8 +6,7 @@ const css = readFileSync(new URL("../src/shell.css", import.meta.url), "utf8");
 const chat = readFileSync(new URL("../src/chat.ts", import.meta.url), "utf8");
 
 test("only an actually stuck prompt gets elevation", () => {
-  const normal =
-    css.match(/\.message-stack \.user-row:not\(:has\(~ \.user-row\)\) > \.user-bubble \{[^}]*\}/)?.[0] ?? "";
+  const normal = css.match(/\.message-stack \.user-row\.latest-prompt > \.user-bubble \{[^}]*\}/)?.[0] ?? "";
   assert.doesNotMatch(normal, /box-shadow: var/);
   assert.match(css, /\.user-row\.stuck > \.user-bubble/);
 });
@@ -24,7 +23,54 @@ test("stream following never uses smooth scrolling or a near-bottom zone", () =>
 });
 
 import { JSDOM } from "jsdom";
-import { createTranscriptViewport } from "../src/transcript-viewport.ts";
+import { createTranscriptViewport, preserveTranscriptScroll } from "../src/transcript-viewport.ts";
+
+test("layout mutations preserve bottom following and an earlier reading anchor independently", () => {
+  const dom = new JSDOM(
+    '<main><section class="chat-scroll"><div class="message-stack"><p>Reading here</p></div></section><section class="chat-scroll"></section></main>',
+  );
+  const root = dom.window.document.querySelector("main")!;
+  const [reading, following] = [...root.querySelectorAll<HTMLElement>("section")];
+  const anchor = reading!.querySelector("p")!;
+  let height = 1000;
+  let anchorTop = 330;
+  for (const element of [reading!, following!]) {
+    Object.defineProperties(element, { clientHeight: { value: 200 }, scrollHeight: { get: () => height } });
+    element.getBoundingClientRect = () => ({ top: 20 }) as DOMRect;
+  }
+  anchor.getBoundingClientRect = () =>
+    ({ top: 20 + anchorTop - reading!.scrollTop, bottom: 100 + anchorTop - reading!.scrollTop }) as DOMRect;
+  reading!.scrollTop = 350;
+  following!.scrollTop = 800;
+  const restore = preserveTranscriptScroll(root);
+  reading!.scrollTop = following!.scrollTop = 0;
+  anchorTop += 120;
+  height += 300;
+  restore();
+  assert.equal(reading!.scrollTop, 470);
+  assert.equal(following!.scrollTop, 1300);
+  assert.equal(anchor.getBoundingClientRect().top, 0);
+});
+
+test("layout restoration ignores removed panes and falls back when an anchor was replaced", () => {
+  const dom = new JSDOM(
+    '<main><section class="chat-scroll"><div class="message-stack"><p>Reading</p></div></section><section class="chat-scroll"></section></main>',
+  );
+  const root = dom.window.document.querySelector("main")!;
+  const [reading, removed] = [...root.querySelectorAll<HTMLElement>("section")];
+  for (const element of [reading!, removed!]) {
+    Object.defineProperties(element, { clientHeight: { value: 200 }, scrollHeight: { value: 1000 } });
+    element.scrollTop = 350;
+  }
+  reading!.querySelector("p")!.getBoundingClientRect = () => ({ top: 10, bottom: 50 }) as DOMRect;
+  const restore = preserveTranscriptScroll(root);
+  reading!.replaceChildren();
+  removed!.remove();
+  reading!.scrollTop = removed!.scrollTop = 0;
+  restore();
+  assert.equal(reading!.scrollTop, 350);
+  assert.equal(removed!.scrollTop, 0);
+});
 
 function fixture() {
   const dom = new JSDOM(
@@ -88,6 +134,16 @@ function fixture() {
       promptTop = top;
       resize();
     },
+    fit: () => {
+      height = 200;
+      s.scrollTop = 0;
+      s.dispatchEvent(new dom.window.Event("scroll"));
+      writes.length = 0;
+    },
+    collapse: () => {
+      height = 400;
+      s.scrollTop = Math.min(s.scrollTop, 200);
+    },
     grow: () => {
       height += 100;
     },
@@ -112,6 +168,142 @@ function fixture() {
   };
 }
 
+test("scrolling toward earlier messages loads before reaching the top and pauses following", () => {
+  const f = fixture();
+  try {
+    const button = f.s.ownerDocument.createElement("button");
+    button.className = "earlier-messages-btn";
+    f.s.querySelector(".message-stack")!.prepend(button);
+    let loads = 0;
+    button.onclick = () => {
+      loads++;
+      button.disabled = true;
+    };
+    f.viewport.sync(f.s);
+    assert.equal(loads, 0);
+    f.scroll(500);
+    assert.equal(loads, 0);
+    f.scroll(350);
+    assert.equal(loads, 1);
+    f.scroll(100);
+    f.wheelUp();
+    assert.equal(loads, 1);
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 100);
+    button.disabled = false;
+    f.scroll(300);
+    assert.equal(loads, 1);
+    f.scroll(200);
+    assert.equal(loads, 2);
+  } finally {
+    f.close();
+  }
+});
+
+test("upward wheel loads history even when the transcript cannot scroll", () => {
+  const f = fixture();
+  try {
+    f.fit();
+    const button = f.s.ownerDocument.createElement("button");
+    button.className = "earlier-messages-btn";
+    f.s.querySelector(".message-stack")!.prepend(button);
+    let loads = 0;
+    button.onclick = () => {
+      loads++;
+    };
+    f.wheelUp();
+    assert.equal(loads, 1);
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 0);
+    f.viewport.dispose();
+    f.wheelUp();
+    assert.equal(loads, 1);
+  } finally {
+    f.close();
+  }
+});
+
+test("a transcript too short to fill the viewport keeps loading earlier pages until it does", () => {
+  const f = fixture();
+  try {
+    f.fit();
+    const button = f.s.ownerDocument.createElement("button");
+    button.className = "earlier-messages-btn";
+    const stack = f.s.querySelector<HTMLElement>(".message-stack")!;
+    stack.prepend(button);
+    const page = () => stack.append(f.s.ownerDocument.createElement("article"));
+    let loads = 0;
+    button.onclick = () => {
+      loads++;
+      button.disabled = true;
+    };
+    f.viewport.sync(f.s);
+    assert.equal(loads, 1, "no scroll or wheel is needed when there is nothing to scroll");
+    f.viewport.sync(f.s);
+    assert.equal(loads, 1, "a page already loading is not requested twice");
+    page();
+    button.disabled = false;
+    f.resize(30, 50);
+    assert.equal(loads, 2, "still short after a page arrives, so the next page loads");
+    for (let i = 0; i < 6; i++) f.grow();
+    page();
+    button.disabled = false;
+    f.resize(30, 50);
+    f.viewport.sync(f.s);
+    assert.equal(loads, 2, "once the content overflows well past the top, loading waits for the reader");
+    button.remove();
+  } finally {
+    f.close();
+  }
+});
+
+test("a page that fails to load is not retried by auto-fill until the reader asks", () => {
+  const f = fixture();
+  try {
+    f.fit();
+    const button = f.s.ownerDocument.createElement("button");
+    button.className = "earlier-messages-btn";
+    f.s.querySelector(".message-stack")!.prepend(button);
+    let loads = 0;
+    button.onclick = () => loads++;
+    f.viewport.sync(f.s);
+    f.resize(30, 50);
+    f.viewport.sync(f.s);
+    assert.equal(loads, 1, "no growth since the last automatic load means no automatic retry");
+    f.wheelUp();
+    assert.equal(loads, 2, "the reader can still ask for it");
+  } finally {
+    f.close();
+  }
+});
+
+test("a hidden pane never pulls history just because it has no height", () => {
+  const dom = new JSDOM('<section class="chat-scroll"><div class="message-stack"></div></section>');
+  const s = dom.window.document.querySelector<HTMLElement>("section")!;
+  Object.defineProperties(s, { clientHeight: { value: 0 }, scrollHeight: { value: 0 } });
+  const button = dom.window.document.createElement("button");
+  button.className = "earlier-messages-btn";
+  s.querySelector(".message-stack")!.prepend(button);
+  let loads = 0;
+  button.onclick = () => loads++;
+  const viewport = createTranscriptViewport();
+  const saved = Object.getOwnPropertyDescriptor(globalThis, "getComputedStyle");
+  Object.assign(globalThis, { getComputedStyle: dom.window.getComputedStyle.bind(dom.window) });
+  try {
+    viewport.sync(s);
+    assert.equal(loads, 0);
+  } finally {
+    viewport.dispose();
+    if (saved) Object.defineProperty(globalThis, "getComputedStyle", saved);
+    else Reflect.deleteProperty(globalThis, "getComputedStyle");
+    dom.window.close();
+  }
+});
+
 test("a bottom-pinned stream follows growth instantly and coalesces frames", () => {
   const f = fixture();
   try {
@@ -130,11 +322,11 @@ test("resizing a settled transcript updates the prompt expansion control", () =>
   const f = fixture();
   try {
     f.prompt.innerHTML =
-      '<div class="user-bubble"><div class="pin-content"><markdown-block></markdown-block></div></div><button class="pin-toggle" hidden>Show more</button>';
-    const bubble = f.prompt.querySelector<HTMLElement>(".user-bubble")!;
+      '<div class="user-bubble"><div class="pin-content"><markdown-block></markdown-block></div><button class="pin-toggle" hidden>Show more</button></div>';
+    const content = f.prompt.querySelector<HTMLElement>(".pin-content")!;
     const toggle = f.prompt.querySelector<HTMLButtonElement>(".pin-toggle")!;
     let availableHeight = 240;
-    Object.defineProperties(bubble, {
+    Object.defineProperties(content, {
       scrollHeight: { value: 240 },
       clientHeight: { get: () => availableHeight },
     });
@@ -166,6 +358,20 @@ test("even a small upward scroll stops following; returning to the bottom resume
     f.viewport.follow();
     f.flush();
     assert.equal(f.s.scrollTop, 1000);
+  } finally {
+    f.close();
+  }
+});
+
+test("an upward wheel that cannot move a short transcript keeps following its growth", () => {
+  const f = fixture();
+  try {
+    f.fit();
+    f.wheelUp();
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 100);
   } finally {
     f.close();
   }
@@ -282,6 +488,539 @@ test("a prompt stays in flow when pins leave too little room, and can stick agai
     f.resize(30, 50);
     assert.equal(f.prompt.classList.contains("sticky-disabled"), false);
     assert.equal(f.prompt.classList.contains("stuck"), true);
+  } finally {
+    f.close();
+  }
+});
+
+test("prompt expansion control belongs inside the bubble in both renderers", () => {
+  for (const [source, start] of [
+    [chat, /<article\s+class="message-row user-row/],
+    [readFileSync(new URL("../src/shared-session.ts", import.meta.url), "utf8"), /<article\s+class=\$\{/],
+  ]) {
+    const rowStart = (source as string).search(start as RegExp);
+    assert.ok(rowStart >= 0);
+    const text = source as string;
+    const row = text.slice(rowStart, text.indexOf("</article>", rowStart) + "</article>".length);
+    const dom = new JSDOM(row);
+    try {
+      const toggle = dom.window.document.querySelector(".pin-toggle");
+      assert.equal(toggle?.parentElement?.tagName, "DIV");
+      assert.equal(toggle?.parentElement?.parentElement?.tagName, "ARTICLE");
+    } finally {
+      dom.window.close();
+    }
+  }
+  assert.match(css, /:not\(\.pin-expanded\)\s+\.user-bubble\s+>\s+\.pin-content \{/);
+  assert.match(css, /\.user-bubble > \.pin-toggle:not\(\[hidden\]\)/);
+});
+
+test("nested paste and attachment controls do not toggle the whole prompt", () => {
+  const f = fixture();
+  try {
+    f.prompt.innerHTML =
+      '<div class="user-bubble"><div class="pin-content"><code-block><button class="text-code-toggle">Show more</button><copy-button><button>Copy</button></copy-button></code-block><div class="message-files"><a class="file-chip" href="#file">notes.txt</a></div></div><button class="pin-toggle" hidden>Show more</button></div>';
+    const content = f.prompt.querySelector<HTMLElement>(".pin-content")!;
+    const toggle = f.prompt.querySelector<HTMLButtonElement>(".pin-toggle")!;
+    Object.defineProperties(content, {
+      scrollHeight: { value: 500 },
+      clientHeight: { value: 160 },
+    });
+    f.viewport.sync(f.s);
+    assert.equal(toggle.hidden, false);
+    for (const expanded of [false, true]) {
+      if (expanded) toggle.click();
+      for (const selector of [".text-code-toggle", "copy-button button", ".file-chip"]) {
+        f.prompt.querySelector<HTMLElement>(selector)!.click();
+        assert.equal(f.prompt.classList.contains("pin-expanded"), expanded);
+        assert.equal(toggle.getAttribute("aria-expanded"), String(expanded));
+      }
+    }
+  } finally {
+    f.close();
+  }
+});
+
+test("plain-text copy confirmation can grow beyond its icon width", () => {
+  const rule = css.match(/\.user-bubble code-block\[language="text"\] copy-button button \{[^}]*\}/)?.[0] ?? "";
+  assert.match(rule, /min-width: var\(--meta-lane\)/);
+  assert.doesNotMatch(rule, /(?:^|[;{])\s*width:/);
+});
+
+test("prompt clipping tolerates rounding but discloses any additional text line", () => {
+  const f = fixture();
+  try {
+    f.prompt.innerHTML =
+      '<div class="user-bubble"><div class="pin-content"></div><button class="pin-toggle" hidden>Show more</button></div>';
+    const content = f.prompt.querySelector<HTMLElement>(".pin-content")!;
+    const toggle = f.prompt.querySelector<HTMLButtonElement>(".pin-toggle")!;
+    let overflow = 5;
+    Object.defineProperties(content, {
+      scrollHeight: { get: () => 160 + overflow },
+      clientHeight: { value: 160 },
+    });
+    f.viewport.sync(f.s);
+    for (overflow of [0, 1, 2, 23, 100, 1]) {
+      f.resize(30, 50);
+      assert.equal(toggle.hidden, overflow <= 1);
+      f.resize(30, 50);
+      assert.equal(toggle.hidden, overflow <= 1, "stable on repeated measurements");
+    }
+    f.viewport.dispose();
+  } finally {
+    f.close();
+  }
+});
+
+test("returning to the bottom before a streamed render resumes follow before its scroll event", () => {
+  const f = fixture();
+  try {
+    f.scroll(700);
+    f.s.scrollTop = 800;
+    f.viewport.beforeRender();
+    f.grow();
+    f.s.dispatchEvent(new f.s.ownerDocument.defaultView!.Event("scroll"));
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 900);
+  } finally {
+    f.close();
+  }
+});
+
+test("a pre-render check leaves readers above the bottom alone", () => {
+  const f = fixture();
+  try {
+    f.scroll(600);
+    f.s.scrollTop = 798;
+    f.viewport.beforeRender();
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 798);
+  } finally {
+    f.close();
+  }
+});
+
+test("a pre-render check respects an upward wheel whose scroll has not arrived", () => {
+  const f = fixture();
+  try {
+    f.wheelUp();
+    f.viewport.beforeRender();
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 800);
+  } finally {
+    f.close();
+  }
+});
+
+test("a pre-render check handles an upward scroll before its event", () => {
+  const f = fixture();
+  try {
+    f.s.scrollTop = 790;
+    f.viewport.beforeRender();
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 790);
+  } finally {
+    f.close();
+  }
+});
+
+test("a downward scroll that reaches only the previous bottom does not resume following", () => {
+  const f = fixture();
+  try {
+    f.scroll(700);
+    f.grow();
+    f.scroll(800);
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 800);
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 800);
+  } finally {
+    f.close();
+  }
+});
+
+test("a downward wheel gesture that lands short of the bottom is left alone", () => {
+  const f = fixture();
+  try {
+    f.scroll(700);
+    f.s.dispatchEvent(new f.s.ownerDocument.defaultView!.WheelEvent("wheel", { deltaY: 300 }));
+    f.grow();
+    f.resize(30, 50);
+    f.scroll(800);
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 800);
+  } finally {
+    f.close();
+  }
+});
+
+test("passing the previous bottom without reaching the new bottom does not resume follow", () => {
+  const f = fixture();
+  try {
+    f.scroll(700);
+    f.grow();
+    f.scroll(850);
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 850);
+  } finally {
+    f.close();
+  }
+});
+
+test("the changing streamed reply cannot become the browser's native scroll anchor", () => {
+  assert.match(css, /\.streaming-text\.live-stream \{\s*overflow-anchor: none;/);
+});
+
+test("asynchronous growth leaves a reader in place", () => {
+  const f = fixture();
+  try {
+    f.scroll(600);
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 600);
+    f.scroll(800);
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 800);
+  } finally {
+    f.close();
+  }
+});
+
+test("reaching the real bottom by hand resumes following", () => {
+  const f = fixture();
+  try {
+    f.scroll(700);
+    f.grow();
+    f.scroll(900);
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 1000);
+  } finally {
+    f.close();
+  }
+});
+
+test("closing live work preserves following through delayed final markdown layout", () => {
+  const f = fixture();
+  try {
+    f.viewport.beforeRender();
+    f.viewport.follow();
+    f.collapse();
+    f.viewport.afterRender();
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 300);
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 400);
+  } finally {
+    f.close();
+  }
+});
+
+test("a reader who left the bottom is not pulled back when work closes", () => {
+  const f = fixture();
+  try {
+    f.scroll(100);
+    f.viewport.beforeRender();
+    f.collapse();
+    f.viewport.afterRender();
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 100);
+  } finally {
+    f.close();
+  }
+});
+
+test("a shrink that clamps a reader to the bottom does not resume following", () => {
+  const f = fixture();
+  try {
+    f.scroll(700);
+    f.viewport.beforeRender();
+    f.collapse();
+    f.s.dispatchEvent(new f.s.ownerDocument.defaultView!.Event("scroll"));
+    f.viewport.afterRender();
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 200);
+  } finally {
+    f.close();
+  }
+});
+
+test("a bottom-pinned reader keeps following when the browser clamps a shrink", () => {
+  const f = fixture();
+  try {
+    f.viewport.beforeRender();
+    f.collapse();
+    f.s.dispatchEvent(new f.s.ownerDocument.defaultView!.Event("scroll"));
+    f.viewport.afterRender();
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 300);
+  } finally {
+    f.close();
+  }
+});
+
+test("upward input after work closes still cancels the queued follow", () => {
+  const f = fixture();
+  try {
+    f.viewport.beforeRender();
+    f.collapse();
+    f.viewport.afterRender();
+    f.wheelUp();
+    f.scroll(190);
+    f.grow();
+    f.resize(30, 50);
+    f.flush();
+    assert.equal(f.s.scrollTop, 190);
+  } finally {
+    f.close();
+  }
+});
+
+test("an explicit new send re-arms following after reading older messages", () => {
+  const f = fixture();
+  try {
+    f.scroll(100);
+    f.viewport.follow(true);
+    f.grow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 900);
+    f.scroll(500);
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 500);
+  } finally {
+    f.close();
+  }
+});
+
+for (const reading of [false, true]) {
+  test(`asynchronous Markdown replacement preserves ${reading ? "reader position" : "following"}`, async () => {
+    const f = fixture();
+    try {
+      if (reading) f.scroll(100);
+      f.viewport.beforeRender();
+      f.viewport.afterRender();
+      const completion = Promise.withResolvers<void>();
+      f.prompt.dispatchEvent(
+        new f.s.ownerDocument.defaultView!.CustomEvent("qm-content-updating", {
+          bubbles: true,
+          detail: completion.promise,
+        }),
+      );
+      f.collapse();
+      completion.resolve();
+      await completion.promise;
+      f.grow();
+      f.resize(30, 50);
+      f.flush();
+      assert.equal(f.s.scrollTop, reading ? 100 : 300);
+    } finally {
+      f.close();
+    }
+  });
+}
+
+test("an in-flight Markdown layout cannot be mistaken for reader scrolling", async () => {
+  const f = fixture();
+  try {
+    const completion = Promise.withResolvers<void>();
+    f.prompt.dispatchEvent(
+      new f.s.ownerDocument.defaultView!.CustomEvent("qm-content-updating", {
+        bubbles: true,
+        detail: completion.promise,
+      }),
+    );
+    f.s.scrollTop = 787;
+    f.viewport.beforeRender();
+    f.grow();
+    completion.resolve();
+    await completion.promise;
+    f.flush();
+    assert.equal(f.s.scrollTop, 900);
+  } finally {
+    f.close();
+  }
+});
+
+test("following waits for every overlapping render, including rejected updates", async () => {
+  const f = fixture();
+  try {
+    const first = Promise.withResolvers<void>();
+    const second = Promise.withResolvers<void>();
+    for (const completion of [first, second]) {
+      f.prompt.dispatchEvent(
+        new f.s.ownerDocument.defaultView!.CustomEvent("qm-content-updating", {
+          bubbles: true,
+          detail: completion.promise,
+        }),
+      );
+    }
+    f.grow();
+    first.reject(new Error("render failed"));
+    await first.promise.catch(() => {});
+    f.flush();
+    assert.equal(f.s.scrollTop, 800);
+    second.resolve();
+    await second.promise;
+    f.flush();
+    assert.equal(f.s.scrollTop, 900);
+  } finally {
+    f.close();
+  }
+});
+
+test("a disposed render cannot release a new render on the same scroller", async () => {
+  const f = fixture();
+  try {
+    const start = () => {
+      const completion = Promise.withResolvers<void>();
+      f.prompt.dispatchEvent(
+        new f.s.ownerDocument.defaultView!.CustomEvent("qm-content-updating", {
+          bubbles: true,
+          detail: completion.promise,
+        }),
+      );
+      return completion;
+    };
+    const old = start();
+    f.viewport.dispose();
+    f.viewport.sync(f.s);
+    f.viewport.follow(true);
+    f.flush();
+    const current = start();
+    f.grow();
+    old.resolve();
+    await old.promise;
+    f.flush();
+    assert.equal(f.s.scrollTop, 800);
+    current.resolve();
+    await current.promise;
+    f.flush();
+    assert.equal(f.s.scrollTop, 900);
+  } finally {
+    f.close();
+  }
+});
+
+test("End on the transcript resumes following even when layout grows before scrolling", () => {
+  const f = fixture();
+  try {
+    f.scroll(200);
+    const event = new f.s.ownerDocument.defaultView!.KeyboardEvent("keydown", {
+      key: "End",
+      bubbles: true,
+      cancelable: true,
+    });
+    f.s.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    f.grow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 900);
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 1000);
+  } finally {
+    f.close();
+  }
+});
+
+test("End inside a nested control retains the control's native behavior", () => {
+  const f = fixture();
+  try {
+    f.scroll(200);
+    const input = f.s.ownerDocument.createElement("textarea");
+    f.s.append(input);
+    const event = new f.s.ownerDocument.defaultView!.KeyboardEvent("keydown", {
+      key: "End",
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, false);
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 200);
+  } finally {
+    f.close();
+  }
+});
+
+test("revealing a message cancels pending and future bottom following", () => {
+  const f = fixture();
+  try {
+    f.viewport.follow(true);
+    f.viewport.cancelFollow();
+    f.s.scrollTop = 40;
+    f.flush();
+    assert.equal(f.s.scrollTop, 40);
+    f.grow();
+    f.viewport.follow();
+    f.flush();
+    assert.equal(f.s.scrollTop, 40);
+  } finally {
+    f.close();
+  }
+});
+
+test("the latest-prompt marker moves between rows and is restored after a template update", () => {
+  const f = fixture();
+  try {
+    assert.equal(f.prompt.classList.contains("latest-prompt"), true);
+    f.prompt.classList.remove("latest-prompt");
+    f.viewport.sync(f.s);
+    assert.equal(f.prompt.classList.contains("latest-prompt"), true);
+    const next = f.prompt.cloneNode(true) as HTMLElement;
+    next.className = "user-row";
+    next.dataset.index = "2";
+    f.prompt.after(next);
+    f.viewport.sync(f.s);
+    assert.equal(f.prompt.classList.contains("latest-prompt"), false);
+    assert.equal(next.classList.contains("latest-prompt"), true);
+    f.viewport.dispose();
+    assert.equal(next.classList.contains("latest-prompt"), false);
+  } finally {
+    f.close();
+  }
+});
+
+test("an inline steer does not take the sticky prompt marker from the original request", () => {
+  const f = fixture();
+  try {
+    const work = f.s.ownerDocument.createElement("article");
+    work.className = "assistant-row";
+    work.innerHTML = '<div class="inline-steer"><article class="user-row steered-row" data-index="1"></article></div>';
+    f.prompt.after(work);
+    f.viewport.sync(f.s);
+    assert.equal(f.prompt.classList.contains("latest-prompt"), true);
+    assert.equal(work.querySelector(".steered-row")!.classList.contains("latest-prompt"), false);
   } finally {
     f.close();
   }

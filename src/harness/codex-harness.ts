@@ -1,3 +1,4 @@
+import { documentsFallbackText } from "../core/document-inputs.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -11,8 +12,10 @@ import type { LlmCallUsage } from "../sessions/session-store.ts";
 import type { ScopeId, SessionEntry } from "../types.ts";
 import { asError, swallow } from "../util/errors.ts";
 import { countTokens } from "../util/tokens.ts";
-import { CodexAppServer, CodexRpcError, redactCodexDiagnostics } from "./codex-app-server.ts";
+import { CodexAppServer, CodexRpcError } from "./codex-app-server.ts";
+import { redactSecrets } from "./redact-secrets.ts";
 import { codexAuthFileForEnv, readCodexOAuthAuthFile } from "./codex-auth.ts";
+import { codexOAuthJwtAccountId } from "./codex-auth-file.ts";
 import {
   childCodexAuthFromDerived,
   childCodexOAuthAuth,
@@ -23,17 +26,25 @@ import { defineHarness, type Harness, type HarnessTurnInput, type HarnessTurnRes
 import { coreToolOptions, type ToolContextRef } from "./agent-tools.ts";
 import {
   bridgedTools,
+  nativeChildToolAllowed,
   bridgedToolText,
   harnessToolContext,
   harnessToolOptions,
   oneShotModelUtilities,
   oneShotRunner,
   tapeReplyCheckpoint,
+  recordSteerIntake,
+  type SteerIntake,
   transitionTask,
   type BridgedTool,
   type HarnessToolPlumbing,
 } from "./harness-shared.ts";
-import { reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import {
+  recordedMessageTimestamps,
+  reconstructMessagesFromHistory,
+  seedPriorTurns,
+  type PiReplayMessage,
+} from "./replay.ts";
 
 export interface CodexHarnessOptions extends HarnessToolPlumbing {
   modelId?: string | ((scope?: ScopeId) => string | undefined);
@@ -126,6 +137,8 @@ type ActiveTurn = {
   reject(error: Error): void;
   responseItems: CodexItem[];
   completedItems: CodexItem[];
+  publicMessages: Map<string, CodexItem & { complete?: boolean }>;
+  stoppedReply?: string;
   taskIds: Map<string, string>;
   taskStatuses: Map<string, TaskStatus>;
   taskResults: Set<string>;
@@ -136,6 +149,8 @@ type ActiveTurn = {
   firstOutputAt: number | null;
   fallbackInputTokens: number;
   tapeError?: Error;
+  seenUserItems: Set<string>;
+  pendingSteers: Array<{ prompt: string; inputText: string; intake: SteerIntake }>;
   interrupt?: () => Promise<void>;
   stopped: boolean;
 };
@@ -159,13 +174,11 @@ export function codexNonRetryable(message: string): boolean {
 }
 
 export function codexProviderFailure(message: string): Error {
-  const safe = redactCodexDiagnostics(message);
+  const safe = redactSecrets(message);
   return codexNonRetryable(safe) ? new NonRetryableTurnError(safe) : new Error(safe);
 }
-const CODEX_CHILD_TOOL_NAMES = new Set(["execute", "read", "write", "publish", "memory", "history", "background"]);
-
-export function codexChildToolAllowed(name: string): boolean {
-  return CODEX_CHILD_TOOL_NAMES.has(name);
+export function codexChildToolAllowed(name: string, args?: unknown): boolean {
+  return nativeChildToolAllowed(name, args);
 }
 
 function usageNumber(value: unknown, ...names: string[]): number {
@@ -497,12 +510,63 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           });
         }
         if (method === "item/agentMessage/delta" && threadId === state.threadId && typeof p.delta === "string") {
+          if (state.stopped) return;
+          const id = typeof p.itemId === "string" ? p.itemId : "";
+          const item = state.publicMessages.get(id) ?? { type: "agentMessage" };
+          item.text = (typeof item.text === "string" ? item.text : "") + p.delta;
+          state.publicMessages.set(id, item);
           state.firstOutputAt ??= Date.now();
           state.turn.onDelta?.(p.delta);
         }
         if ((method === "item/started" || method === "item/completed") && p.item && typeof p.item === "object") {
           const item = p.item as CodexItem;
+          if (threadId === state.threadId && item.type === "agentMessage") {
+            if (state.stopped) return;
+            const id = typeof item.id === "string" ? item.id : "";
+            state.publicMessages.set(id, {
+              ...item,
+              text: typeof item.text === "string" ? item.text : "",
+              complete: method === "item/completed",
+            });
+            if (method === "item/started")
+              await state.turn.onTextBlockStart?.(
+                item.phase === "commentary" || item.phase === "final_answer" ? item.phase : undefined,
+              );
+            if (
+              method === "item/completed" &&
+              item.phase === "commentary" &&
+              typeof item.text === "string" &&
+              item.text.trim()
+            ) {
+              await state.turn.emit({
+                type: "text",
+                payload: { text: item.text, phase: "commentary" },
+                scopeLabel: state.turn.scopeLabel,
+              });
+            }
+          }
           if (method === "item/completed") {
+            let stamp: Awaited<ReturnType<typeof recordSteerIntake>> | undefined;
+            let tapeItem = item;
+            if (
+              threadId === state.threadId &&
+              item.type === "userMessage" &&
+              Array.isArray(item.content) &&
+              typeof item.id === "string"
+            ) {
+              if (state.seenUserItems.has(item.id)) return;
+              state.seenUserItems.add(item.id);
+              const text = item.content
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join("\n");
+              const index = state.pendingSteers.findIndex((steer) => steer.inputText === text);
+              if (index >= 0) {
+                const [steer] = state.pendingSteers.splice(index, 1);
+                stamp = await recordSteerIntake(state.turn, steer!.intake);
+                tapeItem = { type: "message", role: "user", content: [{ type: "input_text", text: steer!.prompt }] };
+              }
+            }
             state.completedItems.push(item);
             if (state.turn.tape && !state.tapeError) {
               try {
@@ -510,7 +574,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
                   kind: "message",
                   harness: "codex",
                   scopeLabel: state.turn.scopeLabel,
-                  payload: item,
+                  payload: tapeItem,
+                  ...stamp,
                 });
               } catch (error) {
                 state.tapeError = asError(error);
@@ -537,7 +602,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         if (!state || state.server !== server) throw new Error("inactive Codex thread");
         const name = String(p.tool ?? "");
         const callId = String(p.callId ?? "");
-        if (threadId !== state.threadId && !codexChildToolAllowed(name))
+        if (threadId !== state.threadId && !codexChildToolAllowed(name, p.arguments ?? {}))
           throw new Error(`Codex child requested unavailable tool ${name}`);
         const tool = state.tools.get(name);
         if (!tool) throw new Error(`Codex requested unavailable tool ${name}`);
@@ -808,6 +873,19 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         } finally {
           if (startTimer) clearTimeout(startTimer);
         }
+        await awaitSetup(
+          server.request(
+            "account/login/start",
+            {
+              type: "chatgptAuthTokens",
+              accessToken: turn.codexAuth.accessToken,
+              chatgptAccountId: codexOAuthJwtAccountId(userAuth),
+            },
+            (value): value is { type: "chatgptAuthTokens" } =>
+              Boolean(value && typeof value === "object" && "type" in value && value.type === "chatgptAuthTokens"),
+            AbortSignal.timeout(opts.appServerStartTimeoutMs ?? CODEX_START_TIMEOUT_MS),
+          ),
+        );
         rt = ephemeral;
       } catch (error) {
         if (!ephemeral) rmSync(jail, { recursive: true, force: true });
@@ -902,6 +980,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
             shell_tool: false,
             unified_exec: false,
             shell_snapshot: false,
+            goals: false,
             apps: false,
             plugins: false,
             browser_use: false,
@@ -909,7 +988,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
             computer_use: false,
             image_generation: false,
             in_app_browser: false,
-            multi_agent: !turn.readOnly,
+            multi_agent: !turn.readOnly && !turn.delegateWork,
             request_permissions_tool: false,
             tool_suggest: false,
           },
@@ -920,9 +999,12 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     }
     let started: { thread: { id: string }; model?: string };
     try {
-      const requestTimeoutMs = deadline ? Math.max(1, deadline - Date.now()) : CODEX_START_TIMEOUT_MS;
+      const requestTimeoutMs = deadline
+        ? Math.max(1, deadline - Date.now())
+        : (opts.appServerStartTimeoutMs ?? CODEX_START_TIMEOUT_MS);
       let requestTimer: NodeJS.Timeout | undefined;
       const requestAbort = new AbortController();
+      let threadStartTimedOut = false;
       started = await awaitSetup(
         Promise.race([
           rt.server.request(
@@ -933,13 +1015,23 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           ),
           new Promise<never>((_, reject) => {
             requestTimer = setTimeout(() => {
+              threadStartTimedOut = true;
               requestAbort.abort();
               reject(new NonRetryableTurnError("Codex thread/start request timed out"));
             }, requestTimeoutMs);
           }),
-        ]).finally(() => {
-          if (requestTimer) clearTimeout(requestTimer);
-        }),
+        ])
+          .finally(() => {
+            if (requestTimer) clearTimeout(requestTimer);
+          })
+          .catch((error: unknown) => {
+            if (threadStartTimedOut) {
+              const timeoutError = new NonRetryableTurnError("Codex thread/start request timed out");
+              timeoutError.cause = error;
+              throw timeoutError;
+            }
+            throw error;
+          }),
       );
     } catch (error) {
       return failSetup(error);
@@ -968,6 +1060,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     let resolveCompleted!: (value: CodexTurn) => void;
     let rejectCompleted!: (error: Error) => void;
     let completed!: Promise<CodexTurn>;
+    const documentTextBudget = { remaining: 100_000 };
     let inputText!: string;
     let input!: Array<Record<string, unknown>>;
     let selectedModel!: string;
@@ -978,7 +1071,10 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         rejectCompleted = rejectTurn;
       });
       void completed.catch(() => undefined);
-      inputText = codexTurnInputText(turn);
+      inputText = [
+        codexTurnInputText(turn),
+        await documentsFallbackText(turn.documents ?? [], turn.cancel, documentTextBudget),
+      ].join("\n\n");
       input = [
         userInput(inputText),
         ...(turn.images ?? []).map((image) => ({
@@ -996,6 +1092,9 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         reject: rejectCompleted,
         responseItems: [],
         completedItems: [],
+        pendingSteers: [],
+        seenUserItems: new Set(),
+        publicMessages: new Map(),
         taskIds: new Map(),
         taskStatuses: new Map(),
         taskResults: new Set(),
@@ -1021,7 +1120,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
             type: "message",
             role: "user",
             content: [
-              { type: "input_text", text: inputText },
+              { type: "input_text", text: codexTurnInputText(turn) },
               ...(turn.images ?? []).map((image) => ({
                 type: "input_image",
                 image_url: "[image bytes omitted]",
@@ -1077,12 +1176,39 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       }
     };
     let turnId = "";
+    let stoppedByUser = false;
     const interrupt = async (stopped: boolean) => {
+      if (stopped && !state.stopped) {
+        state.stoppedReply = textFromTurn({
+          id: turnId,
+          status: "interrupted",
+          items: [...state.publicMessages.values()].filter((item) => item.phase !== "commentary"),
+        });
+      }
       state.stopped ||= stopped;
       toolAbort.abort();
       if (turnId) await rt.server.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
     };
     state.interrupt = () => interrupt(false);
+    let stoppedReplySaved: Promise<void> | undefined;
+    const saveStoppedReply = (): Promise<void> => {
+      stoppedReplySaved ??= (async () => {
+        for (const item of state.publicMessages.values()) {
+          if (item.phase === "commentary" && !item.complete && typeof item.text === "string" && item.text.trim())
+            await turn.emit({
+              type: "text",
+              payload: { text: item.text, phase: "commentary" },
+              scopeLabel: turn.scopeLabel,
+            });
+        }
+        await turn.emit({
+          type: "assistant",
+          payload: { text: state.stoppedReply ?? "", stopped: true },
+          scopeLabel: turn.scopeLabel,
+        });
+      })();
+      return stoppedReplySaved;
+    };
     const onCancel = () => {
       runtimeCleanupRequested = true;
       void interrupt(true);
@@ -1097,28 +1223,44 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
             opts.signals,
             turn.runId,
             {
-              onAbort: async () => interrupt(true),
-              onSteer: async (text, ts) => {
-                const steered = await turn.emit({
-                  type: "user",
-                  payload: { text, ...(ts ? { ts } : {}), steered: true },
-                  scopeLabel: turn.scopeLabel,
-                });
-                if (turn.tape) {
-                  await turn.tape({
-                    kind: "message",
-                    harness: "codex",
-                    scopeLabel: turn.scopeLabel,
-                    entrySeq: steered.seq,
-                    meta: {
-                      bareText: text,
-                      ...(ts ? { ts } : {}),
-                      entryCreatedAt: steered.createdAt,
-                    },
-                    payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+              onAbort: async () => {
+                stoppedByUser = true;
+                await interrupt(true);
+              },
+              onSteer: async (text, ts, request, acknowledge) => {
+                if (ts && recordedMessageTimestamps(turn.history).has(ts)) return;
+                const prepared = await turn.prepareSteer?.(text, request);
+                const prompt = prepared?.text ?? text;
+                const documentText = await documentsFallbackText(
+                  prepared?.documents ?? [],
+                  turn.cancel,
+                  documentTextBudget,
+                );
+                const inputText = [prompt, documentText].filter(Boolean).join("\n\n");
+                const steer = {
+                  prompt,
+                  inputText,
+                  intake: { text, ts, attachments: prepared?.attachments, acknowledge },
+                };
+                state.pendingSteers.push(steer);
+                try {
+                  await rt.server.request("turn/steer", {
+                    threadId,
+                    expectedTurnId: turnId,
+                    input: [
+                      userInput(inputText),
+                      ...(prepared?.images ?? []).map((image) => ({
+                        type: "image",
+                        url: `data:${image.mimeType};base64,${image.dataBase64}`,
+                      })),
+                    ],
                   });
+                } catch (error) {
+                  const index = state.pendingSteers.indexOf(steer);
+                  if (index >= 0) state.pendingSteers.splice(index, 1);
+                  throw error;
                 }
-                await rt.server.request("turn/steer", { threadId, expectedTurnId: turnId, input: [userInput(text)] });
+                return false;
               },
             },
             { onError: (error) => swallow("codex signal poll", error) },
@@ -1188,9 +1330,10 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       }
       if (result.status === "failed" && !state.stopped && !ref.runtimeHandoff)
         throw codexProviderFailure(result.error?.message ?? "Codex turn failed");
-      if (turn.cancel?.aborted) {
-        runtimeCleanupRequested = true;
-        turnResult = { reply: "", stopped: true };
+      if (state.stopped || turn.cancel?.aborted) {
+        if (turn.cancel?.aborted) runtimeCleanupRequested = true;
+        await saveStoppedReply();
+        turnResult = { reply: state.stoppedReply ?? "", stopped: true };
       } else {
         const terminal = ref.runtimeHandoff || ref.silentRequested || ref.pausedOnApproval;
         const reply = terminal ? "" : textFromTurn(result);
@@ -1217,7 +1360,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     } catch (error) {
       if (turn.cancel?.aborted) {
         runtimeCleanupRequested = true;
-        turnResult = { reply: "", stopped: true };
+        await saveStoppedReply();
+        turnResult = { reply: state.stoppedReply ?? "", stopped: true };
       } else {
         throw error;
       }
@@ -1251,7 +1395,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     }
     if (cleanupErrors.length) throw cleanupErrors[0];
     if (!turnResult) throw new Error("Codex turn did not produce a result");
-    return turnResult;
+    return { ...turnResult, ...(stoppedByUser ? { stoppedByUser: true as const } : {}) };
   };
 
   const single = oneShotRunner((turn) => runPrompt(turn, false));

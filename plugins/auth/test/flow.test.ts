@@ -749,3 +749,53 @@ test("a remembered browser loses access when email eligibility is withdrawn", as
   });
   assert.equal(new URL(response.headers.get("location")!).searchParams.get("error"), "login_required");
 });
+
+test("trusted sign-in is available throughout the email flow only when configured", async () => {
+  for (const trustedSignInLabel of [undefined, "Company SSO"]) {
+    const h = await startHarness({ trustedSignInLabel });
+    try {
+      const page = await fetch(`${h.base}/authorize?${authorizeQuery()}`);
+      const html = await page.text();
+      assert.equal(html.includes('href="/auth/trusted/login"'), Boolean(trustedSignInLabel));
+      if (trustedSignInLabel) {
+        assert.match(html, /Sign in with Company SSO/);
+        assert.ok(html.indexOf('href="/auth/trusted/login"') < html.indexOf("<form"));
+        assert.match(html, /class="btn alternative" type="submit"/);
+        assert.doesNotMatch(html, /autofocus/);
+      } else {
+        assert.match(html, /required autofocus/);
+      }
+      const request = hiddenRequestToken(html);
+      for (const email of ["invalid", "admin@example.com"]) {
+        const response = await fetch(`${h.base}/authorize`, form({ request, email }));
+        assert.equal((await response.text()).includes('href="/auth/trusted/login"'), Boolean(trustedSignInLabel));
+      }
+    } finally {
+      await h.settle();
+      await h.close();
+    }
+  }
+});
+
+test("trusted sign-in remains available when email is unavailable", async () => {
+  const h = await startHarness({ trustedSignInLabel: "Company SSO", env: { RESEND_API_KEY: undefined } });
+  try {
+    const response = await fetch(`${h.base}/authorize?${authorizeQuery()}`);
+    assert.equal(response.status, 503);
+    assert.match(await response.text(), /href="\/auth\/trusted\/login"/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("AUTH_FAVICON_SVG replaces the envelope favicon", async (t) => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8"/></svg>';
+  const h = await startHarness({ env: { AUTH_FAVICON_SVG: svg } });
+  t.after(() => h.close());
+  const r = await fetch(`${h.base}/favicon.svg`);
+  assert.equal(r.headers.get("content-type"), "image/svg+xml; charset=utf-8");
+  assert.equal(await r.text(), svg);
+  const plain = await startHarness();
+  t.after(() => plain.close());
+  assert.match(await (await fetch(`${plain.base}/favicon.ico`)).text(), /✉️/);
+});

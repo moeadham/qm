@@ -70,3 +70,18 @@ commit.
 
 The skills are governed store records, visible and auditable on the admin Skills page, rather than
 ungoverned files on each box.
+
+## Loading published skills
+
+The skill index lists each visible skill. The agent's `skills` tool resolves the currently
+visible, screened published skill and returns its SKILL.md, or a relative manifest file
+named by `path`, without creating or waking a sandbox. Unavailable skills and invalid
+paths return no file.
+
+When a skill ships supporting files or pack bundles, the same call lays them into the
+turn's private directory under `.agent-turn/<conversation>/skills/<name>/` (packs under
+`.packs/<id>/` beside it) and reports that path; the body's own `skills/<name>/` references
+are rewritten to it. That directory is wiped when the turn ends and before the next one
+starts, so nothing reconciles, locks, or sweeps: plain commands and filesystem reads never
+wait on skill synchronization, and revoked or archived content cannot outlive the turn
+that loaded it. Publish changes through the skill API to update the source.

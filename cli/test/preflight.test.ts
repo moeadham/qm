@@ -160,8 +160,10 @@ test("email preflight fails check on rejected SMTP credentials and warns on stra
     );
     assert.ok(okLines.some((line) => line.includes("credentials accepted")));
     assert.ok(
-      okLines.some((line) => line.includes("RESEND_API_KEY is set but") && line.includes("external-user invitations")),
-      "a Resend key beside an SMTP broker is core's invitation sender, not a stray value",
+      okLines.some(
+        (line) => line.includes("RESEND_API_KEY is set but") && line.includes("external-user invitations use SMTP"),
+      ),
+      "the diagnostic reflects the inherited SMTP invitation transport",
     );
     await assert.rejects(
       () =>
@@ -222,11 +224,13 @@ test("missing email credentials disable email without failing deployment checks"
   }
 });
 
-test("email preflight resolves delivered secret aliases and settings supplied directly in config", async () => {
+test("email preflight resolves mail aliases and direct settings while rejecting workload conflicts", async () => {
   const aliased = {
     ...CONFIG,
     env: { auth: { AUTH_EMAIL_TRANSPORT: "resend" } },
-    secretEnv: { auth: { AUTH_EMAIL_FROM: "AUTH_SENDER", RESEND_API_KEY: "MAIL_KEY" } },
+    secretEnv: {
+      auth: { AUTH_EMAIL_FROM: "AUTH_SENDER", RESEND_API_KEY: "MAIL_KEY" },
+    },
   };
   const secrets = new Map([
     ["AUTH_SENDER", "noreply@example.com"],
@@ -234,7 +238,13 @@ test("email preflight resolves delivered secret aliases and settings supplied di
   ]);
   assert.equal(emailTransportConfigured(aliased, secrets), true);
   await assert.doesNotReject(emailTransportPreflight(aliased, secrets));
-  assert.equal(emailTransportConfigured(aliased, new Map([["MAIL_KEY", "re_configured"]])), false);
+  const conflict: QmConfig = {
+    ...aliased,
+    services: ["core", "auth", "portal"],
+    secretEnv: { ...aliased.secretEnv, portal: { AUTH_EMAIL_FROM: "OTHER_SENDER" } },
+  };
+  assert.throws(() => emailTransportConfigured(conflict, secrets), /would receive env AUTH_EMAIL_FROM from both/);
+  await assert.rejects(emailTransportPreflight(conflict, secrets), /would receive env AUTH_EMAIL_FROM from both/);
   const direct = {
     ...CONFIG,
     env: { auth: { AUTH_EMAIL_TRANSPORT: "resend", AUTH_EMAIL_FROM: "noreply@example.com" } },

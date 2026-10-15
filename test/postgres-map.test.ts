@@ -1,8 +1,10 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { createMemoryMap, createPostgresMapFactory } from "../src/persistence/durable-map.ts";
 import { createCronStore } from "../src/cron/cron-store.ts";
-import { scopeId, type Cron } from "../src/types.ts";
+import { createWebhookStore, type WebhookHistory } from "../src/webhooks/webhook-store.ts";
+import { scopeId, type Webhook, type Cron } from "../src/types.ts";
 import {
   createKeychain,
   KeychainError,
@@ -11,6 +13,7 @@ import {
   type KeychainGrant,
 } from "../src/credentials/keychain.ts";
 import { deriveConnectorKey } from "../src/connectors/connector-client-store.ts";
+import { applyPgMigrations, definePgMigration } from "../src/persistence/pg-pool.ts";
 
 const URL = process.env.DATABASE_URL;
 const skip = URL ? false : "set DATABASE_URL (a Postgres) to run the Postgres map tests";
@@ -21,7 +24,7 @@ before(async () => {
   const p = new pg.Pool({ connectionString: URL });
   await p.query("DROP TABLE IF EXISTS qm_schema_migrations CASCADE");
   await p.query(
-    "DROP TABLE IF EXISTS map_widgets, map_crons, map_keychain_creds, map_keychain_grants, map_keychain_asks, process_sessions, durable_map_versions CASCADE",
+    "DROP TABLE IF EXISTS map_webhooks, map_webhook_history, map_widgets, map_wide_widgets, map_crons, map_keychain_creds, map_keychain_grants, map_keychain_asks, process_sessions, durable_map_versions CASCADE",
   );
   await p.end();
 });
@@ -102,6 +105,7 @@ test("pg map: rejects an unsafe table name (the DDL/DML interpolation guard)", (
   const factory = createPostgresMapFactory("postgres://unused");
   assert.throws(() => factory.map("bad name"), /invalid table name/);
   assert.throws(() => factory.map("crons;--"), /invalid table name/);
+  assert.throws(() => factory.map<{ owner: string }>("map_widgets", ["bad field" as "owner"]), /invalid index field/);
 });
 
 test(
@@ -178,12 +182,13 @@ test("pg map: select mirrors the memory map — folded field filter, projection,
     ["sel-c", { name: "sel-c", tags: [], nested: { n: 3 }, owner: "Someone@X.com", secretEnc: "enc-c" }],
   ];
   const factory = createPostgresMapFactory(URL!);
-  const pgMap = factory.map<Owned>("map_widgets");
+  let pgMap = factory.map<Owned>("map_widgets");
   const memMap = createMemoryMap<Owned>();
   for (const [id, row] of rows) {
     await pgMap.put(id, row);
     await memMap.put(id, row);
   }
+  pgMap = factory.map<Owned>("map_widgets", ["owner"]);
   try {
     const mine = await pgMap.select({ omit: ["secretEnc"], where: { field: "owner", anyOfFold: ["U7"] } });
     assert.deepEqual(mine, await memMap.select({ omit: ["secretEnc"], where: { field: "owner", anyOfFold: ["U7"] } }));
@@ -196,6 +201,18 @@ test("pg map: select mirrors the memory map — folded field filter, projection,
       "the omitted key is gone from every row",
     );
     assert.deepEqual(mine[0]!.nested, { n: 1 }, "nested fields survive the projection");
+    for (const limit of [0, 1, 2]) {
+      const query = { limit, afterId: "sel-a", where: { field: "owner" as const, anyOfFold: ["u7"] } };
+      assert.deepEqual(await pgMap.select(query), await memMap.select(query));
+      assert.deepEqual(
+        (await pgMap.select(query)).map((row) => row.name),
+        limit === 0 ? [] : ["sel-b"],
+      );
+    }
+    assert.deepEqual(
+      (await pgMap.select({ limit: 1, afterId: "sel-b" })).map((row) => row.name),
+      ["sel-c"],
+    );
 
     const email = await pgMap.select({ where: { field: "owner", anyOfFold: ["SOMEONE@x.com"] } });
     assert.deepEqual(email, await memMap.select({ where: { field: "owner", anyOfFold: ["SOMEONE@x.com"] } }));
@@ -208,10 +225,27 @@ test("pg map: select mirrors the memory map — folded field filter, projection,
     await memMap.put("sel-d", turkish);
     const swept = await pgMap.select({ where: { field: "owner", anyOfFold: ["no-such-owner"] } });
     assert.deepEqual(swept, await memMap.select({ where: { field: "owner", anyOfFold: ["no-such-owner"] } }));
+    const indexes = await factory.pool.q(
+      "SELECT indexrelid::regclass::text AS name, indisvalid FROM pg_index WHERE indrelid = 'map_widgets'::regclass",
+    );
+    for (const name of ["map_widgets_owner_fold", "map_widgets_owner_unicode"]) {
+      assert.ok(indexes.some((index) => index.name === name && index.indisvalid));
+    }
+    await pgMap.merge("sel-a", { owner: "Moved" });
+    assert.deepEqual(
+      (await pgMap.select({ where: { field: "owner", anyOfFold: ["MOVED"] } })).map((w) => w.name),
+      ["sel-a", "sel-d"],
+    );
     assert.deepEqual(
       swept.map((w) => w.name),
       ["sel-d"],
       "a non-ASCII field value is always a candidate — SQL lower() and JS toLowerCase() disagree there",
+    );
+    await pgMap.merge("sel-d", { owner: "josé" });
+    assert.deepEqual(
+      (await pgMap.select({ where: { field: "owner", anyOfFold: ["josé"] } })).map((row) => row.name),
+      ["sel-d"],
+      "a row matching both indexed branches is returned once",
     );
   } finally {
     for (const id of [...rows.map(([id]) => id), "sel-d"]) await pgMap.delete(id);
@@ -219,11 +253,64 @@ test("pg map: select mirrors the memory map — folded field filter, projection,
   }
 });
 
+test("pg map: indexed fields accept wide values through migration and later writes", { skip }, async () => {
+  const factory = createPostgresMapFactory(URL!);
+  const first = randomBytes(3000).toString("hex");
+  const second = randomBytes(3000).toString("hex");
+  const unindexed = factory.map<{ owner: string }>("map_wide_widgets");
+  try {
+    await unindexed.put("existing", { owner: first });
+    const indexed = factory.map<{ owner: string }>("map_wide_widgets", ["owner"]);
+    const select = (owner: string) => indexed.select({ where: { field: "owner", anyOfFold: [owner.toUpperCase()] } });
+    assert.deepEqual(await select(first), [{ owner: first }]);
+    await indexed.put("later", { owner: second });
+    await indexed.merge("existing", { owner: second });
+    assert.deepEqual(await select(first), []);
+    assert.deepEqual(await select(second), [{ owner: second }, { owner: second }]);
+  } finally {
+    await unindexed.delete("existing");
+    await unindexed.delete("later");
+    await factory.pool.close();
+  }
+});
+
+test("pg map: original folded-index migration upgrades without changing its ledger", { skip }, async () => {
+  const factory = createPostgresMapFactory(URL!);
+  const unindexed = factory.map<{ owner: string }>("map_wide_widgets");
+  await unindexed.put("legacy", { owner: "short" });
+  const legacy = definePgMigration("durable-map/map_wide_widgets/select-owner", [
+    `CREATE INDEX CONCURRENTLY IF NOT EXISTS map_wide_widgets_owner_fold
+           ON map_wide_widgets (lower(json->>'owner'))`,
+    `CREATE INDEX CONCURRENTLY IF NOT EXISTS map_wide_widgets_owner_unicode
+           ON map_wide_widgets (id) WHERE json->>'owner' ~ '[^\\x01-\\x7f]'`,
+  ]);
+  try {
+    await factory.pool.q("DROP INDEX IF EXISTS map_wide_widgets_owner_fold, map_wide_widgets_owner_unicode");
+    await factory.pool.q(
+      "DELETE FROM qm_schema_migrations WHERE id LIKE 'durable-map/map_wide_widgets/%' AND id <> 'durable-map/map_wide_widgets/0001'",
+    );
+    await applyPgMigrations(await factory.pool.pool(), [legacy]);
+    const ledger = await factory.pool.q("SELECT * FROM qm_schema_migrations WHERE id = $1", [legacy.id]);
+    const indexed = factory.map<{ owner: string }>("map_wide_widgets", ["owner"]);
+    const owner = randomBytes(3000).toString("hex");
+    await indexed.put("legacy", { owner });
+    assert.deepEqual(await indexed.select({ where: { field: "owner", anyOfFold: [owner] } }), [{ owner }]);
+    assert.deepEqual(await factory.pool.q("SELECT * FROM qm_schema_migrations WHERE id = $1", [legacy.id]), ledger);
+    const [index] = await factory.pool.q(
+      "SELECT am.amname FROM pg_class c JOIN pg_am am ON am.oid = c.relam WHERE c.oid = 'map_wide_widgets_owner_fold'::regclass",
+    );
+    assert.equal(index!.amname, "hash");
+  } finally {
+    await unindexed.delete("legacy");
+    await factory.pool.close();
+  }
+});
+
 test("pg keychain: listByOwner is a per-owner projected read with no secret material", { skip }, async () => {
   const factory = createPostgresMapFactory(URL!);
   const keychain = createKeychain({
-    creds: factory.map<KeychainCredential>("map_keychain_creds"),
-    grants: factory.map<KeychainGrant>("map_keychain_grants"),
+    creds: factory.map<KeychainCredential>("map_keychain_creds", ["ownerId"]),
+    grants: factory.map<KeychainGrant>("map_keychain_grants", ["ownerId"]),
     asks: factory.map<KeychainAsk>("map_keychain_asks"),
     key: deriveConnectorKey("postgres-keychain-test-key"),
   });
@@ -259,8 +346,8 @@ test("pg map: concurrent keychain instances claim a once grant exactly once", { 
   const key = deriveConnectorKey("postgres-keychain-test-key");
   const build = (factory: ReturnType<typeof createPostgresMapFactory>) =>
     createKeychain({
-      creds: factory.map<KeychainCredential>("map_keychain_creds"),
-      grants: factory.map<KeychainGrant>("map_keychain_grants"),
+      creds: factory.map<KeychainCredential>("map_keychain_creds", ["ownerId"]),
+      grants: factory.map<KeychainGrant>("map_keychain_grants", ["ownerId"]),
       asks: factory.map<KeychainAsk>("map_keychain_asks"),
       key,
     });
@@ -297,3 +384,85 @@ test("pg map: concurrent keychain instances claim a once grant exactly once", { 
     await second.pool.close();
   }
 });
+
+test("pg map: webhook history retains concurrent deliveries across store instances", { skip }, async () => {
+  const factory = createPostgresMapFactory(URL!);
+  const makeStore = () =>
+    createWebhookStore(factory.map<Webhook>("map_webhooks"), factory.map<WebhookHistory>("map_webhook_history"));
+  const a = makeStore();
+  const b = makeStore();
+  const webhook = await a.create({
+    ownerScopeId: scopeId("personal", "U1"),
+    owner: "U1",
+    createdBy: "U1",
+    action: "summarize",
+    verification: { scheme: "github", secret: "test-only" },
+  });
+  await Promise.all(
+    Array.from({ length: 60 }, (_, i) =>
+      (i % 2 ? a : b).recordEvent(webhook.id, {
+        deliveryId: `event-${i}`,
+        receivedAt: i,
+        payload: "hello 🌊",
+      }),
+    ),
+  );
+  await b.recordEvent(webhook.id, {
+    deliveryId: "event-59",
+    receivedAt: 59,
+    payload: "hello 🌊",
+  });
+  const events = await makeStore().listEvents(webhook.id);
+  assert.equal(events.length, 50);
+  assert.equal(events[0]?.receivedAt, 59);
+  assert.equal(events[0]?.payload, "hello 🌊");
+  assert.equal(events.at(-1)?.receivedAt, 10);
+  assert.equal(new Set(events.map((e) => e.deliveryId)).size, 50);
+});
+
+for (const postgres of [false, true]) {
+  test(
+    `${postgres ? "pg" : "memory"} map: nested projection excludes large fields and preserves default reads`,
+    { skip: postgres && skip },
+    async () => {
+      type Row = { owner: string; secret: string; payload?: Record<string, unknown> | null };
+      const factory = postgres ? createPostgresMapFactory(URL!) : undefined;
+      const map = factory ? factory.map<Row>("map_widgets") : createMemoryMap<Row>();
+      const payload = { source: "gmail", automated: true, body: "x".repeat(64_000), nil: null };
+      const rows: Row[] = [
+        { owner: "projection", secret: "hidden", payload },
+        { owner: "projection", secret: "hidden" },
+        { owner: "projection", secret: "hidden", payload: null },
+      ];
+      try {
+        for (const [i, row] of rows.entries()) await map.put(`projection-${i}`, row);
+        const selected = await map.select({
+          where: { field: "owner", anyOfFold: ["PROJECTION"] },
+          omit: ["secret"],
+          pickNested: { payload: ["source", "automated", "nil", "missing"] },
+          afterId: "projection-0",
+          limit: 2,
+        });
+        assert.deepEqual(selected, [{ owner: "projection" }, { owner: "projection", payload: null }]);
+        const [first] = await map.select({
+          where: { field: "owner", anyOfFold: ["projection"] },
+          pickNested: { payload: ["source", "automated", "nil"] },
+          limit: 1,
+        });
+        assert.deepEqual(first!.payload, { source: "gmail", automated: true, nil: null });
+        assert.deepEqual(await map.get("projection-0"), rows[0]);
+        assert.deepEqual(await map.select({ where: { field: "owner", anyOfFold: ["projection"] } }), rows);
+        const [omitted] = await map.select({
+          where: { field: "owner", anyOfFold: ["projection"] },
+          pickNested: { payload: ["source"] },
+          omit: ["payload"],
+          limit: 1,
+        });
+        assert.equal("payload" in omitted!, false);
+      } finally {
+        for (let i = 0; i < rows.length; i++) await map.delete(`projection-${i}`);
+        await factory?.pool.close();
+      }
+    },
+  );
+}

@@ -1,3 +1,4 @@
+import { jwtExpiryMs } from "../util/jwt.ts";
 import { codeChallengeS256, generateCodeVerifier } from "../connectors/oauth.ts";
 import { CODEX_OAUTH_ISSUER, codexOAuthJwtAccountIdFromToken } from "../harness/codex-auth-file.ts";
 import type { UserOAuthTokens } from "./user-model-credential-store.ts";
@@ -11,26 +12,13 @@ const CLAUDE_TOKEN = "https://console.anthropic.com/v1/oauth/token";
 const CLAUDE_REDIRECT = "https://platform.claude.com/oauth/code/callback";
 const CLAUDE_SCOPE = "org:create_api_key user:profile user:inference";
 
-function decodeJwtClaims(jwt: string | undefined): Record<string, unknown> | undefined {
-  if (!jwt) return undefined;
-  const part = jwt.split(".")[1];
-  if (!part) return undefined;
-  try {
-    return JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
-  } catch {
-    return undefined;
-  }
-}
-
 function chatgptAccountId(tokens: { idToken?: string; accessToken: string }): string | undefined {
   return codexOAuthJwtAccountIdFromToken(tokens.idToken) ?? codexOAuthJwtAccountIdFromToken(tokens.accessToken);
 }
 
 function tokenExpiry(raw: { expires_in?: number; access_token?: string }): number | undefined {
   if (typeof raw.expires_in === "number") return Date.now() + raw.expires_in * 1000;
-  const claims = decodeJwtClaims(raw.access_token);
-  const exp = claims?.exp;
-  return typeof exp === "number" ? exp * 1000 : undefined;
+  return jwtExpiryMs(raw.access_token);
 }
 
 export interface ChatGPTDevicePrompt {

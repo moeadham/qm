@@ -79,7 +79,7 @@ test("a notebook edit landing during a marker bump survives", async () => {
 
   const notebook = (await workspace.read(SCOPE, MEMORY_FILE)) ?? "";
   assert.match(notebook, /user edit mid-bump/, "the concurrent edit is not reverted by the marker write");
-  assert.match(notebook, /captures-since-promote: 1/, "the marker still lands");
+  assert.equal((await base.readHead!(SCOPE)).records!.pendingScratchCaptures, 1);
 });
 
 test("marker CAS exhaustion reports the persisted count, not the phantom bump", async () => {
@@ -155,6 +155,7 @@ test("maintain with readHead but no replaceIfRevision falls back to plain read a
     },
   };
   delete (partial as { replaceIfRevision?: unknown }).replaceIfRevision;
+  delete (partial as { replaceRecordsIfRevision?: unknown }).replaceRecordsIfRevision;
   const promoted = "# Memory\n\n- (2026-06-10) Promoted without CAS";
   const { memory, strategy } = createScratchPromote({
     harness: harnessOf(() => Promise.resolve(promoted)),
@@ -167,7 +168,7 @@ test("maintain with readHead but no replaceIfRevision falls back to plain read a
   await withNow(TODAY, () => strategy.maintain!(SCOPE));
 
   assert.equal(headReads, 0, "a snapshot revision is never taken when it cannot be enforced");
-  assert.equal(await workspace.read(SCOPE, MEMORY_FILE), `${promoted}\n`);
+  assert.equal(await memory.read(SCOPE), `${promoted}\n`);
 });
 
 test("maintain promotes: one-shot judges the window, rewrites MEMORY.md, leaves the log untouched", async () => {
@@ -187,28 +188,35 @@ test("maintain promotes: one-shot judges the window, rewrites MEMORY.md, leaves 
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.system, PROMOTION_PROMPT);
   assert.match(calls[0]!.prompt, /One-off trivia/, "judge sees the scratch window");
-  assert.equal(await workspace.read(SCOPE, MEMORY_FILE), `${promoted}\n`, "MEMORY.md rewritten");
+  assert.equal(await memory.read(SCOPE), `${promoted}\n`, "MEMORY.md rewritten");
   assert.equal(await workspace.read(SCOPE, logPath(TODAY)), logBefore, "log untouched");
 });
 
-test("maintain refuses a runaway promotion: an oversized one-shot output leaves the notebook untouched and skips log pruning", async () => {
+test("a thrown or runaway promotion leaves the notebook's facts alone but still consumes the trigger, so the next capture does not refire", async () => {
   const runaway = "I'll scan for new signed replies… ".repeat(2_000);
-  const { workspace, strategy, memory } = fresh({ oneShot: () => Promise.resolve(runaway) });
-  await memory.replace(SCOPE, "# Memory\n\n- keep me");
-  await memory.capture(SCOPE, ["recent"], TODAY);
-  const ancient = TODAY - 30 * DAY;
-  await workspace.write(SCOPE, logPath(ancient), "- (2026-05-11) ancient\n");
-
-  await withNow(TODAY, () => strategy.maintain!(SCOPE));
-
-  const notebook = (await workspace.read(SCOPE, MEMORY_FILE)) ?? "";
-  assert.match(notebook, /keep me/, "the existing notebook survives");
-  assert.doesNotMatch(notebook, /scan for new signed replies/, "the runaway output is never persisted");
-  assert.match(
-    (await workspace.read(SCOPE, logPath(ancient))) ?? "",
-    /ancient/,
-    "unpromoted logs are not pruned when promotion was discarded",
-  );
+  const verdicts = [() => Promise.reject(new Error("model down")), () => Promise.resolve(runaway)];
+  for (const verdict of verdicts) {
+    let calls = 0;
+    const { memory } = fresh({
+      oneShot: () => {
+        calls++;
+        return verdict();
+      },
+      consolidateAfter: 2,
+    });
+    await memory.replace(SCOPE, "# Memory\n\n- keep me");
+    await withNow(TODAY, async () => {
+      await memory.capture(SCOPE, ["first"], TODAY);
+      await memory.capture(SCOPE, ["second"], TODAY);
+      assert.equal(calls, 1);
+      const notebook = await memory.read(SCOPE);
+      assert.match(notebook, /keep me/, "the existing notebook survives");
+      assert.doesNotMatch(notebook, /scan for new signed replies/, "the runaway output is never persisted");
+      assert.doesNotMatch(notebook, /captures-since-promote/, "the trigger is consumed");
+      await memory.capture(SCOPE, ["third"], TODAY);
+    });
+    assert.equal(calls, 1, "a discarded pass does not refire on the next capture");
+  }
 });
 
 test("maintain is a no-op rewrite when the judge says NONE, and prunes logs past retention", async () => {
@@ -227,7 +235,7 @@ test("maintain is a no-op rewrite when the judge says NONE, and prunes logs past
 
 test("after-N marker trigger: the Nth capture fires promotion and resets the durable counter", async () => {
   let promotions = 0;
-  const { workspace, memory } = fresh({
+  const { base, memory } = fresh({
     oneShot(system) {
       if (system === PROMOTION_PROMPT) {
         promotions++;
@@ -241,28 +249,61 @@ test("after-N marker trigger: the Nth capture fires promotion and resets the dur
     await memory.capture(SCOPE, ["fact one"], TODAY);
     await memory.capture(SCOPE, ["fact two"], TODAY);
     assert.equal(promotions, 0);
-    assert.match(
-      (await workspace.read(SCOPE, MEMORY_FILE)) ?? "",
-      /captures-since-promote: 2/,
-      "counter lives in the notebook, not RAM",
-    );
+    assert.equal((await base.readHead!(SCOPE)).records!.pendingScratchCaptures, 2);
     await memory.capture(SCOPE, ["fact three"], TODAY);
   });
   assert.equal(promotions, 1);
-  assert.doesNotMatch(
-    (await workspace.read(SCOPE, MEMORY_FILE)) ?? "",
-    /captures-since-promote: [1-9]/,
-    "counter reset",
-  );
+  assert.equal((await base.readHead!(SCOPE)).records!.pendingScratchCaptures, 0);
 });
 
-test("concurrent captures retain both marker increments", async () => {
-  const { memory } = fresh();
+test("a NONE verdict consumes the trigger without touching the notebook's facts", async () => {
+  const { memory } = fresh({ oneShot: () => Promise.resolve("NONE"), consolidateAfter: 1 });
+  await memory.replace(SCOPE, "# Memory\n\n- keep me");
+  await withNow(TODAY, () => memory.capture(SCOPE, ["fact"], TODAY));
+  const notebook = await memory.read(SCOPE);
+  assert.match(notebook, /keep me/);
+  assert.doesNotMatch(notebook, /captures-since-promote/, "the marker is stripped with the write");
+});
+
+test("a capture landing during promotion leaves the trigger armed, so the next capture retries the dropped pass", async () => {
+  const workspace = createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "msp-")));
+  const base = createMemoryService(workspace);
+  const otherProcess = createScratchPromote({ harness: harnessOf(), memory: base, workspace, consolidateAfter: 0 });
+  let promotions = 0;
+  const { memory } = createScratchPromote({
+    harness: harnessOf(async () => {
+      promotions++;
+      if (promotions === 1) await otherProcess.memory.capture(SCOPE, ["landed mid-promotion"], TODAY);
+      return "# Memory\n\n- promoted";
+    }),
+    memory: base,
+    workspace,
+    consolidateAfter: 2,
+  });
+
+  await withNow(TODAY, async () => {
+    await memory.capture(SCOPE, ["fact one"], TODAY);
+    await memory.capture(SCOPE, ["fact two"], TODAY);
+    assert.equal(promotions, 1);
+    const notebook = await base.read(SCOPE);
+    assert.doesNotMatch(notebook, /promoted/, "the stale promotion is dropped");
+    assert.equal((await base.readHead!(SCOPE)).records!.pendingScratchCaptures, 3);
+    await memory.capture(SCOPE, ["fact three"], TODAY);
+  });
+
+  assert.equal(promotions, 2, "the very next capture retries the dropped pass");
+  const notebook = await base.read(SCOPE);
+  assert.match(notebook, /promoted/);
+  assert.doesNotMatch(notebook, /captures-since-promote/, "a landed promotion consumes the trigger");
+});
+
+test("concurrent captures retain both counter increments", async () => {
+  const { memory, base } = fresh();
   await Promise.all([
     memory.capture(SCOPE, ["first concurrent fact"], TODAY),
     memory.capture(SCOPE, ["second concurrent fact"], TODAY),
   ]);
-  assert.match(await memory.read(SCOPE), /captures-since-promote: 2/);
+  assert.equal((await base.readHead!(SCOPE)).records!.pendingScratchCaptures, 2);
 });
 
 test("onTurnEnd extracts facts and captures them into today's log", async () => {
@@ -305,4 +346,30 @@ test("a save landing during promotion is not reverted by the promote write", asy
   const after = await base.read(SCOPE);
   assert.match(after, /the newer edit/, "the mid-flight edit survives");
   assert.doesNotMatch(after, /promoted fact/, "the stale promotion is dropped, not applied");
+});
+
+test("scratch bookkeeping and NONE promotion preserve existing fact provenance", async () => {
+  const { memory, base, strategy } = fresh({ oneShot: async () => "NONE" });
+  const scope = "personal:alice";
+  await base.capture(scope, ["Prefers concise replies"], TODAY, "alice", {
+    mode: "explicit",
+    conversationScopeId: scope,
+    sensitivity: "ordinary",
+    inheritedRecords: [],
+  });
+  await base.capture(scope, ["Private health detail"], TODAY, "alice", {
+    mode: "explicit",
+    conversationScopeId: "group:medical",
+    sensitivity: "sensitive",
+    inheritedRecords: [],
+  });
+  const before = (await base.readHead!(scope)).records!.records;
+  await memory.capture(scope, ["Recent local fact"], TODAY);
+  assert.deepEqual((await base.readHead!(scope)).records!.records, before);
+  assert.equal((await base.readHead!(scope)).records!.pendingScratchCaptures, 1);
+  assert.equal((await memory.readHead!(scope)).records, undefined);
+  assert.equal(memory.replaceRecordsIfRevision, undefined);
+  await withNow(TODAY, () => strategy.maintain!(scope));
+  assert.deepEqual((await base.readHead!(scope)).records!.records, before);
+  assert.equal((await base.readHead!(scope)).records!.pendingScratchCaptures, 0);
 });

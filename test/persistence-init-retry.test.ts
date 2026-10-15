@@ -15,9 +15,13 @@ function flakyPgPool(failures: number): PgPool {
       remaining--;
       throw new Error("transient pg failure");
     }
-    return { rows: [{ token: "t", json: { n: 1 } }], rowCount: 1 };
+    return {
+      rows: [{ token: "t", json: { n: 1 } }],
+      rowCount: 1,
+    };
   }
   return {
+    sessionPool: () => Promise.reject(new Error("not backed by a real pool")),
     pool: () => Promise.reject(new Error("not backed by a real pool")),
     query,
     q: async (text, params) => (await query(text, params ?? [])).rows,
@@ -37,6 +41,9 @@ test("admin grants: a failed seed is retried on the next call (rejection not cac
   let failures = 1;
   const rows: AdminGrant[] = [];
   const persist: AdminGrantPersistence = {
+    async insertIfAbsent() {
+      throw new Error("not exercised");
+    },
     async all() {
       if (failures > 0) {
         failures--;

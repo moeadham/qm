@@ -1,3 +1,4 @@
+import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import type {
   PendingApproval,
   PendingApprovalRecord,
@@ -10,7 +11,8 @@ import type {
 import { orgId as orgIdOf } from "../config.ts";
 import { isManageableCreationScope, parseScopeId, scopeId } from "../types.ts";
 import { type ListOwnedOptions } from "../files/file-artifact-store.ts";
-import type { Run } from "../runs/run-store.ts";
+import { isTerminal, type Run } from "../runs/run-store.ts";
+import { sleep } from "../util/async.ts";
 import type { RunSignal } from "../runs/run-signal-store.ts";
 import { processRun } from "../runs/worker.ts";
 import { deployRef, encodeRef, parseRef } from "../acl/resource-ref.ts";
@@ -199,16 +201,30 @@ export function createAppHelpers(deps: AppDeps, app: App) {
   }
 
   async function drive(runId: string): Promise<TurnResult> {
-    const claimed = await deps.runs.claimById(runId, "inline", deps.leaseTtlMs);
-    if (claimed) {
-      return withAdminLink(
-        await processRun({ runs: deps.runs, orchestrator: deps.orchestrator, leaseTtlMs: deps.leaseTtlMs }, claimed),
-      );
+    const timeoutMs = deps.runWaitMs ?? 60_000;
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      const run = await deps.runs.get(runId);
+      if (!run) throw new Error(`run ${runId} not found`);
+      if (isTerminal(run.status)) {
+        return withAdminLink(
+          run.result ?? { status: "failed", sessionId: run.sessionId, reason: "run produced no result" },
+        );
+      }
+      const claimed = await deps.runs.claimForSession(run.sessionId, "inline", deps.leaseTtlMs);
+      if (claimed) {
+        const result = processRun(
+          { runs: deps.runs, orchestrator: deps.orchestrator, leaseTtlMs: deps.leaseTtlMs },
+          claimed,
+        );
+        if (claimed.id === runId) return withAdminLink(await result);
+        await result.catch((error: unknown) => swallow("inline predecessor run failed", error));
+        continue;
+      }
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new Error(`run ${runId} did not finish within ${timeoutMs}ms`);
+      await sleep(Math.min(100, remaining));
     }
-    const finished = await deps.runs.waitFor(runId, deps.runWaitMs);
-    return withAdminLink(
-      finished.result ?? { status: "failed", sessionId: finished.sessionId, reason: "run produced no result" },
-    );
   }
 
   async function mayUseSharedScope(kind: "channel" | "group", ref: string, actor: Principal): Promise<boolean> {
@@ -268,10 +284,14 @@ export function createAppHelpers(deps: AppDeps, app: App) {
 
   async function sessionsForViewer(principalId: string): Promise<Session[]> {
     const sessions = await deps.sessions.listByParticipant(principalId);
-    const allowed = await Promise.all(
-      sessions.map((session) => managedProjectMembership(session.scopeId, principalId)),
+    const allowed = new Map(
+      await Promise.all(
+        [...new Set(sessions.map((session) => session.scopeId))].map(
+          async (scope) => [scope, await managedProjectMembership(scope, principalId)] as const,
+        ),
+      ),
     );
-    return sessions.filter((_session, index) => allowed[index] !== false);
+    return sessions.filter((session) => allowed.get(session.scopeId) !== false);
   }
 
   async function sessionForViewer(sessionId: string, principalId: string): Promise<Session | null> {
@@ -462,7 +482,7 @@ export function createAppHelpers(deps: AppDeps, app: App) {
     return undefined;
   }
 
-  function canManageSkill(skill: Skill, principalId: string): Promise<boolean> {
+  function canManageSkill(skill: Pick<Skill, "scopeId" | "createdBy">, principalId: string): Promise<boolean> {
     return principalManagesArtifactHome(skill.scopeId, skill.createdBy, principalId);
   }
 
@@ -483,12 +503,20 @@ export function createAppHelpers(deps: AppDeps, app: App) {
   }
 
   async function effectiveDeploymentPermission(d: Deployment, principalId: string): Promise<Permission | null> {
-    if (!principalId) return null;
+    if (!principalId || deps.identity.deactivationSource?.(principalId) === "manual") return null;
     if (await principalCanWriteScope(principalId, d.ownerScopeId)) return "write";
     let best: Permission | null = (await principalCanAccessCurrentScope(principalId, d.ownerScopeId)) ? "read" : null;
     const grants = (await deps.acl?.grantsFor(d.ownerScopeId, encodeRef(deployRef(d.id))).catch(() => [])) ?? [];
     for (const g of grants) {
       if (g.permission !== "read" && g.permission !== "write") continue;
+      if (
+        g.permission === "read" &&
+        principalId.includes("@") &&
+        g.granteeScopeId === `personal:${principalId.trim().toLowerCase()}`
+      ) {
+        best = "read";
+        continue;
+      }
       if (!(await principalCanAccessCurrentScope(principalId, g.granteeScopeId))) continue;
       if (g.permission === "write" && (await principalCanUseWriteGrant(principalId, g.granteeScopeId))) return "write";
       best = "read";
@@ -500,7 +528,10 @@ export function createAppHelpers(deps: AppDeps, app: App) {
     return (await effectiveDeploymentPermission(d, principalId)) != null;
   }
 
-  async function principalGitPermission(d: Deployment, principalId: string): Promise<"read" | "write" | null> {
+  async function principalGitPermission(
+    d: Pick<Deployment, "id" | "ownerScopeId" | "createdBy" | "createdInScope">,
+    principalId: string,
+  ): Promise<"read" | "write" | null> {
     if (!principalId) return null;
     const { kind } = parseScopeId(d.ownerScopeId);
     if (await principalManagesArtifactHome(d.ownerScopeId, d.createdBy, principalId)) return "write";
@@ -576,13 +607,70 @@ export function createAppHelpers(deps: AppDeps, app: App) {
   async function replayOrphanedRunSignals(runId: string): Promise<Array<{ signal: RunSignal; replayRunId?: string }>> {
     if (!deps.signals) return [];
     const drained: Array<{ signal: RunSignal; replayRunId?: string }> = [];
+    const completed = await deps.runs.get(runId);
+    if (completed && isSubagentThreadRef(completed.sessionId)) {
+      for (const { id, signal } of await deps.signals.pending(runId)) {
+        if (signal.kind === "abort" || signal.kind === "client_result" || !signal.text?.trim()) {
+          await deps.signals.acknowledge(runId, id);
+          continue;
+        }
+        let replayRunId: string | undefined;
+        const dedupKey = `session-signal:${runId}:${id}`;
+        if (signal.sessionRequest) {
+          const { clientTools: _clientTools, ...sessionRequest } = signal.sessionRequest;
+          const { run } = await deps.runs.enqueue({
+            sessionId: completed.sessionId,
+            request: sessionRequest,
+            dedupKey,
+            maxAttempts: deps.maxAttempts,
+          });
+          replayRunId = run.id;
+        } else if (signal.request) {
+          const { approval: _ap, redeliveryKey: _redeliveryKey, clientTools: _clientTools, ...base } = signal.request;
+          const prior = completed.request;
+          const inheritedOptions = {
+            ...(base.model === undefined && prior.model !== undefined ? { model: prior.model } : {}),
+            ...(base.harness === undefined && prior.harness !== undefined ? { harness: prior.harness } : {}),
+            ...(base.thinkingLevel === undefined && prior.thinkingLevel !== undefined
+              ? { thinkingLevel: prior.thinkingLevel }
+              : {}),
+            ...(base.fastMode === undefined && prior.fastMode !== undefined ? { fastMode: prior.fastMode } : {}),
+            ...(base.timezone === undefined && prior.timezone !== undefined ? { timezone: prior.timezone } : {}),
+          };
+          const replayed = await app.turn(
+            { ...base, ...inheritedOptions, async: true, idempotencyKey: dedupKey },
+            { signalDedupKey: dedupKey },
+          );
+          replayRunId = replayed.runId;
+          if (!replayRunId && replayed.status !== "refused") continue;
+        } else {
+          const {
+            approval: _approval,
+            attachments: _attachments,
+            displayText: _display,
+            clientTools: _clientTools,
+            ...request
+          } = completed.request;
+          const { run } = await deps.runs.enqueue({
+            sessionId: completed.sessionId,
+            request: { ...request, text: signal.text, origin: { kind: "automation", screenData: signal.text } },
+            dedupKey,
+            maxAttempts: deps.maxAttempts,
+          });
+          replayRunId = run.id;
+        }
+        await deps.signals.acknowledge(runId, id);
+        drained.push({ signal, ...(replayRunId ? { replayRunId } : {}) });
+      }
+      return drained;
+    }
     for (const signal of await deps.signals.takePending(runId)) {
-      if (signal.kind === "abort") continue;
+      if (signal.kind === "abort" || signal.kind === "client_result") continue;
       let replayRunId: string | undefined;
       let replayOutcomeKnown = true;
       if (signal.request) {
         try {
-          const { approval: _ap, redeliveryKey: _redeliveryKey, ...base } = signal.request;
+          const { approval: _ap, redeliveryKey: _redeliveryKey, clientTools: _clientTools, ...base } = signal.request;
           const prior = (await deps.runs.get(runId))?.request;
           const inheritedOptions = {
             ...(base.model === undefined && prior?.model !== undefined ? { model: prior.model } : {}),
@@ -604,7 +692,13 @@ export function createAppHelpers(deps: AppDeps, app: App) {
         const orphanRun = await deps.runs.get(runId);
         if (orphanRun) {
           try {
-            const { displayText: _d, attachments: _a, approval: _ap, ...base } = orphanRun.request;
+            const {
+              displayText: _d,
+              attachments: _a,
+              approval: _ap,
+              clientTools: _clientTools,
+              ...base
+            } = orphanRun.request;
             const { run: fresh } = await deps.runs.enqueue({
               sessionId: orphanRun.sessionId,
               request: { ...base, text: signal.text },
@@ -649,6 +743,7 @@ export function createAppHelpers(deps: AppDeps, app: App) {
     currentResourceScopesForViewer,
     canUseContext,
     principalCanAccessCurrentScope,
+    principalCanWriteScope,
     principalCanManageScope,
     membershipControlsScope,
     authorizesCapabilityScope,

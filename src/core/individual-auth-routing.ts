@@ -1,4 +1,5 @@
 import {
+  codexProviderModelId,
   codexSubscriptionModelId,
   CODEX_SUBSCRIPTION_PROVIDER,
   DEFAULT_AGENT_MODEL_ID,
@@ -8,6 +9,7 @@ import {
   resolveModel,
   isOverlayModel,
   modelUnavailableReason,
+  modelRequestOverrides,
   type ModelProvider,
 } from "../model/pi-models.ts";
 import type { UserModelCredential } from "../model/user-model-credential-store.ts";
@@ -31,11 +33,18 @@ export function resolveIndividualAuthRouting(
   const pick = ((): { provider: "anthropic" | "openai"; cred: UserModelCredential } | null => {
     if (requestedProvider === "anthropic" && anthCred) return { provider: "anthropic", cred: anthCred };
     if (requestedProvider === "openai" && oaiCred) return { provider: "openai", cred: oaiCred };
+    if (requestedProvider) return null;
     if (anthCred) return { provider: "anthropic", cred: anthCred };
     if (oaiCred) return { provider: "openai", cred: oaiCred };
     return null;
   })();
   if (!pick) return null;
+  if (
+    requestedModel &&
+    modelRequestOverrides(requestedModel) &&
+    (pick.provider !== requestedProvider || pick.cred.kind !== "apikey")
+  )
+    return null;
   if (
     requestedModel &&
     isOverlayModel(requestedModel) &&
@@ -86,7 +95,7 @@ export function resolveIndividualAuthRouting(
       harness: "codex",
       model:
         requestedModel && requestedProvider === "openai"
-          ? requestedModel.replace(/^codex\//, "")
+          ? codexProviderModelId(requestedModel)
           : defaultModelForHarness("codex", DEFAULT_CODEX_MODEL_ID),
     };
   }

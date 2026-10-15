@@ -1,10 +1,11 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { CodexAppServer } from "../harness/codex-app-server.ts";
-import { codexOAuthAuthFromValue } from "../harness/codex-auth-store.ts";
+import { codexOAuthAccessTokenExpiresAt, codexOAuthAuthFromValue } from "../harness/codex-auth-store.ts";
 import { asObject, codexOAuthJwtAccountId, type JsonObject } from "../harness/codex-auth-file.ts";
 import type { UserOAuthTokens } from "./user-model-credential-store.ts";
+import { reportFailureAs } from "../util/errors.ts";
 import type { ChatGPTDevicePrompt } from "./subscription-oauth.ts";
 
 const LOGIN_TTL_MS = 15 * 60 * 1000;
@@ -27,11 +28,13 @@ function tokensFromAuthJson(home: string): UserOAuthTokens {
   const accessToken = tokens.access_token as string;
   const idToken = typeof tokens.id_token === "string" ? tokens.id_token : undefined;
   const accountId = codexOAuthJwtAccountId(auth) ?? undefined;
+  const expiresAt = codexOAuthAccessTokenExpiresAt(auth);
   return {
     accessToken,
     refreshToken: tokens.refresh_token as string,
     ...(idToken ? { idToken } : {}),
     ...(accountId ? { accountId } : {}),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
   };
 }
 
@@ -54,7 +57,8 @@ export function createCodexDeviceLogin(opts: { binaryPath?: string; env?: NodeJS
   const sweep = (): void => {
     const now = Date.now();
     for (const login of pending.values()) {
-      if (now > login.expiresAt) void cleanup(login);
+      if (now > login.expiresAt)
+        void cleanup(login).catch(reportFailureAs("codex device login: expired login cleanup", undefined));
     }
   };
 
@@ -69,10 +73,16 @@ export function createCodexDeviceLogin(opts: { binaryPath?: string; env?: NodeJS
         completed = resolvePromise;
         failed = rejectPromise;
       });
+      void outcome.catch(() => undefined);
       const server = new CodexAppServer({
         binaryPath,
         cwd: home,
-        env: { ...opts.env, CODEX_HOME: home },
+        env: {
+          PATH: dirname(process.execPath),
+          ...opts.env,
+          HOME: home,
+          CODEX_HOME: home,
+        },
         onNotification: async (method, params) => {
           if (method !== "account/login/completed") return;
           const p = (params ?? {}) as Record<string, unknown>;

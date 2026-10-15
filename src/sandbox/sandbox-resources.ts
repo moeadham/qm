@@ -1,8 +1,14 @@
+import { withLiveTurnMembership } from "../resolution/scope-membership.ts";
 import { randomUUID, createHash } from "node:crypto";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
-import { parseScopeId, type ScopeId } from "../types.ts";
-import type { SandboxBackendName, SandboxRoute } from "./sandbox-routing.ts";
+import { parseScopeId, type CommandPolicy, type EgressPolicy, type ScopeId } from "../types.ts";
+import {
+  sandboxDefaultForScope,
+  type SandboxScopeDefaults,
+  type SandboxBackendName,
+  type SandboxRoute,
+} from "./sandbox-routing.ts";
 import type { Sandbox, SandboxHandle, AgentComputerSpec, ProvisionOptions, ComputerStatus } from "./sandbox.ts";
 
 export interface SandboxResource {
@@ -22,6 +28,15 @@ export interface SandboxResource {
   error?: string;
 }
 
+export interface SandboxAccessPlan {
+  readonly resource: SandboxResource;
+  readonly crossScope: boolean;
+  readonly egress: EgressPolicy;
+  readonly commandPolicy: CommandPolicy | null;
+  readonly credentialScopeId?: ScopeId;
+  readonly env?: Readonly<Record<string, string>>;
+}
+
 export interface SandboxDefault {
   sandboxId: string | null;
 }
@@ -37,6 +52,7 @@ export interface LegacySandboxBinding {
 }
 
 export interface SandboxResources {
+  forTurn(turn: { actorId: string; scopeId: ScopeId; isCurrent: () => Promise<boolean> }): SandboxResources;
   initialize(): Promise<void>;
   list(
     actorId: string,
@@ -47,15 +63,22 @@ export interface SandboxResources {
     defaultMode: "none" | "selected";
     providers: Array<{ name: SandboxBackendName; spec?: AgentComputerSpec; actions: string[] }>;
   }>;
-  create(actorId: string, scopeId: ScopeId, backend: string, name?: string): Promise<SandboxResource>;
+  create(
+    actorId: string,
+    scopeId: ScopeId,
+    backend: string,
+    name?: string,
+    reservationId?: string,
+  ): Promise<SandboxResource>;
   access(actorId: string, id: string): Promise<SandboxResource>;
   status(actorId: string, id: string): Promise<ComputerStatus>;
   restart(actorId: string, id: string): Promise<void>;
   retire(actorId: string, id: string): Promise<void>;
-  use<T>(id: string, action: () => Promise<T>): Promise<T>;
+  use<T>(id: string, action: () => Promise<T>, exclusive?: boolean): Promise<T>;
   setDefault(actorId: string, scopeId: ScopeId, id: string | null): Promise<void>;
   resolve(scopeId: ScopeId): Promise<SandboxResource | null | undefined>;
   get(id: string): Promise<SandboxResource>;
+  defaultBackend(scopeId?: string): SandboxBackendName;
   withLegacyMutation<T>(scopeId: string, action: () => Promise<T>): Promise<T>;
   recordLegacy(scopeId: string, backend: SandboxBackendName, handle: SandboxHandle): Promise<string>;
 }
@@ -70,6 +93,7 @@ export function createSandboxResources(opts: {
   routes: DurableMap<SandboxRoute>;
   backends: Partial<Record<SandboxBackendName, Sandbox>>;
   defaultBackend: SandboxBackendName;
+  scopeDefaults?: SandboxScopeDefaults;
   provisionOptions?: (scopeId: string) => Promise<ProvisionOptions>;
   beforeDefaultChange?: (scopeId: string) => Promise<void>;
   beforeRetire?: (record: SandboxResource) => Promise<void>;
@@ -110,7 +134,8 @@ export function createSandboxResources(opts: {
         if (valid(binding.scopeId)) candidates.set(legacyId(binding.scopeId, binding.backend), binding);
       }
       for (const scope of scopes) {
-        const backend = routeBackends.get(scope) ?? opts.defaultBackend;
+        const backend =
+          routeBackends.get(scope) ?? sandboxDefaultForScope(scope, opts.defaultBackend, opts.scopeDefaults);
         const id = legacyId(scope, backend);
         if (!candidates.has(id)) candidates.set(id, { scopeId: scope, backend });
       }
@@ -132,7 +157,10 @@ export function createSandboxResources(opts: {
         });
       }
       for (const scope of scopes) {
-        const id = legacyId(scope, routeBackends.get(scope) ?? opts.defaultBackend);
+        const id = legacyId(
+          scope,
+          routeBackends.get(scope) ?? sandboxDefaultForScope(scope, opts.defaultBackend, opts.scopeDefaults),
+        );
         const record = await opts.records.get(id);
         await opts.defaults.putIfAbsent(scope, { sandboxId: record?.state === "retired" ? null : id });
       }
@@ -163,12 +191,15 @@ export function createSandboxResources(opts: {
     if (!record) throw new Error(`sandbox not found: ${id}`);
     return record;
   };
-  const use = <T>(id: string, action: () => Promise<T>): Promise<T> =>
-    opts.lock.withLock(`sandbox-resource:${id}`, async () => {
-      const record = await get(id);
-      if (record.state === "retired") throw new Error("sandbox has been retired");
+  const use = async <T>(id: string, action: () => Promise<T>, exclusive = false): Promise<T> => {
+    await get(id);
+    const lock = exclusive || !opts.lock.withSharedLock ? opts.lock.withLock : opts.lock.withSharedLock;
+    return lock(`sandbox-resource:${id}`, async () => {
+      const current = await get(id);
+      if (current.state === "retired") throw new Error("sandbox has been retired");
       return action();
     });
+  };
   const recordLegacy = async (scopeId: string, backend: SandboxBackendName, handle: SandboxHandle): Promise<string> => {
     const id = legacyId(scopeId, backend);
     await opts.records.putIfAbsent(id, {
@@ -188,6 +219,13 @@ export function createSandboxResources(opts: {
     return id;
   };
   return {
+    forTurn: (turn) =>
+      createSandboxResources({
+        ...opts,
+        canUseScope: async (actorId, scopeId) =>
+          withLiveTurnMembership(opts.canUseScope, { ...turn, verified: await turn.isCurrent() })(actorId, scopeId),
+      }),
+    defaultBackend: (scopeId) => sandboxDefaultForScope(scopeId, opts.defaultBackend, opts.scopeDefaults),
     initialize,
     get,
     recordLegacy: (scopeId, backend, handle) =>
@@ -212,7 +250,9 @@ export function createSandboxResources(opts: {
           const current = await get(id);
           if (current.state === "retired" && !current.cleanupPending && !current.error) return;
           const selected = await opts.defaults.get(current.ownerScopeId);
-          const legacyBackend = (await opts.routes.get(current.ownerScopeId))?.backend ?? opts.defaultBackend;
+          const legacyBackend =
+            (await opts.routes.get(current.ownerScopeId))?.backend ??
+            sandboxDefaultForScope(current.ownerScopeId, opts.defaultBackend, opts.scopeDefaults);
           if (selected?.sandboxId === id || (!selected && current.legacy && current.backend === legacyBackend))
             throw new Error("unset or change this scope's default before retiring its computer");
           await opts.beforeRetire?.(current);
@@ -249,7 +289,7 @@ export function createSandboxResources(opts: {
       await authorize(actorId, record.ownerScopeId);
       const backend = opts.backends[record.backend];
       if (!backend?.restartComputer) throw new Error(`sandbox restart unavailable: ${record.backend}`);
-      await use(id, () => backend.restartComputer!(record.backingScopeId));
+      await use(id, () => backend.restartComputer!(record.backingScopeId), true);
     },
     async resolve(scopeId) {
       await initialize();
@@ -284,12 +324,13 @@ export function createSandboxResources(opts: {
         providers,
       };
     },
-    async create(actorId, scopeId, backend, name) {
+    async create(actorId, scopeId, backend, name, reservationId) {
       await requireEnabled();
       await authorize(actorId, scopeId);
       if (!Object.hasOwn(opts.backends, backend) || !opts.backends[backend as SandboxBackendName])
         throw new Error(`sandbox backend unavailable: ${backend}`);
-      const id = randomUUID();
+      const id = reservationId ?? randomUUID();
+      if (!/^[a-zA-Z0-9-]{1,80}$/.test(id)) throw new Error("invalid sandbox reservation");
       const record: SandboxResource = {
         id,
         backend: backend as SandboxBackendName,
@@ -302,6 +343,13 @@ export function createSandboxResources(opts: {
         state: "provisioning",
       };
       return opts.lock.withLock(`sandbox-resource:${id}`, async () => {
+        const existing = await opts.records.get(id);
+        if (existing) {
+          if (existing.ownerScopeId !== scopeId || existing.createdBy !== actorId || existing.backend !== backend)
+            throw new Error("sandbox reservation ownership mismatch");
+          if (existing.state === "ready") return existing;
+          if (existing.state === "retired") throw new Error("sandbox reservation is retired");
+        }
         await opts.records.put(id, record);
         const sandbox = opts.backends[record.backend]!;
         try {

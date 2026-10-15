@@ -6,6 +6,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildApp } from "../src/wiring.ts";
+import { jsonbStringify } from "../src/persistence/durable-map.ts";
 import type { TurnRequest } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
 import type { SecurityScreener } from "../src/security/security-screener.ts";
@@ -165,6 +166,7 @@ test("spine ON: a bare 'stop' mid-turn routes through the ABORT interrupt (not a
   const root = "200.2";
   const first = await built.app.turn(mention("@bot do a long thing", channel, root));
   const liveRunId = first.runId!;
+  assert.ok(await built.runs.claimById(liveRunId, "worker", 30_000));
 
   const stop = await built.app.turn(mention("stop", channel, root));
   assert.equal(stop.runId, liveRunId, "the stop attached to the live run");
@@ -228,7 +230,6 @@ test("the proxy receives ambient provenance for an unprompted mid-turn coworker 
   const metadata: Array<Readonly<Record<string, unknown>> | undefined> = [];
   const built = freshApp({
     provider: "example-screen",
-    shadow: true,
     async classify(input) {
       metadata.push(input.metadata);
       return {
@@ -329,6 +330,7 @@ test("an addressed bare 'stop' still ABORTS a live UNPROMPTED run", async () => 
   const root = "1100.1";
   const first = await built.app.turn(overheard("hm, interesting", channel, root));
   const liveRunId = first.runId!;
+  assert.ok(await built.runs.claimById(liveRunId, "worker", 30_000));
 
   const stop = await built.app.turn(mention("stop", channel, root));
   assert.equal(stop.runId, liveRunId, "the stop attached to the live run");
@@ -385,6 +387,7 @@ test("an addressed bare 'stop' still ABORTS a live AUTOMATION run", async () => 
   const root = "1400.1";
   const first = await built.app.turn(automationRun(channel, root));
   const liveRunId = first.runId!;
+  assert.ok(await built.runs.claimById(liveRunId, "worker", 30_000));
 
   const stop = await built.app.turn(mention("stop", channel, root));
   assert.equal(stop.runId, liveRunId, "the stop attached to the live automation run");
@@ -525,6 +528,27 @@ test("reverse race: an addressed mention steers into the live ambient run, not a
   assert.equal(signals[0]!.kind, "steer");
   assert.equal(signals[0]!.text, "@bot are you on it?");
 });
+
+for (const personalSide of ["ambient", "mention"] as const) {
+  test(`reverse race: ${personalSide} personal access cannot share the other run's company account`, async () => {
+    const built = freshApp();
+    const channel = `C-account-${personalSide}`;
+    const askTs = "1600.2";
+    const ambientRef = `slack:${channel}:ambient:${askTs}`;
+    await built.config.setPersonalModelAuth(personalSide === "ambient" ? "jordan@acme.test" : "U1", true, "openai");
+    await built.sessions.getOrCreateByThread(ambientRef, "channel", `channel:${channel}`);
+    const ambient = await built.app.turn(spawnedWorker(channel, askTs));
+    const second = await built.app.turn({ ...mention("@bot continue", channel, askTs), triggerTs: askTs });
+    assert.equal(second.status, "queued");
+    assert.notEqual(second.runId, ambient.runId);
+    assert.notEqual(second.steered, true);
+    assert.deepEqual(await built.signals.takePending(ambient.runId!), []);
+    assert.equal(
+      (await built.runs.get(second.runId!))?.request.modelAccount,
+      personalSide === "mention" ? "openai" : "company",
+    );
+  });
+}
 
 test("spine ON: the FIRST message (no live run) engages normally — no steer", async () => {
   const built = freshApp();
@@ -738,10 +762,10 @@ test("signalRun: a steer already terminal at send is refused up front", async ()
   assert.equal((await built.signals.takePending(liveRunId)).length, 0, "nothing left rotting in the queue");
 });
 
-function completeOnSend(built: ReturnType<typeof freshApp>): void {
+function completeOnSend(built: ReturnType<typeof freshApp>, sanitize = false): void {
   const origSend = built.signals.send.bind(built.signals);
   built.signals.send = async (runId, signal) => {
-    const sent = await origSend(runId, signal);
+    const sent = await origSend(runId, sanitize ? JSON.parse(jsonbStringify(signal)) : signal);
     const claimed = await built.runs.claim("w1", 30_000);
     if (claimed) await built.runs.complete(claimed.id, claimed.leaseToken!, { status: "silent" });
     return sent;
@@ -762,26 +786,138 @@ test("signalRun: a steer whose run goes terminal mid-send is REFUSED, never a fa
   assert.equal((await built.signals.takePending(liveRunId)).length, 0, "nothing left rotting in the queue");
 });
 
-test("steer path: a message whose run goes terminal mid-send is replayed and the caller gets the FRESH run", async () => {
-  const built = freshApp();
-  const channel = "C13";
-  const root = "1300.1";
-  const threadRef = `ch:${channel}:${root}`;
-  const first = await built.app.turn(mention("@bot go", channel, root));
-  const liveRunId = first.runId!;
-  completeOnSend(built);
-  built.app.replayOrphanedRunSignals = async () => {};
+for (const sanitize of [false, true])
+  test(`steer path: a message whose run goes terminal mid-send returns the fresh run (sanitize=${sanitize})`, async () => {
+    const built = freshApp();
+    const channel = "C13";
+    const root = "1300.1";
+    const threadRef = `ch:${channel}:${root}`;
+    const first = await built.app.turn(mention("@bot go", channel, root));
+    const liveRunId = first.runId!;
+    completeOnSend(built, sanitize);
+    built.app.replayOrphanedRunSignals = async () => {};
 
-  const second = await built.app.turn({ ...mention("@bot and another thing", channel, root), triggerTs: "1300.010" });
+    const second = await built.app.turn({
+      ...mention("@bot and another thing\u0000\ud800", channel, root),
+      triggerTs: "1300.010",
+    });
+    assert.equal(second.status, "queued");
+    assert.notEqual(second.runId, liveRunId, "the caller follows the replayed run, not the dead one");
+    const replayed = (await built.runs.list()).find((r) => r.id === second.runId);
+    assert.equal(replayed?.sessionId, threadRef);
+    const text = `${replayed?.request.text ?? ""} ${replayed?.request.displayText ?? ""}`;
+    assert.ok(
+      text.includes("and another thing"),
+      `the fresh run carries the raced message (got: ${text.slice(0, 120)})`,
+    );
+    assert.equal(
+      (await built.signals.takePending(liveRunId)).length,
+      0,
+      "the raced signal was consumed by the inline drain",
+    );
+  });
+
+test("reverse race: a sanitized mention follows its fresh run after the ambient run ends", async () => {
+  const built = freshApp();
+  const channel = "C-ambient-unicode";
+  const askTs = "1600.2";
+  const ambientRef = `slack:${channel}:ambient:${askTs}`;
+  await built.sessions.getOrCreateByThread(ambientRef, "channel", `channel:${channel}`);
+  const ambient = await built.app.turn(spawnedWorker(channel, askTs));
+  completeOnSend(built, true);
+  built.app.replayOrphanedRunSignals = async () => {};
+  const second = await built.app.turn({ ...mention("@bot more\u0000 work\ud800", channel, askTs), triggerTs: askTs });
   assert.equal(second.status, "queued");
-  assert.notEqual(second.runId, liveRunId, "the caller follows the replayed run, not the dead one");
-  const replayed = (await built.runs.list()).find((r) => r.id === second.runId);
-  assert.equal(replayed?.sessionId, threadRef);
-  const text = `${replayed?.request.text ?? ""} ${replayed?.request.displayText ?? ""}`;
-  assert.ok(text.includes("and another thing"), `the fresh run carries the raced message (got: ${text.slice(0, 120)})`);
-  assert.equal(
-    (await built.signals.takePending(liveRunId)).length,
-    0,
-    "the raced signal was consumed by the inline drain",
-  );
+  assert.notEqual(second.runId, ambient.runId);
+  const replayed = await built.runs.get(second.runId!);
+  assert.ok(`${replayed?.request.text} ${replayed?.request.displayText}`.includes("@bot more work�"));
+});
+
+test("screening off delivers ambient updates to the existing run without a classifier", async () => {
+  const built = buildApp(testConfig({ securityScreen: "off" }));
+  const first = await built.app.turn(mention("start work", "C-off", "100.1"));
+  const follow = await built.app.turn(overheard("build finished", "C-off", "100.1"));
+  assert.equal(follow.runId, first.runId);
+  const signals = await built.signals.takePending(first.runId!);
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0]!.kind, "steer");
+  assert.match(signals[0]!.text ?? "", /build finished/);
+  assert.equal(built.modelGateway.audit().filter((rec) => rec.model === "mock-security").length, 0);
+});
+
+test("queued web edits require the author and preserve queue identity", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:edit";
+  const first = await built.app.turn(web("first", threadRef));
+  await built.runs.claimById(first.runId!, "worker", 30000);
+  const second = await built.app.turn(web("second", threadRef));
+  const owner = (await built.runs.get(second.runId!))!.request.actor.id;
+  assert.deepEqual(await built.app.editQueuedRun(second.runId!, "edited", "second", "internal:other"), {
+    edited: false,
+    reason: "not_found",
+  });
+  assert.deepEqual(await built.app.editQueuedRun(second.runId!, "", "second", owner), {
+    edited: false,
+    reason: "empty_text",
+  });
+  assert.deepEqual(await built.app.editQueuedRun(second.runId!, "edited", "second", owner), { edited: true });
+  assert.deepEqual((await built.app.activeRunForThread(threadRef, owner))?.queued, [
+    { runId: second.runId, text: "edited" },
+  ]);
+  assert.deepEqual(await built.app.editQueuedRun(second.runId!, "stale", "second", owner), {
+    edited: false,
+    reason: "changed_or_started",
+  });
+  assert.deepEqual(await built.app.editQueuedRun(first.runId!, "late", "first", owner), {
+    edited: false,
+    reason: "changed_or_started",
+  });
+});
+
+test("run snapshots expose authorized durable web input with safe attachment metadata", async () => {
+  const built = freshApp();
+  const turn = await built.app.turn({
+    ...web("pending input", "web:U1:pending-input"),
+    attachments: [{ name: "notes.txt", mimetype: "text/plain", sizeBytes: 50, blobId: "private-blob" }],
+  });
+  const run = (await built.runs.get(turn.runId!))!;
+  const snapshot = await built.app.getRun(run.id, run.request.actor.id);
+  assert.deepEqual(snapshot?.input, {
+    runId: run.id,
+    seq: null,
+    text: "pending input",
+    createdAt: run.createdAt,
+    attachments: [{ name: "notes.txt", mimetype: "text/plain", sizeBytes: 50 }],
+  });
+  assert.equal(await built.app.getRun(run.id, "internal:other"), null);
+  await built.runs.noteTurnUserSeq(run.id, 0);
+  assert.equal((await built.app.getRun(run.id, run.request.actor.id))?.input?.seq, 0);
+  const slack = await built.app.turn(dm("slack input", "D-no-web-input"));
+  assert.equal((await built.app.getRun(slack.runId!))?.input, undefined);
+  const replay = await built.runs.enqueue({
+    sessionId: run.sessionId,
+    request: { ...run.request, approval: { requestId: "approval-replay", approved: true } },
+  });
+  assert.equal((await built.app.getRun(replay.run.id, run.request.actor.id))?.input, undefined);
+  for (const text of ["", "   "]) {
+    const opener = await built.runs.enqueue({
+      sessionId: run.sessionId,
+      request: { ...run.request, text, proactiveOpener: true },
+    });
+    assert.equal((await built.app.getRun(opener.run.id, run.request.actor.id))?.input, undefined);
+  }
+  const explicit = await built.runs.enqueue({
+    sessionId: run.sessionId,
+    request: { ...run.request, proactiveOpener: true },
+  });
+  assert.equal((await built.app.getRun(explicit.run.id, run.request.actor.id))?.input?.text, "pending input");
+});
+
+test("an addressed stop withdraws queued work before a worker can claim it", async () => {
+  const built = freshApp();
+  const first = await built.app.turn(mention("start the task", "C_STOP_QUEUED", "100.1"));
+  const stop = await built.app.turn(mention("stop", "C_STOP_QUEUED", "100.1"));
+  assert.equal(stop.runId, first.runId);
+  assert.equal(await built.runs.get(first.runId!), null);
+  assert.equal(await built.runs.claimById(first.runId!, "worker", 30_000), null);
 });
