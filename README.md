@@ -1,9 +1,11 @@
 # Moe’s QM fork
 
 I try to keep this fork up to date with [upstream](https://github.com/yc-software/qm).
-This [patched version](https://github.com/moeadham/qm/tree/upgrade/v0.1.14-staging) adds:
+The [patched version](https://github.com/moeadham/qm/tree/main) adds:
 
+- **Models:** refreshed Claude/Codex runtimes and model lists.
 - **Subscriptions:** Claude and Codex stay available together; crons, watches, and subagents use owner subscriptions.
+- **Speech:** streaming web dictation through AllModels, with microphone selection and live transcription.
 - **Email:** invitations use the configured SMTP or Resend transport.
 
 ---
