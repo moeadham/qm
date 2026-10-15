@@ -202,6 +202,7 @@ export interface ComposerOptions {
 
 export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {}): ComposerSurface {
   let submitting = false;
+  let speechSending = false;
   const loadoutKey = options.preferenceKey ? `web-ui:loadout:${options.preferenceKey}` : undefined;
   const refreshAccount = () => {
     loadoutRestored = false;
@@ -772,6 +773,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                   rows="1"
                   placeholder=${placeholder}
                   ?disabled=${inputBlocked}
+                  ?readonly=${speechSending}
                   .value=${live(speechDraft())}
                   @input=${(e: InputEvent) => onDraftInput(e, agent)}
                   @keydown=${(e: KeyboardEvent) => onComposerKeydown(e, agent)}
@@ -837,6 +839,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                 >
                   ${icon(Square, 18)}
                 </button>
+                ${sendControls(agent, true)}
               </div>`
             : nothing
         }
@@ -849,6 +852,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                 <button type="button" class="icon-btn" aria-label="Cancel dictation" @click=${() => speech.cancel()}>
                   ${icon(X, 18)}
                 </button>
+                ${sendControls(agent, true)}
               </div>`
             : nothing
         }
@@ -883,7 +887,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
                     aria-label="Dictate instruction"
                     aria-pressed="false"
                     ${tip(speechTooltip())}
-                    ?disabled=${inputBlocked || !speechEnabled()}
+                    ?disabled=${inputBlocked || speechSending || !speechEnabled()}
                     @click=${() => {
                       if (speech.state === "recording") speech.stop();
                       else if (speech.state === "starting") speech.cancel();
@@ -989,8 +993,8 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     });
   }
 
-  function sendControls(agent: Agent): TemplateResult {
-    if (!agent.state.isStreaming || ctx.chat.isStopping()) {
+  function sendControls(agent: Agent, dictating = false): TemplateResult {
+    if (dictating || !agent.state.isStreaming || ctx.chat.isStopping()) {
       return html`<button
         class="send-btn"
         type="submit"
@@ -1475,9 +1479,10 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   function composerCanSend(): boolean {
     if (!currentModelOption()) return false;
     return (
-      Boolean(composerState.draft.trim() || composerState.attachments.length) &&
+      Boolean(speechDraft().trim() || composerState.attachments.length || speech.state !== "idle") &&
       !composerState.processingFiles &&
-      speech.state === "idle" &&
+      speech.state !== "starting" &&
+      !speechSending &&
       !submitting &&
       getRuntimeConfig(scopeKey()) !== null &&
       ctx.chat.state.resolvingApprovals.size === 0 &&
@@ -1726,6 +1731,15 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   async function sendPrompt(agent: Agent): Promise<void> {
     if (!composerCanSend()) return;
+    if (speech.state !== "idle") {
+      const thread = ctx.chat.state.threadRef;
+      speechSending = true;
+      const completed = await speech.stop();
+      speechSending = false;
+      if (!disposed) ctx.chat.drawActiveChat();
+      if (!completed || disposed || agent !== ctx.chat.state.agent || thread !== ctx.chat.state.threadRef) return;
+      if (!composerCanSend()) return;
+    }
     if (composerState.pasteView) closePasteView(agent);
     if (agent.state.isStreaming) return queueDraft(agent);
     const text = composerState.draft.trim();

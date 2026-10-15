@@ -53,6 +53,8 @@ export class SpeechInput {
   private completed = new Set<string>();
   private previews = new Map<string, string>();
   private heardSpeech = false;
+  private stopResult?: Promise<boolean>;
+  private resolveStop?: (completed: boolean) => void;
 
   private readonly callbacks: SpeechCallbacks;
 
@@ -415,12 +417,20 @@ export class SpeechInput {
     }
     const heard = this.heardSpeech;
     this.diagnostic("finished");
+    const resolve = this.resolveStop;
+    this.resolveStop = undefined;
     this.cancel();
     if (!heard) this.callbacks.error("No speech was recognized. Check your microphone and try again.");
+    resolve?.(heard);
   }
 
-  stop(): void {
-    if (this.state !== "recording") return;
+  stop(): Promise<boolean> {
+    if (this.state === "transcribing") return this.stopResult ?? Promise.resolve(false);
+    if (this.state !== "recording") return Promise.resolve(false);
+    const result = new Promise<boolean>((resolve) => {
+      this.resolveStop = resolve;
+    });
+    this.stopResult = result;
     clearTimeout(this.timer);
     this.update("transcribing");
     clearInterval(this.captureTimer);
@@ -429,10 +439,14 @@ export class SpeechInput {
     this.stream = undefined;
     this.capture?.port.postMessage("stop");
     this.timer = setTimeout(() => this.finish(), 5000);
+    return result;
   }
 
   cancel(): void {
     if (this.state === "idle") return;
+    this.resolveStop?.(false);
+    this.resolveStop = undefined;
+    this.stopResult = undefined;
     ++this.version;
     ++this.deviceVersion;
     clearTimeout(this.timer);

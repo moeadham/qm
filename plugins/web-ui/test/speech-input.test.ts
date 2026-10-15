@@ -414,3 +414,39 @@ test("the microphone preference survives a new controller", async (t) => {
   await second.selectMicrophone("");
   assert.equal(values.has("qm.speech.microphone"), false);
 });
+
+test("stop waits for final text and returns one shared completion result", async (t) => {
+  const f = fixture(t);
+  await f.input.start();
+  Capture.latest.port.onmessage?.({ data: new Uint8Array([0xff, 0x7f]).buffer });
+  const result = f.input.stop();
+  assert.equal(f.input.stop(), result);
+  let resolved = false;
+  void result.then(() => {
+    resolved = true;
+  });
+  await tick();
+  assert.equal(resolved, false);
+  Socket.latest.receive({
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "final",
+    transcript: "Finalized instruction.",
+  });
+  Socket.latest.onclose?.();
+  assert.equal(await result, true);
+  assert.deepEqual(f.texts, ["Finalized instruction."]);
+  assert.equal(f.input.state, "idle");
+});
+
+test("cancel and provider errors abort pending transcription completion", async (t) => {
+  const f = fixture(t);
+  await f.input.start();
+  const cancelled = f.input.stop();
+  f.input.cancel();
+  assert.equal(await cancelled, false);
+  await f.input.start();
+  const failed = f.input.stop();
+  Socket.latest.receive({ type: "error", error: { message: "provider failed" } });
+  assert.equal(await failed, false);
+  assert.equal(await f.input.stop(), false);
+});

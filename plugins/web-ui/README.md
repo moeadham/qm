@@ -372,9 +372,10 @@ The standalone `::link-slack-account{}` directive offers personal Slack account 
 
 The microphone beside Send streams dictation directly from the browser to AllModels.
 Partial words appear in lighter grey as you speak and switch to the normal text
-color when finalized. Typing is locked while dictation starts, records and finishes;
-the finalized draft becomes editable when dictation ends. Stop finishes transcription.
-Instructions are never sent automatically.
+color when finalized. Typing is locked while dictation starts, records and finishes.
+Stop finalizes transcription and leaves the draft editable. Send remains available
+while recording: it stops capture, waits for the final transcript and submits it
+in one click. Cancel, errors or switching chats abort a pending send.
 Cancel discards unfinished speech; closing the composer, switching chats or hiding
 the tab closes the microphone and WebSocket. Sessions are limited to two minutes
 and 8 MiB of audio. Completed text remains in the draft.
