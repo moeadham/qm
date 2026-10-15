@@ -50,9 +50,31 @@ test("dictation locks typing and distinguishes partial words until finalization"
     const { render } = await vite.ssrLoadModule("lit");
     appState.me = { user: "tester", org: "test", speechEnabled: true };
     const { SpeechInput } = await vite.ssrLoadModule("/src/speech.ts");
-    let active!: { state: () => string; preview: (text: string) => void; text: (text: string) => void };
+    let active!: {
+      state: () => string;
+      preview: (text: string) => void;
+      text: (text: string) => void;
+      finish: (success?: boolean) => void;
+    };
+    let finishStop: ((success: boolean) => void) | undefined;
+    SpeechInput.prototype.stop = function (this: any) {
+      this.state = "transcribing";
+      this.callbacks.state("transcribing");
+      return new Promise<boolean>((resolve) => {
+        finishStop = resolve;
+      });
+    };
     SpeechInput.prototype.start = function (this: any) {
-      active = { state: () => this.state, preview: this.callbacks.preview, text: this.callbacks.text };
+      active = {
+        state: () => this.state,
+        preview: this.callbacks.preview,
+        text: this.callbacks.text,
+        finish: (success = true) => {
+          this.state = "idle";
+          this.callbacks.state("idle");
+          finishStop?.(success);
+        },
+      };
       this.state = "recording";
       this.callbacks.state("recording");
       this.callbacks.preview("streaming words");
@@ -112,7 +134,12 @@ test("dictation locks typing and distinguishes partial words until finalization"
       },
     } as unknown as ConvCtx;
     window.localStorage.setItem("qm.speech.microphone", "remembered-mic");
-    composer = createComposerSurface(ctx);
+    const sent: string[] = [];
+    composer = createComposerSurface(ctx, {
+      prepareSubmit: () => async (text: string) => {
+        sent.push(text);
+      },
+    });
     ctx.composer = composer!;
     const button = (selector: string): HTMLButtonElement => host.querySelector<HTMLButtonElement>(selector)!;
     const type = (value: string): void => {
@@ -130,6 +157,8 @@ test("dictation locks typing and distinguishes partial words until finalization"
     assert.ok(host.querySelector("canvas.speech-recording-waveform"));
     assert.ok(host.querySelector("[aria-label='Cancel dictation']"));
     assert.ok(host.querySelector("[aria-label='Stop recording']"));
+    assert.equal(button(".send-btn").disabled, false);
+    assert.equal(button(".send-btn").getAttribute("aria-label"), "Send");
     assert.equal(host.querySelector(".composer-left"), null);
     assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.readOnly, true);
     assert.equal(host.querySelector(".speech-partial")!.textContent, "streaming words");
@@ -185,6 +214,48 @@ test("dictation locks typing and distinguishes partial words until finalization"
     assert.equal(host.querySelector("canvas.speech-recording-waveform"), null);
     assert.ok(host.querySelector(".composer-left"));
     assert.equal(host.querySelector("select[aria-label=Microphone]"), null);
+    agentState.isStreaming = false;
+    composer!.state.draft = "Existing draft";
+    draw();
+    button(".composer-mic").click();
+    button("[aria-label='Stop recording']").click();
+    assert.equal(active.state(), "transcribing");
+    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.readOnly, true);
+    active.preview("");
+    active.text("Final words.");
+    active.finish();
+    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.readOnly, false);
+    assert.deepEqual(sent, []);
+    type("Edited before sending");
+    await composer!.submit();
+    assert.deepEqual(sent, ["Edited before sending"]);
+
+    button(".composer-mic").click();
+    button(".send-btn").click();
+    assert.equal(active.state(), "transcribing");
+    assert.equal(button(".send-btn").disabled, true);
+    assert.deepEqual(sent, ["Edited before sending"]);
+    await composer!.submit();
+    active.preview("");
+    active.text("Final one-click instruction.");
+    active.finish();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent, ["Edited before sending", "Final one-click instruction."]);
+    assert.equal(composer!.state.draft, "");
+
+    button(".composer-mic").click();
+    button(".send-btn").click();
+    active.finish(false);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 2);
+    assert.equal(host.querySelector<HTMLTextAreaElement>("textarea")!.readOnly, false);
+
+    button(".composer-mic").click();
+    button(".send-btn").click();
+    ctx.chat.state.threadRef = "web:tester:different-thread";
+    active.finish();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 2);
   } finally {
     composer?.dispose();
     await vite.close();
