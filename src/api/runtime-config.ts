@@ -264,13 +264,17 @@ export async function availableRuntimeError(
   const choices = actorId
     ? await userRuntimeConfigBody(ctx, scope, actorId, purpose, choice)
     : await runtimeConfigBody(ctx, scope, undefined, purpose, choice);
+  const availableModel = choices.modelsByHarness[choice.harnessId]?.includes(choice.modelId)
+    ? choice.modelId
+    : codexSubscriptionModelId(choice.modelId);
   if (
-    !choices.modelsByHarness[choice.harnessId]?.includes(choice.modelId) ||
+    !choices.modelsByHarness[choice.harnessId]?.includes(availableModel) ||
     !(await webuiModelEnabled(ctx, choice.modelId, purpose))
   )
     return "runtime is no longer available or enabled on this deployment";
   return validateRuntimeChoice({
     ...choice,
+    modelId: availableModel,
     effortLevel: choice.effortLevel === "adaptive" || choice.effortLevel === "default" ? choice.effortLevel : undefined,
   });
 }

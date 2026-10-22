@@ -8,16 +8,16 @@ import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { runTrigger } from "../src/triggers/run-trigger.ts";
 import { testConfig } from "./support/test-config.ts";
 
-const codex = await import("../src/harness/codex-harness.ts");
+const pi = await import("../src/harness/pi-harness.ts");
 const seen: HarnessTurnInput[] = [];
-mock.module("../src/harness/codex-harness.ts", {
+mock.module("../src/harness/pi-harness.ts", {
   namedExports: {
-    ...codex,
-    createCodexHarness: () => {
+    ...pi,
+    createPiHarness: () => {
       const harness = createMockHarness();
       return {
         ...harness,
-        id: "codex",
+        id: "pi",
         turns: {
           ...harness.turns,
           runTurn: async (turn: HarnessTurnInput) => {
@@ -52,11 +52,11 @@ mock.module("../src/harness/claude-harness.ts", {
 });
 const { buildApp } = await import("../src/wiring.ts");
 
-test("web Astra selection reaches Codex with personal OAuth through app and orchestrator", async () => {
+test("web Astra selection reaches Pi with personal OAuth through app and orchestrator", async () => {
   const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
   try {
     built.config.setIndividualModelAuth(true);
-    built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+    built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
     await built.config.flushScope("org:default-org");
     await built.config.setRuntimeSelectionLatest("org:default-org", {
       harnessId: "claude",
@@ -74,15 +74,15 @@ test("web Astra selection reaches Codex with personal OAuth through app and orch
       actor: { externalId: "internal:alice" },
       conversation: { kind: "dm" as const, threadRef: "subscription-astra-test" },
       text: "Test the selected model",
-      harness: "codex",
-      model: "gpt-6-astra",
+      harness: "pi",
+      model: "codex/gpt-6-astra",
       skipMemory: true,
     };
     const result = await built.app.turn(request);
     assert.equal(result.status, "ok", JSON.stringify(result));
     assert.equal(seen.length, 1);
-    assert.equal(seen[0]?.runtime?.modelId, "gpt-6-astra");
-    assert.equal(seen[0]?.codexAuth?.accountId, "test-account");
+    assert.equal(seen[0]?.runtime?.modelId, "codex/gpt-6-astra");
+    assert.deepEqual(seen[0]?.providerKeys, { "openai-codex": "test-access" });
     await built.userModelCredentials.delete("internal:alice", "openai");
     assert.equal(
       (await built.app.turn({ ...request, conversation: { ...request.conversation, threadRef: "disconnected-test" } }))
@@ -96,20 +96,20 @@ test("web Astra selection reaches Codex with personal OAuth through app and orch
 });
 
 for (const connected of [true, false]) {
-  test(`owner-authenticated automation ${connected ? "uses the scoped Codex subscription" : "fails closed without the owner's connection"}`, async () => {
+  test(`owner-authenticated automation ${connected ? "uses the scoped ChatGPT subscription" : "fails closed without the owner's connection"}`, async () => {
     const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
     const start = seen.length;
     try {
       await built.config.setPersonalModelAuth("internal:alice", true, "openai");
-      built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+      built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
       await built.config.flushScope("org:default-org");
       await built.config.setRuntimeSelectionLatest("org:default-org", {
         harnessId: "claude",
         modelId: "claude-sonnet-5",
       });
       await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
-        harnessId: "codex",
-        modelId: "gpt-5.6-sol",
+        harnessId: "pi",
+        modelId: "codex/gpt-5.6-sol",
       });
       await built.userModelCredentials.setOAuth(connected ? "internal:alice" : "internal:bob", "openai", {
         accessToken: "test-access",
@@ -130,8 +130,8 @@ for (const connected of [true, false]) {
         const result = await pending;
         assert.equal(result.status, "ok", JSON.stringify(result));
         assert.equal(seen.length, start + 1);
-        assert.equal(seen[start]?.runtime?.modelId, "gpt-5.6-sol");
-        assert.equal(seen[start]?.codexAuth?.accountId, "owner-account");
+        assert.equal(seen[start]?.runtime?.modelId, "codex/gpt-5.6-sol");
+        assert.deepEqual(seen[start]?.providerKeys, { "openai-codex": "test-access" });
         assert.equal(seen[start]?.runtimeActorId, "internal:alice");
       } else {
         await assert.rejects(pending, /owner to connect/);
@@ -144,12 +144,12 @@ for (const connected of [true, false]) {
 }
 
 for (const connected of [true, false]) {
-  test(`delegated Codex override ${connected ? "uses owner OAuth over the Claude scope default" : "fails closed after disconnect"}`, async () => {
+  test(`delegated ChatGPT override ${connected ? "uses owner OAuth over the Claude scope default" : "fails closed after disconnect"}`, async () => {
     const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
     const start = seen.length;
     try {
       await built.config.setPersonalModelAuth("internal:alice", true);
-      built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+      built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
       await built.config.flushScope("org:default-org");
       await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
         harnessId: "claude",
@@ -170,15 +170,15 @@ for (const connected of [true, false]) {
         conversation: { kind: "dm", threadRef: `delegated-override-${connected}` },
         text: "Review this change",
         skipMemory: true,
-        harness: "codex",
-        model: "gpt-6-astra",
+        harness: "pi",
+        model: "codex/gpt-6-astra",
       });
       if (connected) {
         const result = await pending;
         assert.equal(result.status, "ok", JSON.stringify(result));
         assert.equal(seen.length, start + 1);
-        assert.equal(seen[start]?.runtime?.modelId, "gpt-6-astra");
-        assert.equal(seen[start]?.codexAuth?.accountId, "owner-account");
+        assert.equal(seen[start]?.runtime?.modelId, "codex/gpt-6-astra");
+        assert.deepEqual(seen[start]?.providerKeys, { "openai-codex": "test-access" });
       } else {
         assert.equal((await pending).status, "refused");
         assert.equal(seen.length, start);
@@ -195,7 +195,7 @@ for (const account of ["personal", "company", "disconnected"] as const) {
     const start = seen.length;
     try {
       await built.config.setPersonalModelAuth("internal:alice", account !== "company");
-      built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+      built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
       await built.config.flushScope("org:default-org");
       await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
         harnessId: "claude",
@@ -226,8 +226,8 @@ for (const account of ["personal", "company", "disconnected"] as const) {
           origin: { kind: "automation", useOwnerModelAuth: true },
           text: "Review",
           skipMemory: true,
-          harness: "codex",
-          model: "gpt-6-astra",
+          harness: "pi",
+          model: account === "company" ? "gpt-6-astra" : "codex/gpt-6-astra",
         },
       });
       if (account === "disconnected") await built.userModelCredentials.delete(actor.id, "openai");
@@ -245,8 +245,11 @@ for (const account of ["personal", "company", "disconnected"] as const) {
       assert.equal(latest?.status, "done", JSON.stringify(latest?.result));
       assert.equal(latest?.result?.status, "ok", JSON.stringify(latest?.result));
       assert.equal(seen.length, start + 1);
-      assert.equal(seen[start]?.runtime?.modelId, "gpt-6-astra");
-      assert.equal(seen[start]?.codexAuth?.accountId, account === "personal" ? "owner-account" : undefined);
+      assert.equal(seen[start]?.runtime?.modelId, account === "company" ? "gpt-6-astra" : "codex/gpt-6-astra");
+      assert.deepEqual(
+        seen[start]?.providerKeys,
+        account === "personal" ? { "openai-codex": "test-access" } : undefined,
+      );
     } finally {
       await built.runtime.stop();
     }
@@ -254,16 +257,16 @@ for (const account of ["personal", "company", "disconnected"] as const) {
 }
 
 for (const connected of [true, false]) {
-  test(`background-command watch ${connected ? "uses the owner's Codex subscription" : "fails closed without borrowing another account"}`, async () => {
+  test(`background-command watch ${connected ? "uses the owner's ChatGPT subscription" : "fails closed without borrowing another account"}`, async () => {
     const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
     const start = seen.length;
     try {
       await built.config.setPersonalModelAuth("internal:alice", true);
-      built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+      built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
       await built.config.flushScope("org:default-org");
       await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
-        harnessId: "codex",
-        modelId: "gpt-5.6-sol",
+        harnessId: "pi",
+        modelId: "codex/gpt-5.6-sol",
       });
       await built.userModelCredentials.setOAuth(connected ? "internal:alice" : "internal:bob", "openai", {
         accessToken: "test-access",
@@ -292,7 +295,7 @@ for (const connected of [true, false]) {
         const outcome = await pending;
         assert.equal(outcome.status, "ok", JSON.stringify(outcome));
         assert.equal(seen.length, start + 1);
-        assert.equal(seen[start]?.codexAuth?.accountId, "watch-owner-account");
+        assert.deepEqual(seen[start]?.providerKeys, { "openai-codex": "test-access" });
       } else {
         await assert.rejects(pending, /owner to connect an AI account/);
         assert.equal(seen.length, start);
@@ -308,13 +311,13 @@ test("cron model defaults resolve with the owner's subscription before credentia
   const start = seen.length;
   try {
     await built.config.setPersonalModelAuth("internal:alice", true);
-    built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+    built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
     await built.config.flushScope("org:default-org");
     await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
       harnessId: "claude",
       modelId: "claude-opus-5-5",
     });
-    await built.config.setPurposeRuntime("cron", { harnessId: "codex", modelId: "gpt-6-sol", effortLevel: "auto" });
+    await built.config.setPurposeRuntime("cron", { harnessId: "pi", modelId: "codex/gpt-6-sol", effortLevel: "auto" });
     await built.userModelCredentials.setOAuth("internal:alice", "openai", {
       accessToken: "test-access",
       idToken: "test-id",
@@ -332,17 +335,17 @@ test("cron model defaults resolve with the owner's subscription before credentia
     });
     assert.equal(result.status, "ok", JSON.stringify(result));
     assert.equal(seen.length, start + 1);
-    assert.equal(seen[start]?.runtime?.modelId, "gpt-6-sol");
-    assert.equal(seen[start]?.codexAuth?.accountId, "cron-owner");
+    assert.equal(seen[start]?.runtime?.modelId, "codex/gpt-6-sol");
+    assert.deepEqual(seen[start]?.providerKeys, { "openai-codex": "test-access" });
   } finally {
     await built.runtime.stop();
   }
 });
 
-test("creating and editing an explicit Codex cron validates the owner's subscription", async () => {
+test("creating and editing an explicit ChatGPT cron validates the owner's subscription", async () => {
   const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
   try {
-    built.config.setApprovedHarnesses(["mock", "codex", "claude"]);
+    built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
     await built.config.flushScope("org:default-org");
     await built.config.setPersonalModelAuth("internal:alice", true);
     await built.userModelCredentials.setOAuth("internal:alice", "openai", {
@@ -357,11 +360,11 @@ test("creating and editing an explicit Codex cron validates the owner's subscrip
       ownerScopeId: "personal:internal:alice" as const,
       schedule: { everyMs: 3600000 },
       action: "Inspect the fixture",
-      runtime: { harnessId: "codex" as const, modelId: "gpt-6-sol" },
+      runtime: { harnessId: "pi" as const, modelId: "codex/gpt-6-sol" },
     };
     const cron = await built.app.createCron(input);
-    assert.equal(cron.runtime?.modelId, "gpt-6-sol");
-    await built.app.updateCron(cron.id, { runtime: { harnessId: "codex", modelId: "gpt-6-astra" } });
+    assert.equal(cron.runtime?.modelId, "codex/gpt-6-sol");
+    await built.app.updateCron(cron.id, { runtime: { harnessId: "pi", modelId: "codex/gpt-6-astra" } });
     await built.userModelCredentials.delete("internal:alice", "openai");
     await assert.rejects(
       built.app.createCron({ ...input, action: "Disconnected check" }),
@@ -375,12 +378,12 @@ test("creating and editing an explicit Codex cron validates the owner's subscrip
 test("a Claude cron in a Codex project never refreshes the unrelated OpenAI login", async () => {
   const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
   try {
-    built.config.setApprovedHarnesses(["mock", "claude", "codex"]);
+    built.config.setApprovedHarnesses(["mock", "claude", "pi"]);
     await built.config.flushScope("org:default-org");
     await built.config.setPersonalModelAuth("internal:alice", true);
     await built.config.setRuntimeSelectionLatest("personal:internal:alice", {
-      harnessId: "codex",
-      modelId: "gpt-5.6-sol",
+      harnessId: "pi",
+      modelId: "codex/gpt-5.6-sol",
     });
     await built.userModelCredentials.setOAuth("internal:alice", "openai", {
       accessToken: "expired-openai",

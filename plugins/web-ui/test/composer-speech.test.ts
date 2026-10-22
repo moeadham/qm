@@ -124,6 +124,7 @@ test("dictation locks typing and distinguishes partial words until finalization"
         activePendingApprovals: () => [],
         hasUnresolvedApproval: () => false,
         isStopping: () => stopping,
+        turnRuntime: () => null,
         drawActiveChat: draw,
         stopLiveRun: async () => {
           stopping = true;

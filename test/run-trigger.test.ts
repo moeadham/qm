@@ -230,8 +230,8 @@ describe("runTrigger: an autonomous cron does NOT go live (it may be conditional
     assert.equal(requests[1]?.unattendedGrants, undefined);
     assert.equal(requests[2]?.unattendedGrants, undefined);
     assert.deepEqual(requests[0]?.origin, { kind: "automation", useOwnerModelAuth: true });
-    assert.equal(requests[1]?.origin, undefined);
-    assert.deepEqual(requests[2]?.origin, { kind: "automation", useOwnerModelAuth: true });
+    assert.deepEqual(requests[1]?.origin, { kind: "automation", useOwnerModelAuth: true });
+    assert.equal(requests[2]?.origin, undefined);
   });
 
   it("a failed fire's error notice carries friendly copy while the fire history keeps the raw reason", async () => {

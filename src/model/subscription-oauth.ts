@@ -1,4 +1,3 @@
-import { jwtExpiryMs } from "../util/jwt.ts";
 import { codeChallengeS256, generateCodeVerifier } from "../connectors/oauth.ts";
 import { chatgptAccountIdFromToken, tokenExpiry } from "./chatgpt-auth-file.ts";
 import type { UserOAuthTokens } from "./user-model-credential-store.ts";

@@ -3096,6 +3096,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           humanInput &&
           (await deps.config?.getInteractiveFastModeDurable());
         const effectiveFastMode = resolveTurnFastMode(input.fastMode, humanInput, wantsOrgFastMode === true);
+        const ownerModelAuth = input.origin.kind === "automation" && input.origin.useOwnerModelAuth === true;
         const loadRuntimeAuth = async (runtime: Partial<RuntimeChoice>) => {
           let userProviderKeys: ProviderKeys | undefined;
           let userModelOverride: string | undefined;
@@ -3105,7 +3106,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           const account = external
             ? "company"
             : (input.modelAccount ?? (await deps.config?.getModelAccountDurable(actor.id)) ?? "company");
-          if (userCredStore && humanInput && account !== "company") {
+          if (userCredStore && (humanInput || ownerModelAuth) && account !== "company") {
             const [anthCred, oaiCred] = await Promise.all([
               account === "openai" ? null : userCredStore.get(actor.id, "anthropic"),
               account === "anthropic" ? null : userCredStore.get(actor.id, "openai"),

@@ -1,4 +1,6 @@
 import { escapeHtml } from "../../plugins/chassis/src/http.ts";
+import { mailerFor, type Mailer } from "../../plugins/chassis/src/email.ts";
+import type { EmailConfig } from "../../plugins/chassis/src/email-config.ts";
 
 export type InviteMailer = Pick<Mailer, "send">;
 

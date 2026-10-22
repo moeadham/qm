@@ -1,4 +1,3 @@
-import { codexProviderModelId, resolveModel } from "./pi-models.ts";
 import { resolveIndividualAuthRouting } from "../core/individual-auth-routing.ts";
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import type { UserModelCredentialStore } from "./user-model-credential-store.ts";

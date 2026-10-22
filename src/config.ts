@@ -29,6 +29,7 @@ import { parseMemoryProviderConfig, type MemoryProviderConfig } from "./memory/p
 import { sanitizeBranding } from "./resolution/branding.ts";
 import type { OrgBranding } from "./resolution/config-store.ts";
 import { validateCoreSecretEnv } from "./deployment/secret-schema.ts";
+import { readEmailConfig, type EmailConfig } from "../plugins/chassis/src/email-config.ts";
 import { DEFAULT_CAPTURE_QUIET_MS } from "./memory/strategies/per-turn.ts";
 import {
   parseSecurityPosture,

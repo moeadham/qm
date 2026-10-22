@@ -641,6 +641,7 @@ export type TurnOrigin =
       screenData?: string;
       destination?: Destination;
       useOwnerKeychain?: boolean;
+      useOwnerModelAuth?: boolean;
     }
   | { kind: "direct" };
 

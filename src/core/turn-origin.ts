@@ -32,6 +32,7 @@ export function resolveTurnOrigin(input: Partial<LegacyTurnOrigin> & { origin?: 
       ...(screenData !== undefined ? { screenData } : {}),
       ...((typed.destination ?? legacy.destination) ? { destination: typed.destination ?? legacy.destination! } : {}),
       ...(typed.useOwnerKeychain || legacy.useOwnerKeychain ? { useOwnerKeychain: true } : {}),
+      ...(typed.useOwnerModelAuth ? { useOwnerModelAuth: true } : {}),
     };
   }
   if (typed.kind === "human" && legacy.kind === "human") {
@@ -112,7 +113,8 @@ export function isSessionTurn(input: Pick<TurnRequest, "sessionSenderId" | "dele
 }
 
 export function sessionTurnOrigin(origin: TurnOrigin | undefined, text: string): TurnOrigin {
-  if (!origin || origin.kind === "automation") return { ...origin, kind: "automation", screenData: text };
+  if (!origin || origin.kind === "automation")
+    return { ...origin, kind: "automation", screenData: text, useOwnerModelAuth: true };
   if (origin.kind === "human") return { kind: "human" };
   if (origin.kind === "ambient") return { kind: "ambient", ...(origin.live ? { live: true } : {}) };
   return origin;

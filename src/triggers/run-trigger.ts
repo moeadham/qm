@@ -327,6 +327,9 @@ export async function runTrigger(deps: TriggerDeps, spec: TriggerSpec): Promise<
         text: typeof spec.input === "string" ? spec.input : spec.input(roster),
         ...(spec.securityScreenData !== undefined ? { securityScreenData: spec.securityScreenData } : {}),
         triggered: true,
+        ...((spec.surface === "cron" || spec.surface === "monitor") && !runsAsScope
+          ? { origin: { kind: "automation" as const, useOwnerModelAuth: true } }
+          : {}),
         ...(ownerKind === "personal" && spec.unattendedGrants ? { unattendedGrants: spec.unattendedGrants } : {}),
         ...(spec.runtime ? { model: spec.runtime.modelId, harness: spec.runtime.harnessId } : {}),
         ...turnModelOptions({

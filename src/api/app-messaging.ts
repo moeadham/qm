@@ -1,6 +1,6 @@
 import type { ScopeId } from "../types.ts";
 import { orgId as orgIdOf } from "../config.ts";
-import { parseScopeId, scopeId } from "../types.ts";
+import { actsAsScope, parseScopeId, scopeId } from "../types.ts";
 import { personKey, personKeys, samePersonInDirectory, samePersonMatcher } from "../directory/person.ts";
 import type { Destination, SurfaceContextRequest, SurfaceContextResult } from "../types.ts";
 import { reportFailureAs } from "../util/errors.ts";
@@ -158,7 +158,7 @@ export function createMessagingMethods(
   };
 
   const validateRuntime = async (
-    cron: Pick<Cron, "runtime" | "ownerScopeId" | "loopId" | "action" | "message" | "owner" | "runAs">,
+    cron: Pick<Cron, "runtime" | "ownerScopeId" | "loopId" | "action" | "message" | "owner">,
   ) => {
     assertCronRuntime(cron);
     if (!cron.runtime) return;
@@ -169,7 +169,7 @@ export function createMessagingMethods(
         cron.ownerScopeId,
         cron.runtime,
         "cron",
-        cron.runAs === "scopeShared" ? undefined : cron.owner,
+        actsAsScope(cron.owner, cron.ownerScopeId) ? undefined : cron.owner,
       ));
     if (error) throw new Error(error);
   };

@@ -868,10 +868,9 @@ export function createKeychain(deps: {
       if (refreshable && current.expiresAt !== undefined && t >= current.expiresAt - oauthRefreshMargin) {
         return refreshAndStore(refreshable, current.ownerId, current.refresh?.accountType, current);
       }
-      return pending;
-    }
-    if (oauthExpired(rec, t, oauthSkew) && !refreshable) return null;
-    return tryDecrypt(rec, (r) => decryptSecret(r.secretEnc, deps.key));
+      if (oauthExpired(current, t, oauthSkew) && !refreshable) return null;
+      return tryDecrypt(current, (r) => decryptSecret(r.secretEnc, deps.key));
+    });
   }
 
   async function saveCredential(input: SaveCredentialInput): Promise<KeychainCredentialMeta> {

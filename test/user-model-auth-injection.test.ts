@@ -200,7 +200,7 @@ test("individual OAuth routing preserves exact supported runtime selections", ()
 });
 
 test("routing: Astra uses the connected Codex subscription and cannot fall back to another provider", () => {
-  const result = resolveIndividualAuthRouting(null, oauth("openai"), "gpt-6-astra", "codex");
-  assert.deepEqual(result, { kind: "oauth", provider: "openai", harness: "codex", model: "gpt-6-astra" });
-  assert.equal(resolveIndividualAuthRouting(oauth("anthropic"), null, "gpt-6-astra", "codex"), null);
+  const result = resolveIndividualAuthRouting(null, oauth("openai"), "gpt-6-astra");
+  assert.deepEqual(result, { kind: "oauth", provider: "openai", harness: "pi", model: "codex/gpt-6-astra" });
+  assert.equal(resolveIndividualAuthRouting(oauth("anthropic"), null, "gpt-6-astra"), null);
 });
