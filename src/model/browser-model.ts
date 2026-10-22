@@ -21,8 +21,6 @@ export async function resolveBrowserModel(input: {
     account === "openai" ? null : input.credentials?.get(input.actorId, "anthropic"),
     account === "anthropic" ? null : input.credentials?.get(input.actorId, "openai"),
   ]);
-  const requestedProvider = requested ? resolveModel(codexProviderModelId(requested))?.provider : undefined;
-  const personalModel = account === "personal" || requestedProvider === account ? requested : undefined;
-  const routing = resolveIndividualAuthRouting(anthropic ?? null, openai ?? null, personalModel, "pi");
+  const routing = resolveIndividualAuthRouting(anthropic ?? null, openai ?? null, requested);
   return { account, model: routing?.model, routing };
 }

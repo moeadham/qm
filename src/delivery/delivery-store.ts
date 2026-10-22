@@ -50,6 +50,7 @@ export interface DeliveryStore {
   ackByKey(idempotencyKey: string, at: number): Promise<void>;
   setEditRefByKey(idempotencyKey: string, editRef: string): Promise<void>;
   get(id: string): Promise<Delivery | null>;
+  existingKeys(idempotencyKeys: string[]): Promise<Set<string>>;
   recordRecipientThread(id: string, recipientThreadRef: string, at: number): Promise<void>;
   listByRecipientThread(recipientThreadRef: string, opts?: { limit?: number }): Promise<Delivery[]>;
   listBySourceSession(sourceSessionId: string, sourceThreadRef: string, opts?: { limit?: number }): Promise<Delivery[]>;
@@ -67,7 +68,13 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
 
   const expireOveraged = (now: number): void => {
     for (const d of deliveries.values()) {
-      if (d.deliveredAt !== null || d.shadow || d.expiredAt !== undefined) continue;
+      if (
+        d.deliveredAt !== null ||
+        d.shadow ||
+        d.expiredAt !== undefined ||
+        d.destination.webTranscript?.kind === "slack_reply"
+      )
+        continue;
       if ((claimedUntil.get(d.id) ?? 0) > now) continue;
       if (now - d.createdAt < maxAgeMs) continue;
       d.expiredAt = now;
@@ -175,6 +182,9 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
     },
     async get(id) {
       return deliveries.get(id) ?? null;
+    },
+    async existingKeys(idempotencyKeys) {
+      return new Set(idempotencyKeys.filter((key) => byKey.has(key)));
     },
     async recordRecipientThread(id, recipientThreadRef, at) {
       const d = deliveries.get(id);

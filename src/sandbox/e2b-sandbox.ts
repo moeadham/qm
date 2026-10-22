@@ -4,8 +4,8 @@ import type { WorkspaceLayer } from "../types.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import { createMemoryMap } from "../persistence/durable-map.ts";
+import { createNoopAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createKeyedQueue } from "../util/async.ts";
-import { collectBlob } from "../persistence/blob-transfer.ts";
 import { swallowAs, errMessage } from "../util/errors.ts";
 import { shq } from "../util/shell.ts";
 import { nonInteractiveShellPrefix, DROPPED_PROXY_ENV, forceThroughProxyEnv } from "./sandbox-env.ts";
@@ -34,6 +34,7 @@ import {
   type E2bClient,
   type E2bSandboxInfo,
   type E2bSession,
+  runE2bScript,
 } from "./e2b-client.ts";
 import {
   createHomeSnapshotOps,
@@ -58,7 +59,6 @@ const WORKSPACE_BASENAME = "workspace";
 const RO_LAYERS_TAR = ".ro-layers.tar";
 const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const HOME_TAR = `${HOME_DIR}/.qm-home.tar`;
-const IN_MEMORY_ADOPT_MAX_BYTES = 256 * 1024 * 1024;
 
 const SNAPSHOT_PRUNE = HOME_SNAPSHOT_PRUNE;
 const DEFAULT_KEEP_WARM_SEC = 3600;
@@ -76,7 +76,10 @@ export interface StoredE2bSandbox {
   homeDirty?: boolean;
 }
 
+export const E2B_TEMPLATE_TOOLS = ["wget", "unzip", "gh", "aws", "x-api"];
+
 export interface E2bSandboxOptions extends BlobStagingOptions {
+  advisoryLock?: AdvisoryLock;
   client: E2bClient;
   namePrefix?: string;
   defaultTimeoutSec?: number;
@@ -108,7 +111,10 @@ export function createE2bSandbox(workspace: WorkspaceStore, opts: E2bSandboxOpti
   const workspaceDir = `${HOME_DIR}/${WORKSPACE_BASENAME}`;
   const store = opts.store ?? createMemoryMap<StoredE2bSandbox>();
   const snapshots = opts.snapshots ?? createMemorySnapshotStore();
-  const provisionQueue = createKeyedQueue<string>();
+  const localQueue = createKeyedQueue<string>();
+  const advisoryLock = opts.advisoryLock ?? createNoopAdvisoryLock();
+  const provisionQueue = <T>(scope: string, action: () => Promise<T>): Promise<T> =>
+    localQueue(scope, () => advisoryLock.withLock(`e2b-provision:${scope}`, action));
 
   const sessionByName = new Map<string, E2bSession>();
   const scopeByName = new Map<string, string>();
@@ -291,12 +297,7 @@ export function createE2bSandbox(workspace: WorkspaceStore, opts: E2bSandboxOpti
   }
 
   async function execRaw(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
-    return withSession(name, async (session) => {
-      const r = await session.runCommand(`timeout ${timeoutSec} sh -c ${shq(script)}`, {
-        timeoutMs: timeoutSec * 1000 + 30_000,
-      });
-      return { stdout: r.stdout, stderr: r.stderr, code: r.exitCode, timedOut: r.exitCode === 124 };
-    });
+    return withSession(name, (session) => runE2bScript(session, script, timeoutSec));
   }
 
   const profile: AgentComputerProfile = {
@@ -466,7 +467,7 @@ export function createE2bSandbox(workspace: WorkspaceStore, opts: E2bSandboxOpti
 
         return handle;
       } catch (err) {
-        await cleanupFailedProvision(sandbox, handle);
+        await cleanupFailedProvision(sandbox, handle, err);
         throw err;
       }
     },
@@ -508,38 +509,6 @@ export function createE2bSandbox(workspace: WorkspaceStore, opts: E2bSandboxOpti
     },
 
     exportFiles: execExport.exportFiles,
-
-    async adoptHomeSnapshot(scopeId: string, blobId: string): Promise<void> {
-      const blobTransfer = opts.blobTransfer;
-      if (!blobTransfer) throw new Error("e2b adoptHomeSnapshot: no blob transfer store wired");
-      const ref = blobTransfer.s3Ref?.(blobId);
-      if (ref && snapshots.adoptFromS3) {
-        await snapshots.adoptFromS3(scopeId, ref);
-      } else {
-        const blob = await blobTransfer.open(blobId);
-        if (!blob) throw new Error(`e2b adoptHomeSnapshot: blob ${blobId} not found`);
-        if (blob.sizeBytes > IN_MEMORY_ADOPT_MAX_BYTES) {
-          blob.stream.destroy();
-          throw new Error(
-            `e2b adoptHomeSnapshot: blob is ${blob.sizeBytes} bytes; adopting over ${IN_MEMORY_ADOPT_MAX_BYTES} needs S3-backed blob and snapshot stores`,
-          );
-        }
-        await snapshots.put(scopeId, await collectBlob(blob.stream));
-      }
-      const name = sandboxScopeName(prefix, scopeId);
-      return provisionQueue(scopeId, async () => {
-        const session = sessionByName.get(name);
-        sessionByName.delete(name);
-        const stored = await store.get(scopeId);
-        const killGone = (e: unknown): void => {
-          if (!(e instanceof E2bSandboxGoneError)) throw e;
-        };
-        if (session) await session.kill().catch(killGone);
-        else if (stored) await client.kill(stored.sandboxId).catch(killGone);
-        await store.delete(scopeId);
-        await forgetSnapshot(stored?.recoverySnapshotId);
-      });
-    },
 
     async persistHomeSnapshot(scopeId: string): Promise<void> {
       const name = sandboxScopeName(prefix, scopeId);

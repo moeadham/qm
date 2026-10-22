@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
 import type { Agent } from "@earendil-works/pi-agent-core";
 import { JSDOM } from "jsdom";
 import { createServer } from "vite";
@@ -98,6 +97,7 @@ test("stopping returns Send immediately and queues every submit path without int
         },
         activePendingApprovals: () => [],
         hasUnresolvedApproval: () => false,
+        turnRuntime: () => null,
         isStopping: () => stopping,
         drawActiveChat: draw,
         stopLiveRun: async () => {
@@ -184,6 +184,24 @@ test("stopping returns Send immediately and queues every submit path without int
     host.querySelector("form")!.dispatchEvent(new dom.window.Event("submit", { cancelable: true }));
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.deepEqual(requests, Array(5).fill("/api/turn"), "normal queue submission still works");
+    await t.test("annotations become native attachments without changing the draft or sending", async () => {
+      composer!.state.draft = "Keep my typed message";
+      composer!.state.attachments = [];
+      const sent = requests.length;
+      assert.equal(await composer!.addAnnotations("Button context", [], "button-one"), true);
+      assert.equal(composer!.state.draft, "Keep my typed message");
+      assert.equal(composer!.state.attachments.length, 1);
+      assert.equal(composer!.state.attachments[0]!.extractedText, "Button context");
+      const id = composer!.state.attachments[0]!.id;
+      assert.equal(await composer!.addAnnotations("Updated context", [], "button-one"), true);
+      assert.equal(composer!.state.attachments.length, 1);
+      assert.equal(composer!.state.attachments[0]!.id, id);
+      assert.equal(composer!.state.attachments[0]!.extractedText, "Updated context");
+      assert.equal(requests.length, sent);
+      assert.equal(await composer!.addAnnotations("", [], "button-one", true), true);
+      assert.equal(composer!.state.attachments.length, 0);
+      assert.equal(composer!.state.draft, "Keep my typed message");
+    });
     composer!.state.draft = "Preparing attachment";
     composer!.state.processingFiles = true;
     draw();
@@ -197,9 +215,4 @@ test("stopping returns Send immediately and queues every submit path without int
       else delete (globalThis as Record<string, unknown>)[key];
     }
   }
-});
-
-test("disabled Stop shares Send's muted styling", () => {
-  const css = readFileSync(new URL("../src/shell.css", import.meta.url), "utf8");
-  assert.match(css, /\.send-btn:disabled,\s*\.stop-btn:disabled\s*\{[^}]*opacity: 0\.35;[^}]*cursor: not-allowed;/);
 });

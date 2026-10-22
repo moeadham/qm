@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { ADMIN_LOGIN_SCRIPT, ADMIN_LOGIN_SCRIPT_HASH, openAdminLogin } from "./admin-login.ts";
 import { LRUCache } from "lru-cache";
 import { createTrustedEntry, trustedEntryConfig } from "./trusted-entry.ts";
+import { answerPreflight, parseAllowedOrigins, prepareCors } from "./cors.ts";
 import {
   deriveKey,
   seal,
@@ -66,12 +67,14 @@ import {
   serveFavicon,
   readBody,
   PayloadTooLargeError,
+  sameOriginRequest as sameOriginFor,
 } from "../../chassis/src/http.ts";
 import {
   CORE_API_URL as CORE,
   CORE_ORG_ID as ORG,
   CORE_SIGNING_SECRET,
   PORTAL_IDENTITY_SECRET,
+  isMissingOrPlaceholder,
   portFromEnv,
 } from "../../chassis/src/env.ts";
 
@@ -94,6 +97,7 @@ const ORIGIN = (() => {
     return "";
   }
 })();
+const API_ALLOWED_ORIGINS = parseAllowedOrigins(process.env.PORTAL_API_ALLOWED_ORIGINS);
 const LOCAL_AUTH_BYPASS_REQUESTED = process.env.PORTAL_LOCAL_AUTH_BYPASS === "1";
 const LOCAL_AUTH_BYPASS = LOCAL_AUTH_BYPASS_REQUESTED && !IS_PROD && isLocalPortalUrl(PUBLIC_URL);
 const LOCAL_AUTH_PRINCIPAL = process.env.PORTAL_DEV_PRINCIPAL || process.env.USER || "dev-admin";
@@ -256,17 +260,17 @@ const ADMIN_PROBE_ATTEMPTS = 2;
 const ADMIN_PROBE_RETRY_DELAY_MS = 250;
 const adminCache = new LRUCache<string, boolean>({ max: 10_000, ttl: ADMIN_TTL_MS });
 
+function portalIdentityHeaders(sub: string): Record<string, string> {
+  return PORTAL_IDENTITY_SECRET
+    ? { [PORTAL_IDENTITY_HEADER]: mintPortalIdentity({ p: sub, exp: Date.now() + 60_000 }, PORTAL_IDENTITY_SECRET) }
+    : {};
+}
+
 async function adminProbeAttempt(sub: string): Promise<boolean | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ADMIN_PROBE_TIMEOUT_MS);
   try {
-    const headers: Record<string, string> = { cookie: `admin=${encodeURIComponent(sub)}` };
-    if (PORTAL_IDENTITY_SECRET) {
-      headers[PORTAL_IDENTITY_HEADER] = mintPortalIdentity(
-        { p: sub, exp: Date.now() + 60_000 },
-        PORTAL_IDENTITY_SECRET,
-      );
-    }
+    const headers = { cookie: `admin=${encodeURIComponent(sub)}`, ...portalIdentityHeaders(sub) };
     const r = await fetch(`${UPSTREAMS.admin}/api/whoami`, { headers, signal: ctrl.signal });
     if (!r.ok) {
       console.warn(`[portal] admin probe returned HTTP ${r.status}`);
@@ -360,21 +364,7 @@ function sendHtml(res: ServerResponse, status: number, html: string, csp = PAGE_
   );
 }
 
-function sameOriginRequest(req: IncomingMessage): boolean {
-  const origin = req.headers.origin;
-  const originMatches =
-    typeof origin === "string" &&
-    (() => {
-      try {
-        return new URL(origin).origin === ORIGIN;
-      } catch {
-        return false;
-      }
-    })();
-  const site = req.headers["sec-fetch-site"];
-  if (typeof site !== "string") return originMatches;
-  return site === "same-origin" && (originMatches || origin === undefined || origin === "null");
-}
+const sameOriginRequest = (req: IncomingMessage) => sameOriginFor(req, ORIGIN);
 
 function wantsHtml(req: IncomingMessage): boolean {
   const accept = req.headers.accept;
@@ -779,8 +769,11 @@ async function handleSelfConnect(res: ServerResponse, o: { provider: string; ses
     CORE_SIGNING_SECRET,
   );
   try {
-    const r = await fetch(`${CORE}${path}`, { headers: signedHeaders(CORE_SIGNING_SECRET, "GET", path) });
+    const r = await fetch(`${CORE}${path}`, {
+      headers: { ...signedHeaders(CORE_SIGNING_SECRET, "GET", path), ...portalIdentityHeaders(o.session.sub) },
+    });
     const data = (await r.json().catch(() => ({}))) as { authorizeUrl?: string; message?: string };
+    if (!r.ok) console.warn(`[portal] self-connect start returned HTTP ${r.status}: ${data.message ?? "no message"}`);
     if (data.authorizeUrl) {
       res.writeHead(302, { location: data.authorizeUrl, "cache-control": "no-store" });
       return void res.end();
@@ -790,7 +783,8 @@ async function handleSelfConnect(res: ServerResponse, o: { provider: string; ses
       200,
       connectErrorHtml(data.message ?? "We couldn't start the connection. This app may not be configured."),
     );
-  } catch {
+  } catch (error) {
+    console.warn(`[portal] self-connect start failed: ${errMessage(error)}`);
     return sendHtml(
       res,
       502,
@@ -809,9 +803,7 @@ async function coreImpersonate(
   const headers = {
     ...signedHeaders(CORE_SIGNING_SECRET, "POST", path, body),
     "x-admin-actor": `${admin}@${ORG}`,
-    ...(PORTAL_IDENTITY_SECRET
-      ? { [PORTAL_IDENTITY_HEADER]: mintPortalIdentity({ p: admin, exp: Date.now() + 60_000 }, PORTAL_IDENTITY_SECRET) }
-      : {}),
+    ...portalIdentityHeaders(admin),
   };
   try {
     const r = await fetch(`${CORE}${path}`, { method: "POST", headers, body });
@@ -996,8 +988,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (appSuffix && (requestHost.endsWith(appSuffix) || requestHost === APPS_DOMAIN?.toLowerCase())) {
     const label = requestHost.slice(0, -appSuffix.length);
     if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) return json(res, 404, { error: "not_found" });
-    return proxyToAppHost(req, res, CORE);
+    return proxyToAppHost(req, res, CORE, clientIpOf(req));
   }
+
+  const crossOrigin = prepareCors(req, res, pathname, API_ALLOWED_ORIGINS.origins);
+  if (crossOrigin && method === "OPTIONS") return answerPreflight(res);
 
   const brokerPath = brokerRouteFor(method, pathname);
   const reauthentication =
@@ -1064,10 +1059,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           method: "POST",
           headers: {
             ...signedHeaders(CORE_SIGNING_SECRET, "POST", path, body),
-            [PORTAL_IDENTITY_HEADER]: mintPortalIdentity(
-              { p: session.sub, exp: Date.now() + 60_000 },
-              PORTAL_IDENTITY_SECRET,
-            ),
+            ...portalIdentityHeaders(session.sub),
           },
           body,
           signal: AbortSignal.timeout(4_000),
@@ -1296,7 +1288,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     (/^\/share\/external\/[a-f0-9-]{36}(?:\/files\/[a-f0-9-]{36})?$/.test(pathname) ||
       /^\/assets\/[a-zA-Z0-9_.-]+$/.test(pathname))
   ) {
-    return proxyToUpstream(req, res, { baseUrl: UPSTREAMS["web-ui"]!, path: pathname, search: url.search }, ["accept"]);
+    return proxyToUpstream(req, res, { baseUrl: UPSTREAMS["web-ui"]!, path: pathname, search: url.search }, [
+      "accept",
+      "accept-encoding",
+    ]);
   }
 
   if (!session) {
@@ -1314,7 +1309,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
   }
 
-  if (method !== "GET" && method !== "HEAD" && !sameOriginRequest(req)) {
+  if (method !== "GET" && method !== "HEAD" && !crossOrigin && !sameOriginRequest(req)) {
     return json(res, 403, { error: "forbidden", message: "cross-origin request refused" });
   }
 
@@ -1367,7 +1362,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   let principal = session.sub;
   let impersonator: string | undefined;
-  if (key === "web-ui") {
+  if (key === "web-ui" && !crossOrigin) {
     const imp = openImpersonation(readCookie(req.headers.cookie, "portal_impersonate"), impersonateKey, Date.now());
     if (imp && imp.actor === session.sub && imp.org === session.org && (await isAdmin(session.sub))) {
       principal = imp.target;
@@ -1600,6 +1595,15 @@ async function trustedAuth(req: IncomingMessage, res: ServerResponse, url: URL):
       url.searchParams.get("returnTo") ??
       openTmp(readCookie(req.headers.cookie, "portal_oidc_tmp"), tmpKey, Date.now())?.returnTo ??
       null;
+    const existing = currentSession(req);
+    const trustedPrefix = `oidc:${createHash("sha256").update(trustedOidc!.issuer).digest("hex")}:`;
+    if (existing && !existing.anon && !existing.appOnly && existing.sub.startsWith(trustedPrefix)) {
+      res.writeHead(302, {
+        location: sanitizeReturnTo(returnTo, PUBLIC_URL, APPS_DOMAIN),
+        "cache-control": "no-store",
+      });
+      return void res.end();
+    }
     const login = trustedEntry.start(sanitizeReturnTo(returnTo, PUBLIC_URL, APPS_DOMAIN));
     setSession(res, [setCookie(cookieName, login.cookie, { path, maxAge: login.ttl, secure: SECURE_COOKIES })]);
     res.writeHead(302, { location: login.location, "cache-control": "no-store" });
@@ -1742,7 +1746,19 @@ async function authCallback(req: IncomingMessage, res: ServerResponse, url: URL)
 }
 
 export function bootChecks(): void {
-  const problems: string[] = [];
+  const problems: string[] = [...API_ALLOWED_ORIGINS.problems];
+  for (const origin of API_ALLOWED_ORIGINS.origins) {
+    const host = hostOf(origin);
+    if (IS_PROD && !origin.startsWith("https://")) {
+      problems.push(`PORTAL_API_ALLOWED_ORIGINS entry "${origin}" must use https in production`);
+    }
+    if (APPS_DOMAIN && hostIsWithinDomain(host, APPS_DOMAIN)) {
+      problems.push(
+        `PORTAL_API_ALLOWED_ORIGINS entry "${origin}" is under the apps domain (${APPS_DOMAIN}), which serves user-deployed apps`,
+      );
+    }
+    if (origin === ORIGIN) problems.push(`PORTAL_API_ALLOWED_ORIGINS must not list the portal's own origin`);
+  }
   if (!AUTH_BROKER_UPSTREAM && originOf(OIDC.authEndpoint) && originOf(OIDC.authEndpoint) === originOf(PUBLIC_URL)) {
     problems.push(
       "OIDC_AUTH_ENDPOINT is on the portal's own origin but AUTH_BROKER_UPSTREAM is unset — every sign-in would redirect from /auth/login back into the portal forever; wire AUTH_BROKER_UPSTREAM to the auth service or point OIDC_AUTH_ENDPOINT at a real identity provider",
@@ -1877,11 +1893,6 @@ export function bootChecks(): void {
     for (const p of problems) console.error(`[portal] FATAL: ${p}`);
     throw new Error(`portal refusing to start: ${problems.length} misconfiguration(s)`);
   }
-}
-
-function isMissingOrPlaceholder(value: string | undefined): boolean {
-  const candidate = value?.trim();
-  return !candidate || /^(replace-me|placeholder|changeme|todo)$/i.test(candidate);
 }
 
 function validEmailDomain(value: string): boolean {

@@ -15,7 +15,7 @@ test("compactTranscript marks an interrupted tool call (no recorded result) so t
     ent("tool_call", { tool: "execute", command: "bash refresh.sh", callId: "c1" }, 2),
     ent("user", { text: "(system note: the platform restarted mid-turn...)" }, 3),
   ]);
-  assert.match(out, /tool_result for tool_call#2 \(none recorded\): \[interrupted/);
+  assert.match(out, /tool_result for tool_call#2 \(none recorded\): \[system\] This call was interrupted/);
   assert.ok(out.includes(INTERRUPTED_TOOL_RESULT));
 });
 
@@ -101,4 +101,28 @@ test("compactTranscript omits the stamp when an entry has no real timestamp", ()
   const out = compactTranscript([ent("user", { text: "hello" }, 1, 0), ent("user", { text: "again" }, 2, Number.NaN)]);
   assert.match(out, /^user#1: hello$/m);
   assert.match(out, /^user#2: again$/m);
+});
+
+test("a tool_result marked interrupted still leaves its call reported as interrupted in the compaction transcript", () => {
+  const out = compactTranscript([
+    {
+      sessionId: "s",
+      seq: 1,
+      parentSeq: null,
+      type: "tool_call",
+      payload: { tool: "execute", callId: "c1", command: "make" },
+      scopeLabel: "org:o",
+      createdAt: 1,
+    },
+    {
+      sessionId: "s",
+      seq: 2,
+      parentSeq: null,
+      type: "tool_result",
+      payload: { callId: "c1", result: "[exit 143]", interrupted: true },
+      scopeLabel: "org:o",
+      createdAt: 2,
+    },
+  ]);
+  assert.ok(out.includes(`tool_result for tool_call#1 (none recorded): ${INTERRUPTED_TOOL_RESULT}`));
 });

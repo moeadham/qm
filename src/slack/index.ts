@@ -1,5 +1,5 @@
 import { continueInPrivate } from "./private-continuation.ts";
-import { type ExternalSlackAccess } from "./external-access.ts";
+import { externalSlackNamespace, type ExternalSlackAccess } from "./external-access.ts";
 import { registerKeychainApprovalActions } from "./keychain-approvals.ts";
 import { registerDeployAccessActions } from "./deploy-access.ts";
 import { SlackPluginStartCleanupError } from "../surfaces/slack-runtime.ts";
@@ -280,7 +280,7 @@ export async function startSlackPlugin(
     externalParticipantsEnabled,
     ...(cfg.recentMessages ? { recentMessages: cfg.recentMessages } : {}),
   });
-  const approvals = createApprovals({ core, flow, directory, threads, ids, externalAccess: !!cfg.externalAccess });
+  const approvals = createApprovals({ core, flow, directory, threads, externalAccess: !!cfg.externalAccess });
   registerKeychainApprovalActions(app, { core, directory, webUiPublicUrl: cfg.webUiPublicUrl });
   registerDeployAccessActions(app, { core, directory });
   const ensureHeader = createSurfaceHeaderEnsurer({
@@ -364,7 +364,6 @@ export async function startSlackPlugin(
     directory,
     mirror,
     serializer,
-    approvals,
     ackEmoji,
     ackEmojiCandidates: ackEmojiOverride,
     ids,
@@ -444,7 +443,10 @@ export async function startSlackPlugin(
       if (!account || (teamId && account.teamId !== teamId)) return undefined;
       return account.client;
     },
-    externalAccount: (id) => !!slackAccountClients.get(id)?.policy,
+    externalNamespace: (id) => {
+      const account = slackAccountClients.get(id);
+      return account?.policy ? externalSlackNamespace(account.teamId, account.policy) : undefined;
+    },
     continuePrivate: (runId, task) => continueInPrivate(core, runId, task, (id) => slackAccountClients.get(id)),
     core,
     flow,

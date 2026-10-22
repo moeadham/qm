@@ -9,6 +9,7 @@ import type {
   PendingApproval,
   QueuedRun,
   TurnOptions,
+  TurnRuntime,
   entriesToMessages,
 } from "./core-bridge";
 import type { EffortLevel, ModelOption } from "./model-options";
@@ -74,6 +75,7 @@ export interface ChatSurface {
   stopLiveRun(): Promise<void>;
   isStopping(): boolean;
   currentTurnOptions(): TurnOptions;
+  turnRuntime(): TurnRuntime | null;
   newChat(context?: { scopeId: string; name: string | null }): string;
   teardown(): void;
   resetChatState(): void;
@@ -93,6 +95,7 @@ export interface ChatSurface {
     anchorSeq?: number | null,
     inheritedMessages?: ReturnType<typeof entriesToMessages>,
   ): void;
+  attachApprovalsWhenLoaded(sessionId: string, approvals: Promise<{ approvals: PendingApproval[] } | null>): void;
   mountLoadingPane(): () => boolean;
   mountLoadError(retry: () => void): void;
   scrollToBottom(): void;
@@ -100,6 +103,8 @@ export interface ChatSurface {
   drawActiveChat(agent?: Agent | null, opts?: { forceScroll?: boolean }): void;
   setTranscriptWindow(anchorSeq: number | null, earlierCount: number, hasEarlier?: boolean): void;
   setPins(pins: import("./core-bridge").SessionPin[]): void;
+  setGoal(goal: import("./goal-strip").GoalStripState | null): void;
+  setTurnRuntime(runtime: TurnRuntime | null): void;
   requestBackgroundPanel(sessionId: string | null, threadRef: string | null): void;
   activePendingApprovals(): PendingApproval[];
   hasUnresolvedApproval(): boolean;
@@ -139,9 +144,12 @@ export interface ComposerSurface {
   resetComposer(): void;
   focusComposerEnd(): void;
   fillSuggestedPrompt(prompt: string, agent: Agent): void;
+  addAnnotations(text: string, files: File[], annotationId?: string, remove?: boolean): Promise<boolean>;
   sendSuggestedPrompt(prompt: string, agent: Agent): Promise<void>;
   resizeComposer(): void;
   currentModelOption(): ModelOption | undefined;
+  followsDefault(): boolean;
+  followScopeDefault(agent: Agent): Promise<void>;
   carryModelPick(fromThreadRef: string | null, toThreadRef: string): void;
   refreshRuntimeSelection(scopeId: string | null, agent?: Agent, refresh?: boolean): Promise<void>;
   onDragEnter(e: DragEvent): void;

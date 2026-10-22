@@ -623,8 +623,7 @@ test("AWS validates release labels, unique coordinates, Fargate sizes, and owned
         },
       },
       ({ path }) => {
-        if (scopeBackend === "aws") assert.throws(() => loadConfigAt(path), /AWS_DEPLOY_IMAGE/);
-        else assert.equal(loadConfigAt(path).config.env.core?.DEPLOY_PROVIDER, "fly");
+        assert.equal(loadConfigAt(path).config.env.core?.DEPLOY_PROVIDER, "fly");
       },
     );
   }
@@ -896,11 +895,11 @@ test("sandbox shape errors: object, app non-empty string, env string-map, secret
     { sandbox: { secretEnv: ["1BAD"] }, rx: /not a valid env var name/ },
     {
       sandbox: { backend: "k8s", app: "acme-sandboxes" },
-      rx: /"sandbox.backend" must be "local".*"sprites".*"aws".*"agent37".*or "superserve"/,
+      rx: /"sandbox.backend" must be "local".*"sprites".*"aws".*"agent37".*"superserve".*or "e2b"/,
     },
     {
       sandbox: { backend: "fly", app: "acme-sandboxes" },
-      rx: /"sandbox.backend" must be "local".*"sprites".*"aws".*"agent37".*or "superserve"/,
+      rx: /"sandbox.backend" must be "local".*"sprites".*"aws".*"agent37".*"superserve".*or "e2b"/,
     },
     {
       sandbox: { backend: "aws", app: "acme-sandboxes" },
@@ -948,6 +947,21 @@ test("agent37 is a deployment backend on every target and rejects unused Fly set
   });
 });
 
+test("e2b is a deployment backend on every target and rejects unused Fly settings", () => {
+  for (const target of ["docker", "fly"] as const) {
+    withConfig({ target, sandbox: { backend: "e2b" } }, ({ path }) => {
+      const { config } = loadConfigAt(path);
+      assert.deepEqual(sandboxCoreEnv(config), {
+        env: { SANDBOX_BACKEND: "e2b" },
+        missingSecrets: [],
+      });
+    });
+  }
+  withConfig({ sandbox: { backend: "e2b", app: "unused" } }, ({ path }) => {
+    assert.throws(() => loadConfigAt(path), /"sandbox.backend": "e2b" ignores "sandbox.app"/);
+  });
+});
+
 test("superserve backend requires the agent template in env.core", () => {
   withConfig({ sandbox: { backend: "superserve" } }, ({ path }) => {
     assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
@@ -969,20 +983,6 @@ test("superserve backend requires the agent template in env.core", () => {
     {
       sandbox: { backend: "local" },
       env: { core: { SANDBOX_SCOPE_BACKENDS: JSON.stringify({ personal: "superserve" }) } },
-    },
-    ({ path }) => {
-      assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
-    },
-  );
-  withConfig(
-    {
-      sandbox: { backend: "local" },
-      env: {
-        core: {
-          SANDBOX_SCOPE_BACKENDS: JSON.stringify({ personal: "superserve" }),
-          SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
-        },
-      },
     },
     ({ path }) => assert.doesNotThrow(() => loadConfigAt(path)),
   );
@@ -1352,18 +1352,23 @@ test("modelProvider must name a vendor the configured harness can bill", () => {
   withConfig({ modelProvider: "openrouter", env: { core: { HARNESS: "pi" } } }, ({ path }) => {
     assert.equal(loadConfigAt(path).config.modelProvider, "openrouter");
   });
-  withConfig({ modelProvider: "openrouter", env: { core: { HARNESS: "codex" } } }, ({ path }) => {
+  withConfig({ modelProvider: "openrouter", env: { core: { HARNESS: "claude" } } }, ({ path }) => {
     assert.throws(
       () => loadConfigAt(path),
-      /model provider "openrouter" cannot serve a base model on env.core.HARNESS "codex"/,
+      /model provider "openrouter" cannot serve a base model on env.core.HARNESS "claude"/,
     );
   });
-  withConfig({ modelProvider: "anthropic", env: { core: { HARNESS: "codex" } } }, ({ path }) => {
+  withConfig({ modelProvider: "openai", env: { core: { HARNESS: "claude" } } }, ({ path }) => {
     assert.throws(() => loadConfigAt(path), /cannot serve a base model/);
   });
-  withConfig({ modelProvider: "openai", env: { core: { HARNESS: "codex" } } }, ({ path }) => {
+  withConfig({ modelProvider: "openai", env: { core: { HARNESS: "pi" } } }, ({ path }) => {
     assert.equal(loadConfigAt(path).config.modelProvider, "openai");
   });
+  for (const harness of ["codex", "opencode"]) {
+    withConfig({ env: { core: { HARNESS: harness } } }, ({ path }) => {
+      assert.throws(() => loadConfigAt(path), new RegExp(`env.core.HARNESS "${harness}" is not recognized`));
+    });
+  }
   withConfig({ modelProvider: "openrouter" }, ({ path }) => {
     assert.equal(
       loadConfigAt(path).config.modelProvider,
@@ -1375,15 +1380,15 @@ test("modelProvider must name a vendor the configured harness can bill", () => {
 
 test("env.core.MODEL_PROVIDER is validated as the provider core will actually use", () => {
   withConfig(
-    { modelProvider: "openai", env: { core: { HARNESS: "codex", MODEL_PROVIDER: "anthropic" } } },
+    { modelProvider: "anthropic", env: { core: { HARNESS: "claude", MODEL_PROVIDER: "openai" } } },
     ({ path }) => {
-      assert.throws(() => loadConfigAt(path), /model provider "anthropic" cannot serve a base model/);
+      assert.throws(() => loadConfigAt(path), /model provider "openai" cannot serve a base model/);
     },
   );
   withConfig(
-    { modelProvider: "anthropic", env: { core: { HARNESS: "codex", MODEL_PROVIDER: "openai" } } },
+    { modelProvider: "openai", env: { core: { HARNESS: "claude", MODEL_PROVIDER: "anthropic" } } },
     ({ path }) => {
-      assert.equal(loadConfigAt(path).config.modelProvider, "anthropic", "the override decides, the declaration stays");
+      assert.equal(loadConfigAt(path).config.modelProvider, "openai", "the override decides, the declaration stays");
     },
   );
   withConfig({ env: { core: { HARNESS: "pi", MODEL_PROVIDER: "bedrock" } } }, ({ path }) => {

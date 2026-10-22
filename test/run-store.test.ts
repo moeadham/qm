@@ -35,6 +35,37 @@ for (const backend of backends) {
     ]);
   });
 
+  test(`[${backend.name}] terminalFinished pages finished runs by (finishedAt, id) within the bound`, async () => {
+    const { runs } = backend.make();
+    const finished: string[] = [];
+    for (const ref of ["a", "b", "c"]) {
+      const run = (await runs.enqueue({ sessionId: ref, request: turn(ref) })).run;
+      const claimed = await runs.claimForSession(ref, "w", 5_000);
+      await runs.complete(run.id, claimed?.leaseToken ?? "", { status: "ok", reply: ref });
+      finished.push(run.id);
+    }
+    await runs.enqueue({ sessionId: "pending", request: turn("pending") });
+    const running = (await runs.enqueue({ sessionId: "running", request: turn("running") })).run;
+    await runs.claimForSession("running", "w", 5_000);
+    const far = Date.now() + 60_000;
+    const all = await runs.terminalFinished({ finishedAt: 0, id: "" }, far, 10);
+    assert.deepEqual(new Set(all.map((run) => run.id)), new Set(finished), "only terminal runs are listed");
+    assert.ok(!all.some((run) => run.id === running.id));
+    for (let i = 1; i < all.length; i++) {
+      const prev = all[i - 1]!;
+      const next = all[i]!;
+      assert.ok(prev.finishedAt! < next.finishedAt! || (prev.finishedAt === next.finishedAt && prev.id < next.id));
+    }
+    const first = await runs.terminalFinished({ finishedAt: 0, id: "" }, far, 2);
+    const rest = await runs.terminalFinished({ finishedAt: first[1]!.finishedAt!, id: first[1]!.id }, far, 2);
+    assert.deepEqual(
+      [...first, ...rest].map((run) => run.id),
+      all.map((run) => run.id),
+      "keyset paging is gapless",
+    );
+    assert.deepEqual(await runs.terminalFinished({ finishedAt: 0, id: "" }, all[0]!.finishedAt! - 1, 10), []);
+  });
+
   test(`[${backend.name}] enqueue dedups by dedup key`, async () => {
     const { runs } = backend.make();
     const a = await runs.enqueue({ sessionId: "s1", request: turn("hi"), dedupKey: "k1" });
@@ -231,6 +262,33 @@ for (const backend of backends) {
     assert.equal(reclaimed?.id, r.id);
     assert.equal(reclaimed?.attempts, 2, "reclaim treated as a retry");
     assert.equal(reclaimed?.errorAttempts, 0);
+  });
+
+  test(`[${backend.name}] a requeued run records why its last attempt stopped`, async () => {
+    const { runs } = backend.make();
+    const r = (await runs.enqueue({ sessionId: "s1", request: turn("long turn") })).run;
+    assert.equal((await runs.get(r.id))?.lastStop ?? null, null, "a fresh run has no stop cause");
+
+    const first = await runs.claim("w1", 60_000);
+    await runs.releaseLease(r.id, first!.leaseToken!, { kind: "shutdown" });
+    assert.deepEqual((await runs.get(r.id))?.lastStop, { kind: "shutdown" });
+
+    const second = await runs.claim("w1", 60_000);
+    const stop = { kind: "error" as const, code: "transient", status: 503 };
+    await runs.fail(r.id, second!.leaseToken!, "boom", { retry: true, stop });
+    assert.deepEqual((await runs.get(r.id))?.lastStop, stop);
+
+    await sleep(5);
+    const unstarted = await runs.claim("w1", 60_000);
+    await runs.releaseLease(r.id, unstarted!.leaseToken!);
+    assert.deepEqual((await runs.get(r.id))?.lastStop, stop, "a handback before the attempt started keeps the cause");
+
+    await sleep(5);
+    const third = await runs.claim("w1", 1);
+    assert.ok(third, "claimable once the retry delay passes");
+    await sleep(5);
+    await runs.reapExpired();
+    assert.deepEqual((await runs.get(r.id))?.lastStop, { kind: "lease_expired" });
   });
 
   test(`[${backend.name}] releaseLease with a wrong/stale token is a no-op`, async () => {

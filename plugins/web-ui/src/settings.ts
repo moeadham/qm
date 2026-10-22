@@ -1,16 +1,25 @@
 import "./onboarding-welcome";
 import "./slack-account";
 import { openModelConnectManager, type StatusResponse } from "./model-connect";
-import { api, withBase } from "./core-bridge";
+import {
+  alwaysSteer,
+  api,
+  fetchUiState,
+  pinLatestPrompt,
+  putUiState,
+  setAlwaysSteer,
+  setPinLatestPrompt,
+  withBase,
+} from "./core-bridge";
 import { html, nothing, render, type TemplateResult } from "lit";
 import { Download, ExternalLink, LogOut, Monitor, Moon, ShieldUser, Sun, type IconNode } from "lucide";
-import { icon } from "./ui";
+import { icon } from "./icons";
 import { ADMIN_HOME_URL, appState, can, signOut } from "./shell";
 import { sessionsState, setWebOnly } from "./sessions";
 import { errMessage } from "../../chassis/src/errors";
 import { importTheme, isPalette, themeCss, themeTokens, type Palette } from "./theme-import";
 
-export type ThemeChoice = "light" | "dark" | "system" | "custom";
+type ThemeChoice = "light" | "dark" | "system" | "custom";
 
 const THEME_KEY = "theme";
 const CUSTOM_THEME_KEY = "theme:custom";
@@ -28,7 +37,7 @@ const THEME_OPTIONS: Array<{ value: ThemeChoice; label: string; glyph: IconNode 
 let settingsHost: HTMLElement | null = null;
 let themeImportError: string | null = null;
 
-export function storedTheme(): ThemeChoice {
+function storedTheme(): ThemeChoice {
   try {
     const stored = localStorage.getItem(THEME_KEY);
     if (stored === "light" || stored === "dark") return stored;
@@ -39,7 +48,7 @@ export function storedTheme(): ThemeChoice {
   return "system";
 }
 
-export function storedCustomTheme(): Palette | null {
+function storedCustomTheme(): Palette | null {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(CUSTOM_THEME_KEY) ?? "null");
     return isPalette(parsed) ? parsed : null;
@@ -95,7 +104,7 @@ export function applyTheme(): void {
   publishTheme();
 }
 
-export function setTheme(choice: ThemeChoice): void {
+function setTheme(choice: ThemeChoice): void {
   themeImportError = null;
   try {
     if (choice === "system") localStorage.removeItem(THEME_KEY);
@@ -107,12 +116,12 @@ export function setTheme(choice: ThemeChoice): void {
   drawSettings();
 }
 
-export function installCustomTheme(palette: Palette): void {
+function installCustomTheme(palette: Palette): void {
   storeCustomTheme(palette);
   setTheme("custom");
 }
 
-export function removeCustomTheme(): void {
+function removeCustomTheme(): void {
   const wasActive = storedTheme() === "custom";
   storeCustomTheme(null);
   setTheme(wasActive ? "system" : storedTheme());
@@ -228,6 +237,131 @@ function themeRow(): TemplateResult {
       </div>
     </div>
   `;
+}
+
+const OPEN_NEW_CHAT_KEY = "open-new-chat";
+let openNewChat = false;
+let openNewChatTouched = false;
+
+export async function loadOpenNewChat(timeoutMs = 2000): Promise<boolean> {
+  const fetched = fetchUiState(OPEN_NEW_CHAT_KEY).then(
+    (rec) => {
+      if (!openNewChatTouched) {
+        openNewChat = rec.value === true;
+        drawSettings();
+      }
+      return openNewChat;
+    },
+    () => null,
+  );
+  let timer = 0;
+  const value = await Promise.race([
+    fetched,
+    new Promise<null>((resolve) => {
+      timer = window.setTimeout(() => resolve(null), timeoutMs);
+    }),
+  ]);
+  window.clearTimeout(timer);
+  return value ?? false;
+}
+
+function setOpenNewChat(value: boolean): void {
+  openNewChatTouched = true;
+  openNewChat = value;
+  drawSettings();
+  void putUiState(OPEN_NEW_CHAT_KEY, value, Date.now()).catch(() => void 0);
+}
+
+const OPEN_OPTIONS: Array<{ newChat: boolean; label: string }> = [
+  { newChat: false, label: "Last session" },
+  { newChat: true, label: "New chat" },
+];
+
+function openBehaviorRow(): TemplateResult {
+  return html`
+    <div class="settings-row">
+      <div class="settings-row-copy">
+        <div class="settings-row-title">When QM opens</div>
+        <div class="settings-row-note">Reopen the conversations you had open last time, or start on a new chat.</div>
+      </div>
+      <div class="settings-choice" role="radiogroup" aria-label="When QM opens">
+        ${OPEN_OPTIONS.map(
+          (option) => html`
+            <button
+              class="settings-choice-option ${openNewChat === option.newChat ? "selected" : ""}"
+              type="button"
+              role="radio"
+              aria-checked=${openNewChat === option.newChat ? "true" : "false"}
+              @click=${() => setOpenNewChat(option.newChat)}
+            >
+              <span>${option.label}</span>
+            </button>
+          `,
+        )}
+      </div>
+    </div>
+  `;
+}
+
+function choiceRow(
+  title: string,
+  note: string,
+  options: Array<{ value: boolean; label: string }>,
+  current: boolean,
+  choose: (value: boolean) => void,
+): TemplateResult {
+  return html`
+    <div class="settings-row">
+      <div class="settings-row-copy">
+        <div class="settings-row-title">${title}</div>
+        <div class="settings-row-note">${note}</div>
+      </div>
+      <div class="settings-choice" role="radiogroup" aria-label=${title}>
+        ${options.map(
+          (option) => html`
+            <button
+              class="settings-choice-option ${current === option.value ? "selected" : ""}"
+              type="button"
+              role="radio"
+              aria-checked=${current === option.value ? "true" : "false"}
+              @click=${() => {
+                choose(option.value);
+                drawSettings();
+              }}
+            >
+              <span>${option.label}</span>
+            </button>
+          `,
+        )}
+      </div>
+    </div>
+  `;
+}
+
+function pinPromptRow(): TemplateResult {
+  return choiceRow(
+    "Pin my last message",
+    "Keeps your latest message at the top of the chat while you scroll its reply.",
+    [
+      { value: true, label: "Pinned" },
+      { value: false, label: "Off" },
+    ],
+    pinLatestPrompt(),
+    setPinLatestPrompt,
+  );
+}
+
+function sendWhileWorkingRow(): TemplateResult {
+  return choiceRow(
+    "Sending while QM is working",
+    "Steer folds your message into the running task instead of waiting for it to finish.",
+    [
+      { value: false, label: "Queue" },
+      { value: true, label: "Steer" },
+    ],
+    alwaysSteer(),
+    setAlwaysSteer,
+  );
 }
 
 const SURFACE_OPTIONS: Array<{ webOnly: boolean; label: string }> = [
@@ -421,8 +555,8 @@ function settingsPane(): TemplateResult {
       <h1 class="pane-title">Settings</h1>
     </div>
     <div class="settings-group">
-      ${aiAccountsRow()} ${themeRow()} ${sidebarSurfaceRow()} ${can("admin") ? adminRow() : nothing} ${desktopRow()}
-      ${accountRow()}
+      ${aiAccountsRow()} ${themeRow()} ${openBehaviorRow()} ${pinPromptRow()} ${sendWhileWorkingRow()}
+      ${sidebarSurfaceRow()} ${can("admin") ? adminRow() : nothing} ${desktopRow()} ${accountRow()}
       <div class="settings-row settings-slack-account">
         <qm-slack-account .user=${`${appState.me?.org}:${appState.me?.user}`}></qm-slack-account>
       </div>

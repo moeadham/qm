@@ -9,10 +9,11 @@ import { KeychainError, type GrantMode } from "../../credentials/keychain.ts";
 import { SECRET_DROP_TTL_MS, type SecretDropField, type SecretDropRecord } from "../../credentials/secret-drop.ts";
 import { isSharedScope, parseScopeId } from "../../types.ts";
 import { samePerson } from "../../directory/person.ts";
-import { escapeHtml, sendJson } from "../http.ts";
+import { escapeHtml } from "../../../plugins/chassis/src/http.ts";
+import { sendJson } from "../http.ts";
 import type { ApiCtx, Route } from "./route.ts";
 import { audit, resolveCapabilityDestination, verifiedConversationSpeaker } from "./shared.ts";
-import { swallow } from "../../util/errors.ts";
+import { reportFailureAs, swallow } from "../../util/errors.ts";
 
 const TRIGGERED = "secret-drop links can only be minted on a turn a person sent — this turn was fired by a trigger";
 
@@ -104,7 +105,7 @@ function dropScopeAuthorized(ctx: ApiCtx, rec: SecretDropRecord, claims?: Capabi
       ...(claims?.liveActor ? { liveActor: true } : {}),
       ...(claims?.members ? { members: claims.members } : {}),
     })
-    .catch(() => false);
+    .catch(reportFailureAs("secret drop: conversation membership check", false));
 }
 
 async function dropLinkClaims(
@@ -307,10 +308,9 @@ async function redeemDrop(ctx: ApiCtx): Promise<void> {
   }
   const attestation = linkClaims === true ? undefined : linkClaims;
   if (!(await dropScopeAuthorized(ctx, peeked.rec, attestation))) {
-    await deps.secretDrops.redeem(params.id!).catch(() => null);
     return sendJson(res, 409, {
       error: "scope_changed",
-      message: "conversation membership changed — ask the agent for a fresh link",
+      message: "couldn't confirm you're still in this conversation — try again, or ask the agent for a fresh link",
     });
   }
   const dropFieldDefs = peeked.rec.fields;
@@ -377,6 +377,7 @@ async function redeemDrop(ctx: ApiCtx): Promise<void> {
           ...(drop.destination ? { destination: drop.destination } : {}),
           ...(drop.threadRef ? { threadRef: drop.threadRef } : {}),
           ...(grantId ? { grantId } : {}),
+          ...(meta.credentialHandle ? { credentialHandle: meta.credentialHandle } : {}),
           granted: !!grantId,
           ...(pending.length ? { pendingSiblings: pending } : {}),
         });

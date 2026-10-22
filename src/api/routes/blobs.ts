@@ -6,14 +6,8 @@ import {
   MAX_STAGE_BLOB_BYTES,
 } from "../../persistence/blob-transfer.ts";
 import { CAPABILITY_HEADER } from "../contract.ts";
-import {
-  canonicalPayload,
-  extendBodyDeadline,
-  headerValue,
-  pipeToResponse,
-  sendJson,
-  verifyOrReject,
-} from "../http.ts";
+import { canonicalPayload } from "../../../plugins/chassis/src/source-auth-sign.ts";
+import { extendBodyDeadline, headerValue, pipeToResponse, sendJson, verifyOrReject } from "../http.ts";
 
 const STAGE_UPLOAD_DEADLINE_MS = 1_800_000;
 import type { BaseCtx, Route } from "./route.ts";
@@ -39,7 +33,10 @@ async function authorizeBlob(ctx: BaseCtx, dir: BlobDir, blobId: string | null):
     }
     if (!(await ctx.app.authorizesCapabilityScope(claims))) {
       req.resume();
-      sendJson(res, 403, { error: "forbidden", message: "capability scope membership has been revoked" });
+      sendJson(res, 403, {
+        error: "forbidden",
+        message: "the acting user is not currently authorized for this conversation",
+      });
       return null;
     }
     return { via: "capability" };

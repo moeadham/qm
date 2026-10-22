@@ -1,5 +1,4 @@
-import { JSDOM } from "jsdom";
-import { createServer } from "vite";
+import { browserEnv } from "./browser-env.ts";
 import type { Conversation } from "../src/conv-types.ts";
 import type { CoreContext, CoreSession, TranscriptPage } from "../src/core-bridge.ts";
 
@@ -27,6 +26,7 @@ export interface Harness {
 }
 
 interface HarnessOptions {
+  api?: (path: string, init?: RequestInit) => Response | Promise<Response> | undefined;
   path: string;
   session?: CoreSession;
   messageLink?: boolean;
@@ -34,6 +34,7 @@ interface HarnessOptions {
   transcriptFailures?: number;
   holdTranscript?: boolean;
   holdApprovals?: boolean;
+  approvals?: (sessionId: string) => unknown[];
   holdRuntimeConfig?: boolean;
   holdRemoteSplit?: boolean;
   remoteCanvas?: unknown;
@@ -45,6 +46,7 @@ interface HarnessOptions {
   connectionReturn?: boolean;
   slackReturn?: "success" | "expired" | "cancelled" | "wrong-account";
   returnWidget?: string;
+  openNewChat?: boolean;
 }
 
 export const SESSION = {
@@ -52,15 +54,25 @@ export const SESSION = {
   threadRef: "web:tester:deep",
   scopeId: "personal:tester",
   title: "Deep linked chat",
+  canContinue: true,
 };
 
 export async function harness(opts: HarnessOptions): Promise<Harness> {
   const session = opts.session ?? SESSION;
   let transcriptStatus = opts.transcriptStatus;
-  const dom = new JSDOM('<!doctype html><div id="app"></div>', {
-    url: `http://localhost${opts.path}`,
-    pretendToBeVisual: true,
+  const requests: string[] = [];
+  const inFlight = new Set<Promise<Response>>();
+  const env = await browserEnv({
+    dom: { url: `http://localhost${opts.path}` },
+    html: '<!doctype html><div id="app"></div>',
+    fetch: (input, init) => {
+      const answer = respond(input, init);
+      inFlight.add(answer);
+      void answer.finally(() => inFlight.delete(answer)).catch(() => {});
+      return answer;
+    },
   });
+  const { dom, vite } = env;
   if (opts.savedCanvas)
     dom.window.localStorage.setItem(
       "web-ui:split-canvas:v1",
@@ -104,12 +116,6 @@ export async function harness(opts: HarnessOptions): Promise<Harness> {
   dom.window.HTMLElement.prototype.scrollIntoView = function () {
     this.setAttribute("data-scrolled", "true");
   };
-  dom.window.HTMLElement.prototype.getAnimations = () => [];
-  const timers = new Set<ReturnType<typeof setTimeout>>();
-  const realSetTimeout = globalThis.setTimeout;
-  const realSetInterval = globalThis.setInterval;
-  const requests: string[] = [];
-  const inFlight = new Set<Promise<Response>>();
   let releaseSessions = (): void => {};
   let releaseTranscript = (): void => {};
   let releaseApprovals = (): void => {};
@@ -121,9 +127,11 @@ export async function harness(opts: HarnessOptions): Promise<Harness> {
   const sessionsHeld = new Promise<void>((resolve) => (releaseSessions = resolve));
   const transcriptHeld = new Promise<void>((resolve) => (releaseTranscript = resolve));
   let failuresLeft = opts.transcriptFailures ?? (opts.transcriptStatus ? Number.POSITIVE_INFINITY : 0);
-  const respond = async (input: RequestInfo | URL): Promise<Response> => {
+  const respond = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const path = String(input);
     requests.push(path);
+    const custom = opts.api?.(path, init);
+    if (custom) return custom;
     if (path === "/me")
       return Response.json({
         user: "tester",
@@ -141,7 +149,7 @@ export async function harness(opts: HarnessOptions): Promise<Harness> {
     if (path.startsWith("/api/runtime-config")) {
       if (opts.holdRuntimeConfig) await runtimeHeld;
       return Response.json({
-        scopeId: "personal:tester",
+        scopeId: new URL(path, "http://localhost").searchParams.get("scopeId") ?? "personal:tester",
         approvedHarnesses: [],
         modelsByHarness: {},
         modelCatalog: {},
@@ -151,13 +159,17 @@ export async function harness(opts: HarnessOptions): Promise<Harness> {
         upgradeAvailable: false,
       });
     }
+    if (path.startsWith("/api/ui-state?key=open-new-chat")) {
+      return Response.json({ value: opts.openNewChat ?? null, updatedAt: opts.openNewChat ? 1 : 0 });
+    }
     if (path.startsWith("/api/ui-state")) {
       if (opts.holdRemoteSplit) await remoteSplitHeld;
       return Response.json({ value: opts.remoteCanvas ?? null, updatedAt: opts.remoteCanvas ? 1 : 0 });
     }
     if (path.startsWith("/api/sessions/") && path.includes("/approvals")) {
       if (opts.holdApprovals) await approvalsHeld;
-      return Response.json({ approvals: [] });
+      const sessionId = decodeURIComponent(path.split("/")[3] ?? "");
+      return Response.json({ approvals: opts.approvals?.(sessionId) ?? [] });
     }
     if (path.startsWith(`/api/sessions/${session.id}`)) {
       if (opts.holdTranscript) await transcriptHeld;
@@ -188,61 +200,6 @@ export async function harness(opts: HarnessOptions): Promise<Harness> {
     return Response.json({ contexts: opts.contexts ?? [], items: [], crons: [] });
   };
 
-  const globals = {
-    fetch: (input: RequestInfo | URL): Promise<Response> => {
-      const answer = respond(input);
-      inFlight.add(answer);
-      void answer.finally(() => inFlight.delete(answer)).catch(() => {});
-      return answer;
-    },
-    window: dom.window,
-    document: dom.window.document,
-    location: dom.window.location,
-    history: dom.window.history,
-    localStorage: dom.window.localStorage,
-    sessionStorage: dom.window.sessionStorage,
-    navigator: dom.window.navigator,
-    HTMLElement: dom.window.HTMLElement,
-    Element: dom.window.Element,
-    Node: dom.window.Node,
-    Event: dom.window.Event,
-    PointerEvent: dom.window.PointerEvent,
-    MouseEvent: dom.window.MouseEvent,
-    customElements: dom.window.customElements,
-    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
-    cancelAnimationFrame: clearTimeout,
-    EventSource: undefined,
-    ResizeObserver: class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    },
-    setTimeout: ((...args: Parameters<typeof setTimeout>) => {
-      const id = realSetTimeout(...args);
-      timers.add(id);
-      return id;
-    }) as typeof setTimeout,
-    setInterval: ((...args: Parameters<typeof setInterval>) => {
-      const id = realSetInterval(...args);
-      timers.add(id);
-      return id;
-    }) as typeof setInterval,
-    requestAnimationFrame: (callback: FrameRequestCallback) => {
-      const id = realSetTimeout(() => callback(Date.now()), 0);
-      timers.add(id);
-      return id as unknown as number;
-    },
-  };
-  const descriptors = new Map<string, PropertyDescriptor | undefined>();
-  for (const [key, value] of Object.entries(globals)) {
-    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  }
-  Object.defineProperty(dom.window, "matchMedia", {
-    value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
-  });
-
-  const vite = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, appType: "custom" });
   const shell = await vite.ssrLoadModule("/src/shell.ts");
   const sessions = await vite.ssrLoadModule("/src/sessions.ts");
   const conversations = await vite.ssrLoadModule("/src/conversations.ts");
@@ -287,15 +244,9 @@ export async function harness(opts: HarnessOptions): Promise<Harness> {
       releaseRemoteSplit();
       for (let drain = 0; drain < 5 && inFlight.size; drain++) {
         await Promise.allSettled(inFlight);
-        await new Promise((resolve) => realSetTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
       }
-      await vite.close();
-      dom.window.close();
-      for (const id of timers) clearTimeout(id);
-      for (const [key, descriptor] of descriptors) {
-        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-        else delete (globalThis as Record<string, unknown>)[key];
-      }
+      await env.close();
     },
   };
 }

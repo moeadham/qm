@@ -8,7 +8,7 @@ import { testConfig } from "./support/test-config.ts";
 import { runResultDelivery } from "../src/delivery/run-result-delivery.ts";
 import type { HarnessTurnInput } from "../src/harness/harness.ts";
 import { createServer } from "../src/api/server.ts";
-import { signedRequestHeaders } from "../src/auth/source-auth-sign.ts";
+import { signedRequestHeaders } from "../plugins/chassis/src/source-auth-sign.ts";
 import { mintPortalIdentity } from "../src/auth/portal-identity.ts";
 import { startSignalPoll } from "../src/runs/run-signal-store.ts";
 import { withTimeout } from "../src/util/async.ts";
@@ -58,9 +58,7 @@ test.after(() => fake.cleanup());
 
 for (const kind of ["command", "security-screen"] as const) {
   test(`workers require their own approval instead of inheriting root-session ${kind} grants`, async () => {
-    const built = buildApp(
-      testConfig({ sandboxResourcesEnabled: true, modalSandbox: { tokenId: "test", tokenSecret: "test" } }),
-    );
+    const built = buildApp(testConfig({ modalSandbox: { tokenId: "test", tokenSecret: "test" } }));
     const request: TurnRequest = {
       surface: "swarm",
       actor: { externalId: "U1" },
@@ -125,7 +123,6 @@ for (const kind of ["command", "security-screen"] as const) {
 test("wired swarm outbox drives the real orchestrator, durable runs, and authenticated session viewer", async () => {
   const built = buildApp(
     testConfig({
-      sandboxResourcesEnabled: true,
       modalSandbox: { tokenId: "test-id", tokenSecret: "test-secret", nativeSnapshotsEnabled: true },
     }),
   );
@@ -139,7 +136,7 @@ test("wired swarm outbox drives the real orchestrator, durable runs, and authent
     });
     assert.equal(rootTurn.status, "ok");
     const root = (await built.sessions.get(rootTurn.sessionId!))!;
-    await built.memory.replace(root.scopeId, "# Memory\n- Root memory remains in the authorized notebook.");
+    await built.memory.capture(root.scopeId, ["Root memory remains in the authorized notebook."], Date.now());
     const rootRun = (await built.runs.list()).find((run) => run.request.conversation.threadRef === root.threadRef)!;
     const forum = await built.sandboxResources.create("U1", root.scopeId, "sprites", "Integration forum");
     const service = built.app.swarms!;
@@ -200,6 +197,8 @@ for (const storage of ["memory", "postgres"] as const) {
     async () => {
       let databaseUrl: string | undefined;
       let cleanupDatabase = async () => {};
+      let recordedErrors: (() => Promise<number>) | undefined;
+      let errorsAfterStop: number | undefined;
       if (storage === "postgres") {
         const { default: pg } = await import("pg");
         const url = new URL(process.env.SWARM_TEST_DATABASE_URL!);
@@ -208,6 +207,8 @@ for (const storage of ["memory", "postgres"] as const) {
         await pool.query(`CREATE SCHEMA ${schema}`);
         url.searchParams.set("options", `-c search_path=${schema}`);
         databaseUrl = url.toString();
+        recordedErrors = async () =>
+          Number((await pool.query(`SELECT COUNT(*) AS n FROM ${schema}.error_events`)).rows[0].n);
         cleanupDatabase = async () => {
           try {
             await pool.query(`DROP SCHEMA ${schema} CASCADE`);
@@ -220,7 +221,7 @@ for (const storage of ["memory", "postgres"] as const) {
         databaseUrl,
         sessionStore: storage,
         runStore: storage,
-        sandboxResourcesEnabled: true,
+
         modalSandbox: { tokenId: "test", tokenSecret: "test" },
         signingSecret: "swarm-http-source-signing-key-distinct",
         portalIdentitySecret: "swarm-http-portal-identity-key-distinct",
@@ -439,8 +440,10 @@ for (const storage of ["memory", "postgres"] as const) {
         exerciseTurn = undefined;
         await new Promise<void>((resolve) => server.close(() => resolve()));
         await built.runtime.stop();
+        errorsAfterStop = await recordedErrors?.();
         await cleanupDatabase();
       }
+      if (storage === "postgres") assert.ok(errorsAfterStop! > 0);
     },
   );
 }
@@ -474,6 +477,8 @@ test("unbound request fields cannot claim verified swarm provenance", async () =
 
 test("a resolved command approval informs the model without changing its requested command", async () => {
   const built = buildApp(testConfig());
+  const sandbox = await built.sandboxResources.create("U1", "personal:U1", "sprites");
+  await built.sandboxResources.setDefault("U1", "personal:U1", sandbox.id);
   const request: TurnRequest = {
     surface: "web",
     actor: { externalId: "U1" },

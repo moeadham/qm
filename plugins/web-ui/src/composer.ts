@@ -1,14 +1,9 @@
-import { SpeechInput, type SpeechConnection } from "./speech";
-import { SpeechWaveform } from "./speech-waveform";
-import { ref } from "lit/directives/ref.js";
+import { emojiCompletion } from "./emoji-completion";
+import { composerInput, resizeComposerInput } from "./composer-input";
+import { reportHandledError } from "./browser-errors.ts";
 import { appEditSlug } from "./app-edit";
-import {
-  runtimeConfigKey,
-  getRuntimeConfig,
-  loadRuntimeConfig,
-  saveRuntimeConfig,
-  subscribeRuntimeConfig,
-} from "./runtime-config-store";
+import { runtimeConfigKey, loadRuntimeConfig, saveRuntimeConfig, subscribeRuntimeConfig } from "./runtime-config-store";
+import { getRuntimeConfig } from "./runtime-config-cache.ts";
 import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
 import { createFileDragState } from "./file-drag";
 import type { Attachment } from "@earendil-works/pi-web-ui";
@@ -36,9 +31,12 @@ import {
   type CoreAttachment,
   type PendingApproval,
   type QueuedRun,
+  alwaysSteer,
+  switchedDefault,
 } from "./core-bridge";
 import { errMessage } from "../../chassis/src/errors";
-import { browserRenderableImage, fieldSelect, icon } from "./ui";
+import { browserRenderableImage, fieldSelect } from "./ui";
+import { icon } from "./icons";
 import {
   defaultEffortForModel,
   defaultModelValue,
@@ -59,7 +57,7 @@ import { tip } from "./tooltip";
 import { isPhone } from "./viewport";
 import {
   LOADOUT_CAP,
-  ULTRAFAST_MODEL_ID,
+  isUltrafastModel,
   presetModelId,
   ultrafastChoice,
   loadLoadout,
@@ -123,7 +121,7 @@ function forgetThreadPick(threadRef: string): void {
   persistPreference(THREAD_PICKS_STORAGE_KEY, JSON.stringify([...threadModelPicks]));
 }
 
-export function carryModelPick(fromThreadRef: string | null, toThreadRef: string): void {
+function carryModelPick(fromThreadRef: string | null, toThreadRef: string): void {
   const pick = fromThreadRef ? threadModelPicks.get(fromThreadRef) : undefined;
   if (pick) rememberThreadPick(toThreadRef, pick);
 }
@@ -172,7 +170,7 @@ export function clearSkillsCache(): void {
 
 const SLASH_TOKEN = /(^|\s)\/([a-zA-Z0-9_-]*)$/;
 
-export function slashQuery(draft: string): string | null {
+function slashQuery(draft: string): string | null {
   const m = SLASH_TOKEN.exec(draft);
   return m ? (m[2] ?? "") : null;
 }
@@ -439,6 +437,18 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     return modelOptionFor(picked ?? defaultModelValue(scopeKey()), scopeKey());
   }
 
+  function followsDefault(): boolean {
+    const selected = currentModelOption();
+    const threadRef = ctx.chat.state.threadRef;
+    return (
+      !!selected &&
+      !(threadRef && threadModelPicks.has(threadRef)) &&
+      effortOverride === undefined &&
+      fastModeOverride === undefined &&
+      restoredLoadout?.value !== selected.value
+    );
+  }
+
   async function refreshRuntimeSelection(scopeId: string | null, agent?: Agent, refresh = false): Promise<void> {
     const request = ++runtimeRequest;
     const actualScope = runtimeScopeKey(scopeId);
@@ -566,10 +576,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
           effortSelectionRevision === effortRevision &&
           fastSelectionRevision === fastRevision
         ) {
-          if (ctx.chat.state.threadRef) forgetThreadPick(ctx.chat.state.threadRef);
-          effortOverride = undefined;
-          fastModeOverride = undefined;
-          restoredLoadout = undefined;
+          clearChatSelection();
         }
       }
       syncRuntimeSelection(agent);
@@ -647,7 +654,14 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     }
 
     const compact = Boolean(ctx.pane) || isPhone();
-    const runtimeControls = modelPicker.render(agent, selectedModel, inputBlocked);
+    const turnRuntime = ctx.chat.turnRuntime();
+    const routed =
+      turnRuntime?.change &&
+      !switchedDefault(turnRuntime) &&
+      (turnRuntime.harnessId !== selectedModel.harnessId || turnRuntime.modelId !== selectedModel.model.id)
+        ? turnRuntime
+        : undefined;
+    const runtimeControls = modelPicker.render(agent, selectedModel, inputBlocked, routed);
     return html`
       <form
         class="composer-wrap ${compact ? "compact" : ""}"
@@ -742,177 +756,16 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         }
         ${approvalPauses.length ? composerApprovalPanel(approvalPauses) : nothing}
         ${
-          !blockingPauses.length && speech.state !== "idle"
-            ? html`<div class="speech-input-wrap">
-                <textarea
-                  class="composer-input speech-input-readonly"
-                  dir="auto"
-                  rows="1"
-                  readonly
-                  aria-label="Dictation draft"
-                  placeholder="Speak your instruction…"
-                  .value=${live(speechDraft())}
-                  @input=${(event: InputEvent) => onDraftInput(event, agent)}
-                  @scroll=${(event: Event) => {
-                    const input = event.currentTarget as HTMLTextAreaElement;
-                    const display = input.parentElement?.querySelector<HTMLElement>(".speech-input-display");
-                    followSpeechTail = input.scrollHeight - input.clientHeight - input.scrollTop <= 8;
-                    if (display) display.scrollTop = input.scrollTop;
-                  }}
-                ></textarea>
-                ${speechDisplay()}
-              </div>`
-            : nothing
-        }
-        ${
-          !blockingPauses.length && speech.state === "idle"
-            ? html`
-                <textarea
-                  class="composer-input"
-                  dir="auto"
-                  rows="1"
-                  placeholder=${placeholder}
-                  ?disabled=${inputBlocked}
-                  ?readonly=${speechSending}
-                  .value=${live(speechDraft())}
-                  @input=${(e: InputEvent) => onDraftInput(e, agent)}
-                  @keydown=${(e: KeyboardEvent) => onComposerKeydown(e, agent)}
-                  @paste=${(e: ClipboardEvent) => void onComposerPaste(e, agent)}
-                ></textarea>
-              `
-            : nothing
-        }
-        ${
-          speech.state === "recording"
-            ? html`<div class="speech-devices">
-                <label @focusin=${() => void speech.refreshMicrophones()}
-                  >Microphone
-                  ${fieldSelect({
-                    ariaLabel: "Microphone",
-                    value: speech.selectedMicrophone,
-                    disabled: inputBlocked || speech.switchingMicrophone,
-                    compact: true,
-                    onChange: (value) => {
-                      composerState.error = "";
-                      void speech.selectMicrophone(value);
-                    },
-                    options: html`<option value="" ?selected=${!speech.selectedMicrophone}>System default</option>
-                      ${
-                        speech.selectedMicrophone &&
-                        !speech.microphones.some((device) => device.deviceId === speech.selectedMicrophone)
-                          ? html`<option value=${speech.selectedMicrophone} selected>
-                              Previously selected microphone (unavailable)
-                            </option>`
-                          : nothing
-                      }
-                      ${speech.microphones.map((device) => html`<option value=${device.deviceId} ?selected=${device.deviceId === speech.selectedMicrophone}>${device.label}</option>`)}`,
-                  })}
-                </label>
-              </div>`
-            : nothing
-        }
-        ${
-          speech.state === "recording"
-            ? html` <div class="composer-toolbar speech-recording-toolbar">
-                <button
-                  type="button"
-                  class="icon-btn speech-recording-cancel"
-                  aria-label="Cancel dictation"
-                  ${tip("Cancel dictation")}
-                  @click=${() => speech.cancel()}
-                >
-                  ${icon(X, 18)}
-                </button>
-                <div
-                  class="speech-recording-track"
-                  role="img"
-                  aria-label="Live microphone waveform: newest sound enters from the right"
-                >
-                  <canvas class="speech-recording-waveform" aria-hidden="true" ${ref(waveform.attach)}></canvas>
-                </div>
-                <button
-                  type="button"
-                  class="icon-btn composer-mic recording"
-                  aria-label="Stop recording"
-                  ${tip("Stop dictation")}
-                  @click=${() => speech.stop()}
-                >
-                  ${icon(Square, 18)}
-                </button>
-                ${sendControls(agent, true)}
-              </div>`
-            : nothing
-        }
-        ${
-          speech.state === "starting" || speech.state === "transcribing"
-            ? html`<div class="composer-toolbar speech-pending-toolbar">
-                <span role="status"
-                  >${speech.state === "starting" ? "Connecting microphone…" : "Finishing transcription…"}</span
-                >
-                ${
-                  speech.state === "starting"
-                    ? html`<button
-                        type="button"
-                        class="icon-btn"
-                        aria-label="Cancel dictation"
-                        @click=${() => speech.cancel()}
-                      >
-                        ${icon(X, 18)}
-                      </button>`
-                    : nothing
-                }
-                ${sendControls(agent, true)}
-              </div>`
-            : nothing
-        }
-        ${
-          speech.state === "idle"
-            ? html` <div class="composer-toolbar">
-                <div class="composer-left">
-                  <input
-                    class="file-input"
-                    type="file"
-                    multiple
-                    hidden
-                    ?disabled=${attachingDisabled}
-                    @change=${(e: Event) => void onFilesSelected(e, agent)}
-                  />
-                  <button
-                    class="icon-btn composer-attach"
-                    type="button"
-                    aria-label="Attach files"
-                    ${tip("Attach files")}
-                    ?disabled=${attachingDisabled}
-                    @click=${() => pickFiles()}
-                  >
-                    ${icon(Paperclip, 18)}
-                  </button>
-                  ${runtimeControls}
-                </div>
-                <div class="composer-right">
-                  <button
-                    type="button"
-                    class="icon-btn composer-mic"
-                    aria-label="Dictate instruction"
-                    aria-pressed="false"
-                    ${tip(speechTooltip())}
-                    ?disabled=${inputBlocked || speechSending || !speechEnabled()}
-                    @click=${() => {
-                      if (speech.state === "recording") speech.stop();
-                      else if (speech.state === "starting") speech.cancel();
-                      else {
-                        speechThread = ctx.chat.state.threadRef;
-                        composerState.error = "";
-                        void speech.start();
-                      }
-                    }}
-                  >
-                    ${icon(Mic, 18)}
-                  </button>
-                  ${sendControls(agent)}
-                </div>
-              </div>`
-            : nothing
+          blockingPauses.length
+            ? nothing
+            : composerInput({
+                value: composerState.draft,
+                placeholder,
+                disabled: inputBlocked,
+                onInput: (e) => onDraftInput(e, agent),
+                onKeydown: (e) => onComposerKeydown(e, agent),
+                onPaste: (e) => void onComposerPaste(e, agent),
+              })
         }
         ${composerNotice}
       </form>
@@ -1014,34 +867,34 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         ${icon(ArrowUp, 16)}
       </button>`;
     }
+    const label = alwaysSteer() && canSteer(agent) ? "Steer the running task" : "Queue for after this turn";
     return html`
       <button class="stop-btn" type="button" aria-label="Stop" ${tip("Stop")} @click=${() => stopStreaming(agent)}>
         ${icon(Square, 16)}
       </button>
-      <button
-        class="send-btn"
-        type="submit"
-        ${tip("Queue for after this turn")}
-        aria-label="Queue for after this turn"
-        ?disabled=${!composerCanSend()}
-      >
+      <button class="send-btn" type="submit" ${tip(label)} aria-label=${label} ?disabled=${!composerCanSend()}>
         ${icon(ArrowUp, 16)}
       </button>
     `;
   }
 
-  function queuedStrip(agent: Agent): TemplateResult | typeof nothing {
-    const queued = [...queuedRunsFor(ctx.chat.state.threadRef)];
-    if (queuedEdit?.threadRef === ctx.chat.state.threadRef && !queued.some((q) => q.runId === queuedEdit?.runId))
-      queued.push({ runId: queuedEdit.runId, text: queuedEdit.original });
-    const threadRef = ctx.chat.state.threadRef;
-    const steering = steeringRunsFor(threadRef, agent);
-    if (!queued.length && !steering.length) return nothing;
-    const steerable =
+  function canSteer(agent: Agent): boolean {
+    return (
       agent.state.isStreaming &&
       !ctx.chat.isStopping() &&
       ctx.chat.hasLiveRun() &&
-      harnessSupportsSteer(currentModelOption()?.harnessId ?? "");
+      harnessSupportsSteer(currentModelOption()?.harnessId ?? "")
+    );
+  }
+
+  function queuedStrip(agent: Agent): TemplateResult | typeof nothing {
+    const threadRef = ctx.chat.state.threadRef;
+    const steering = steeringRunsFor(threadRef, agent);
+    const queued = queuedRunsFor(threadRef).filter((q) => !pendingSteers.has(q.runId));
+    if (queuedEdit?.threadRef === ctx.chat.state.threadRef && !queued.some((q) => q.runId === queuedEdit?.runId))
+      queued.push({ runId: queuedEdit.runId, text: queuedEdit.original });
+    if (!queued.length && !steering.length) return nothing;
+    const steerable = canSteer(agent);
     const steerTip = (): string => {
       if (steerable) return "Steer the running task with this instead of waiting";
       return "Nothing running can take this. It will go out as its own turn";
@@ -1063,6 +916,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
             ? html` <div class="queued-chip queued-editing" role="listitem">
                 <textarea
                   class="queued-edit-input"
+                  ${emojiCompletion(queuedEdit.text)}
                   aria-label="Edit queued message"
                   rows="3"
                   .value=${live(queuedEdit.text)}
@@ -1225,14 +1079,16 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     redraw: () => ctx.chat.drawActiveChat(),
     scopeKey,
     state: composerState,
-    entries: seededLoadout,
-    activeEntry: activeLoadoutEntry,
-    saveEntries: (entries) => {
-      loadout = entries;
-      saveLoadout(entries, loadoutKey);
+    presets: {
+      entries: seededLoadout,
+      save: (entries) => {
+        loadout = entries;
+        saveLoadout(entries, loadoutKey);
+      },
+      add: addLoadoutEntry,
     },
+    activeEntry: activeLoadoutEntry,
     apply: applyLoadout,
-    add: addLoadoutEntry,
     selectEffort,
     selectHarness,
     toggleFastMode,
@@ -1600,7 +1456,8 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       if (stillHere()) restoreStagedOnFailure(text, sendable, composerState.error || "Could not queue the files.");
       return ctx.chat.drawActiveChat(agent);
     }
-    if (!(await enqueueTurn(agent, threadRef, text, uploaded, queuedFilesKey(sendable)))) {
+    const steer = alwaysSteer() && canSteer(agent);
+    if (!(await enqueueTurn(agent, threadRef, text, uploaded, queuedFilesKey(sendable), steer))) {
       if (stillHere()) restoreStagedOnFailure(text, sendable, composerState.error);
     } else if (transientIds.size && stillHere()) {
       restageAttachments(
@@ -1625,13 +1482,15 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     text: string,
     attachments: CoreAttachment[] = [],
     filesKey = "",
+    steer = false,
   ): Promise<boolean> {
     const idempotencyKey = queueSendKey(threadRef, text, filesKey);
     try {
       const queued = await queueTurn(threadRef, text, agent, ctx.chat.currentTurnOptions, idempotencyKey, attachments);
       failedQueueSend = null;
-      setQueuedRuns(threadRef, [...queuedRunsFor(threadRef).filter((r) => r.runId !== queued.runId), queued]);
       bumpSessionActivity(threadRef);
+      if (steer && canSteer(agent) && threadRef === ctx.chat.state.threadRef) void steerQueued(agent, queued, true);
+      else addQueuedRun(threadRef, queued);
       return true;
     } catch (err) {
       failedQueueSend = { threadRef, text, filesKey, idempotencyKey };
@@ -1694,21 +1553,41 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   const pendingSteers = new Set<string>();
 
-  async function steerQueued(agent: Agent, queued: QueuedRun): Promise<void> {
+  function addQueuedRun(threadRef: string, queued: QueuedRun): void {
+    setQueuedRuns(threadRef, [...queuedRunsFor(threadRef).filter((r) => r.runId !== queued.runId), queued]);
+  }
+
+  function markSteering(threadRef: string, queued: QueuedRun): void {
+    steeringRuns.set(threadRef, [
+      ...(steeringRuns.get(threadRef) ?? []).filter((run) => run.runId !== queued.runId),
+      { ...queued, ts: `queued-steer:${threadRef}:${queued.runId}` },
+    ]);
+  }
+
+  function unmarkSteering(threadRef: string, runId: string): void {
+    const rest = (steeringRuns.get(threadRef) ?? []).filter((run) => run.runId !== runId);
+    if (rest.length) steeringRuns.set(threadRef, rest);
+    else steeringRuns.delete(threadRef);
+  }
+
+  async function steerQueued(agent: Agent, queued: QueuedRun, fresh = false): Promise<void> {
     const threadRef = ctx.chat.state.threadRef;
-    if (!threadRef || !ctx.chat.hasLiveRun() || pendingSteers.has(queued.runId)) return;
+    if (!threadRef || !ctx.chat.hasLiveRun() || pendingSteers.has(queued.runId)) {
+      if (fresh && threadRef) addQueuedRun(threadRef, queued);
+      return;
+    }
     pendingSteers.add(queued.runId);
     composerState.error = "";
+    markSteering(threadRef, queued);
+    let steered = false;
+    let fallBackToQueue = fresh;
     try {
       const outcome = await ctx.chat.signalLiveRun("steer", queued.text, queued.runId);
+      steered = outcome.ok;
       if (outcome.ok || outcome.replayed) {
+        fallBackToQueue = false;
         forgetQueuedRun(threadRef, queued.runId);
         bumpSessionActivity(threadRef);
-        if (outcome.ok)
-          steeringRuns.set(threadRef, [
-            ...(steeringRuns.get(threadRef) ?? []).filter((run) => run.runId !== queued.runId),
-            { ...queued, ts: `queued-steer:${threadRef}:${queued.runId}` },
-          ]);
         if (
           !outcome.ok &&
           outcome.replayed &&
@@ -1721,24 +1600,57 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
             timestamp: Date.now(),
           } as unknown as AgentMessage);
         }
-      } else if (outcome.reason === "queued_changed") {
-        if (agent === ctx.chat.state.agent && threadRef === ctx.chat.state.threadRef)
-          composerState.error = "The queued message changed. Try steering it again.";
       } else if (outcome.reason === "queued_started" || outcome.reason === "not_found") {
+        fallBackToQueue = false;
         forgetQueuedRun(threadRef, queued.runId);
+      } else {
+        reportHandledError("web:steer_refused", new Error(outcome.reason ?? "steer refused"));
+        if (
+          outcome.reason === "queued_changed" &&
+          agent === ctx.chat.state.agent &&
+          threadRef === ctx.chat.state.threadRef
+        )
+          composerState.error = "The queued message changed. Try steering it again.";
       }
     } catch (err) {
+      reportHandledError("web:steer_queued", err);
       if (agent === ctx.chat.state.agent && threadRef === ctx.chat.state.threadRef)
         composerState.error = errMessage(err, "Could not confirm steering. Try again.");
     } finally {
       pendingSteers.delete(queued.runId);
+      if (!steered) unmarkSteering(threadRef, queued.runId);
     }
+    if (fallBackToQueue) addQueuedRun(threadRef, queued);
     if (agent !== ctx.chat.state.agent || threadRef !== ctx.chat.state.threadRef) return;
     ctx.chat.drawActiveChat(agent);
     ctx.chat.resumeIfIdle();
   }
 
+  let pendingSubmissions = 0;
+  let disposed = false;
+  const preventUnsafeUpdate = (event: Event): void => {
+    if (
+      pendingSubmissions ||
+      composerState.attachments.length ||
+      composerState.processingFiles ||
+      composerState.pasteView
+    ) {
+      event.preventDefault();
+    }
+  };
+  window.addEventListener("qm:prepare-update", preventUnsafeUpdate);
+
   async function sendPrompt(agent: Agent): Promise<void> {
+    pendingSubmissions++;
+    try {
+      await sendPromptNow(agent);
+    } finally {
+      pendingSubmissions--;
+      if (disposed && !pendingSubmissions) window.removeEventListener("qm:prepare-update", preventUnsafeUpdate);
+    }
+  }
+
+  async function sendPromptNow(agent: Agent): Promise<void> {
     if (!composerCanSend()) return;
     if (speech.state !== "idle") {
       const thread = ctx.chat.state.threadRef;
@@ -2095,6 +2007,18 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     ctx.chat.drawActiveChat(agent);
   }
 
+  function clearChatSelection(): void {
+    if (ctx.chat.state.threadRef) forgetThreadPick(ctx.chat.state.threadRef);
+    effortOverride = undefined;
+    fastModeOverride = undefined;
+    restoredLoadout = undefined;
+  }
+
+  async function followScopeDefault(agent: Agent): Promise<void> {
+    clearChatSelection();
+    await refreshRuntimeSelection(ctx.chat.state.scopeId, agent, true);
+  }
+
   function selectModel(value: string, agent: Agent): void {
     const option = getModelOptions(scopeKey()).find((candidate) => candidate.value === value);
     if (!option) return;
@@ -2136,7 +2060,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   function toggleFastMode(agent: Agent): void {
     const selected = currentModelOption();
     if (ctx.chat.hasUnresolvedApproval() || ctx.chat.state.resolvingApprovals.size > 0) return;
-    if (selected?.model.id === ULTRAFAST_MODEL_ID) {
+    if (selected && isUltrafastModel(selected.model.id)) {
       const target = ultrafastChoice(getModelOptions(scopeKey()), selected);
       if (target) applyLoadout({ ...activeLoadoutEntry(selected), value: target.value, fast: true }, agent);
       return;
@@ -2173,29 +2097,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       }
       if (ta.value === autosizedValue) return;
       autosizedValue = ta.value;
-      const wrap = ta.closest<HTMLElement>(".composer-wrap");
-      const wrapHeight = wrap?.style.height ?? "";
-      if (wrap) wrap.style.height = `${wrap.getBoundingClientRect().height}px`;
-      ta.style.height = "auto";
-      const cap = parseFloat(getComputedStyle(ta).maxHeight) || 180;
-      const content = ta.scrollHeight;
-      ta.style.height = `${Math.min(cap, Math.max(ctx.pane ? 0 : 48, content))}px`;
-      if (wrap) wrap.style.height = wrapHeight;
-      if (content > cap) {
-        ta.style.overflowY = "auto";
-      } else {
-        ta.style.overflowY = "hidden";
-        ta.scrollTop = 0;
-      }
-      if (ta.readOnly) {
-        if (followSpeechTail) ta.scrollTop = ta.scrollHeight;
-        const display = ta.parentElement?.querySelector<HTMLElement>(".speech-input-display");
-        if (display) {
-          const scrollbar = Math.max(0, ta.offsetWidth - ta.clientWidth);
-          display.style.paddingRight = `${(parseFloat(getComputedStyle(ta).paddingRight) || 0) + scrollbar}px`;
-          display.scrollTop = ta.scrollTop;
-        }
-      }
+      resizeComposerInput(ta, ctx.pane ? 0 : 48);
     });
   }
 
@@ -2215,10 +2117,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   function dispose(): void {
     disposed = true;
-    speech.cancel();
-    waveform.dispose();
-    navigator.mediaDevices?.removeEventListener?.("devicechange", refreshSpeechDevices);
-    document.removeEventListener("visibilitychange", cancelHiddenSpeech);
+    if (!pendingSubmissions) window.removeEventListener("qm:prepare-update", preventUnsafeUpdate);
     window.removeEventListener("model-account-changed", refreshAccount);
     document.removeEventListener("visibilitychange", revalidateRuntime);
     modelPicker.dispose();
@@ -2249,6 +2148,60 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     resetComposer,
     focusComposerEnd,
     fillSuggestedPrompt,
+    addAnnotations: async (
+      text: string,
+      files: File[],
+      annotationId = crypto.randomUUID(),
+      remove = false,
+    ): Promise<boolean> => {
+      const agent = ctx.chat.state.agent;
+      if (
+        !agent ||
+        composerState.processingFiles ||
+        ctx.chat.hasUnresolvedApproval() ||
+        ctx.chat.state.resolvingApprovals.size > 0
+      )
+        return false;
+      const prefix = `annotation_${annotationId}_`;
+      const retained = composerState.attachments.filter((attachment) => !attachment.id.startsWith(prefix));
+      if (remove) {
+        composerState.attachments = retained;
+        ctx.chat.drawActiveChat(agent);
+        return true;
+      }
+      if (retained.length + 1 + files.length > MAX_FILES_PER_MESSAGE) return false;
+      composerState.processingFiles = true;
+      ctx.chat.drawActiveChat(agent);
+      try {
+        const loaded = await Promise.all(files.map((file) => loadAnyAttachment(file)));
+        if (agent !== ctx.chat.state.agent) return false;
+        const remaining = composerState.attachments.filter((attachment) => !attachment.id.startsWith(prefix));
+        if (remaining.length + 1 + loaded.length > MAX_FILES_PER_MESSAGE) return false;
+        const bytes = new TextEncoder().encode(text);
+        const annotation: Attachment = {
+          id: prefix + "context",
+          type: "document",
+          fileName: "App annotation.md",
+          mimeType: "text/markdown",
+          size: bytes.length,
+          content: bytesToBase64(bytes),
+          extractedText: text,
+        };
+        composerState.attachments = [
+          ...remaining,
+          annotation,
+          ...loaded.map((attachment, index) => ({ ...attachment, id: prefix + index })),
+        ];
+        composerState.error = "";
+        return true;
+      } catch {
+        composerState.error = "Could not prepare annotation attachments. Retrying automatically.";
+        return false;
+      } finally {
+        composerState.processingFiles = false;
+        ctx.chat.drawActiveChat(agent);
+      }
+    },
     sendSuggestedPrompt: async (prompt: string, agent: Agent): Promise<void> => {
       if (
         agent !== ctx.chat.state.agent ||
@@ -2263,6 +2216,8 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     },
     resizeComposer,
     currentModelOption,
+    followsDefault,
+    followScopeDefault,
     carryModelPick,
     refreshRuntimeSelection,
     onDragEnter,

@@ -1,9 +1,8 @@
-import { isStrongSigningSecret } from "../auth/source-auth.ts";
+import { isBearerSecret, isStrongSigningSecret } from "../auth/source-auth.ts";
 
 type SecretGate =
   | "production"
   | "background-work-control"
-  | "codex"
   | "postgres"
   | "sprites"
   | "smolmachines"
@@ -12,7 +11,9 @@ type SecretGate =
   | "porter"
   | "agent37"
   | "superserve"
+  | "do-managed-agents"
   | "porter-deploy"
+  | "e2b-deploy"
   | "fly-shared-deploy"
   | "fly-deploy"
   | "aws-deploy-gate"
@@ -38,10 +39,7 @@ export const CORE_SECRET_SPECS: readonly RuntimeSecretSpec[] = [
   { name: "PORTAL_IDENTITY_SECRET", requiredWhen: "production" },
   { name: "SKILL_SIGNING_SECRET", requiredWhen: "production" },
   { name: "AUTH_ALLOWED_EMAILS", requiredWhen: "email-auth" },
-  { name: "SMTP_HOST", requiredWhen: "smtp" },
-  { name: "SMTP_USERNAME", requiredWhen: "smtp" },
-  { name: "SMTP_PASSWORD", requiredWhen: "smtp" },
-  { name: "OPENAI_API_KEY", requiredWhen: ["codex", "model-openai"] },
+  { name: "OPENAI_API_KEY", requiredWhen: ["model-openai"] },
   { name: "ANTHROPIC_API_KEY", requiredWhen: "model-anthropic" },
   { name: "OPENROUTER_API_KEY", requiredWhen: "model-openrouter" },
   { name: "DATABASE_URL", requiredWhen: "postgres" },
@@ -49,7 +47,8 @@ export const CORE_SECRET_SPECS: readonly RuntimeSecretSpec[] = [
   { name: "SMOLMACHINES_TOKEN", requiredWhen: "smolmachines" },
   { name: "AGENT37_API_KEY", requiredWhen: "agent37" },
   { name: "SUPERSERVE_API_KEY", requiredWhen: "superserve" },
-  { name: "E2B_API_KEY", requiredWhen: "e2b" },
+  { name: "E2B_API_KEY", requiredWhen: ["e2b", "e2b-deploy"] },
+  { name: "DO_AGENTS_API_TOKEN", requiredWhen: "do-managed-agents" },
   { name: "MODAL_TOKEN_ID", requiredWhen: "modal" },
   { name: "MODAL_TOKEN_SECRET", requiredWhen: "modal" },
   { name: "PORTER_DEPLOY_API_TOKEN", requiredWhen: ["porter", "porter-deploy"] },
@@ -62,17 +61,12 @@ export const CORE_SECRET_SPECS: readonly RuntimeSecretSpec[] = [
 ];
 
 function sandboxBackendSelected(env: NodeJS.ProcessEnv, backend: string): boolean {
-  if (env.SANDBOX_BACKEND?.trim() === backend) return true;
-  const scopes: unknown = JSON.parse(env.SANDBOX_SCOPE_BACKENDS || "{}");
-  if (!scopes || typeof scopes !== "object" || Array.isArray(scopes))
-    throw new Error("SANDBOX_SCOPE_BACKENDS must be an object");
-  return Object.values(scopes).some((value) => typeof value === "string" && value.trim() === backend);
+  return env.SANDBOX_BACKEND?.trim() === backend;
 }
 
 const GATE_PREDICATES: Readonly<Record<SecretGate, (env: NodeJS.ProcessEnv) => boolean>> = {
   production: (env) => env.NODE_ENV === "production",
   "background-work-control": (env) => Boolean(env.BACKGROUND_DEPLOYMENT_ID?.trim()),
-  codex: (env) => env.HARNESS?.trim() === "codex" && !env.CODEX_AUTH_FILE?.trim() && !env.CODEX_AUTH_CREDENTIAL?.trim(),
   postgres: (env) => env.SESSION_STORE === "postgres" || env.RUN_STORE === "postgres",
   sprites: (env) => sandboxBackendSelected(env, "sprites"),
   smolmachines: (env) => sandboxBackendSelected(env, "smolmachines"),
@@ -81,7 +75,9 @@ const GATE_PREDICATES: Readonly<Record<SecretGate, (env: NodeJS.ProcessEnv) => b
   porter: (env) => sandboxBackendSelected(env, "porter"),
   agent37: (env) => sandboxBackendSelected(env, "agent37"),
   superserve: (env) => sandboxBackendSelected(env, "superserve"),
+  "do-managed-agents": (env) => sandboxBackendSelected(env, "do-managed-agents"),
   "porter-deploy": (env) => env.DEPLOY_PROVIDER === "porter",
+  "e2b-deploy": (env) => env.DEPLOY_PROVIDER === "e2b",
   "fly-shared-deploy": (env) => env.DEPLOY_PROVIDER === "fly" && Boolean(env.FLY_DEPLOY_SHARED_APP_NAME?.trim()),
   "fly-deploy": (env) => env.DEPLOY_PROVIDER === "fly",
   "aws-deploy-gate": (env) => Boolean(env.AWS_DEPLOY_APPS_DOMAIN || env.DEPLOY_APPS_DOMAIN),
@@ -92,8 +88,7 @@ const GATE_PREDICATES: Readonly<Record<SecretGate, (env: NodeJS.ProcessEnv) => b
   "email-auth": (env) => env.AUTH_ALLOWED_EMAILS !== undefined,
   "model-anthropic": (env) => env.MODEL_PROVIDER?.trim() === "anthropic",
   "model-openai": (env) =>
-    env.MODEL_PROVIDER?.trim() === "openai" &&
-    !(env.HARNESS?.trim() === "codex" && (env.CODEX_AUTH_FILE?.trim() || env.CODEX_AUTH_CREDENTIAL?.trim())),
+    env.MODEL_PROVIDER?.trim() === "openai" && !(env.CODEX_AUTH_FILE?.trim() || env.CODEX_AUTH_CREDENTIAL?.trim()),
   "model-openrouter": (env) => env.MODEL_PROVIDER?.trim() === "openrouter",
 };
 
@@ -110,6 +105,7 @@ export function validateCoreSecretEnv(env: NodeJS.ProcessEnv): string[] {
 function isInvalidSecret(name: string, value: string | undefined): boolean {
   const candidate = value?.trim();
   if (!candidate || /^(replace-me|placeholder|changeme|todo)$/i.test(candidate)) return true;
+  if (name === "DEPLOYMENT_CONTROL_SECRET" && !isBearerSecret(value)) return true;
   return (
     (name === "CONNECTOR_SECRET_KEY" ||
       name === "CORE_SIGNING_SECRET" ||

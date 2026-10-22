@@ -1,3 +1,4 @@
+import { createDeliveryStore } from "../src/delivery/delivery-store.ts";
 import type { CapabilityClaims } from "../src/auth/capability-token.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,13 +21,19 @@ function fixture() {
     key: deriveConnectorKey("composio-test"),
   });
   const acl = createAclStore();
+  const app = { getSessionForViewer: async (_id: string, _viewer: string): Promise<unknown> => null };
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const replies: unknown[] = [];
+  const audits: Array<{ action: string; resource?: string }> = [];
   const deps: Partial<ServerDeps> = {
     keychain,
+    deliveries: createDeliveryStore(),
     serviceCreds: keychain,
     acl,
     composioReturns: createMemoryMap(),
+    auditLog: {
+      record: (e: { action: string; resource?: string }) => audits.push(e),
+    } as unknown as ServerDeps["auditLog"],
     runs: {
       get: async () => ({
         status: "running",
@@ -41,15 +48,23 @@ function fixture() {
       calls.push({ url: String(input), init });
       const result = replies.shift();
       if (result instanceof Error) throw result;
+      if (result instanceof Response) return result;
       return Response.json(result);
     }) as typeof fetch,
   };
-  async function invoke(path: string, body?: unknown, actor: string | null = "alice", capability?: CapabilityClaims) {
+  async function invoke(
+    path: string,
+    body?: unknown,
+    actor: string | null = "alice",
+    capability?: CapabilityClaims,
+    impersonating = false,
+  ) {
     let status = 0;
     let text = "";
     const url = new URL(path, "http://localhost");
     const res = {
       setHeader() {},
+      getHeader() {},
       writeHead(code: number) {
         status = code;
       },
@@ -59,11 +74,12 @@ function fixture() {
     } as unknown as ServerResponse;
     const ctx = {
       deps,
+      app,
       res,
       url,
       body,
       capability,
-      actor: actor ? { p: actor, exp: Date.now() + 60_000 } : null,
+      actor: actor ? { p: actor, exp: Date.now() + 60_000, ...(impersonating ? { imp: "admin" } : {}) } : null,
     } as ApiCtx;
     const route = composioRoutes.find((r) => "path" in r && r.path === url.pathname)!;
     await route.handle(ctx);
@@ -92,7 +108,7 @@ function fixture() {
         grantedBy: "admin",
       });
   }
-  return { invoke, own, shared, calls, replies, deps };
+  return { invoke, own, shared, calls, replies, deps, app, audits };
 }
 
 test("Composio requires a verified actor and never uses another person's key", async () => {
@@ -496,6 +512,29 @@ test("execution never retries a provider failure", async () => {
   assert.equal(f.calls.length, 3);
 });
 
+test("execution failures tell the agent whether the tool timed out", async () => {
+  const f = fixture();
+  await f.own();
+  const timeout = new Error("The operation was aborted due to timeout");
+  timeout.name = "TimeoutError";
+  f.replies.push(aliceAccount, gmailTool, timeout);
+  const result = await f.invoke("/v1/composio/execute", execution, null, privateCap);
+  assert.equal(result.status, 502);
+  assert.equal(result.data.cause, "timeout");
+  assert.match(result.data.message, /smaller pages/);
+});
+
+test("oversized provider responses are reported with their status", async () => {
+  const f = fixture();
+  await f.own();
+  f.replies.push(aliceAccount, gmailTool, new Response("payload too large", { status: 413 }));
+  const result = await f.invoke("/v1/composio/execute", execution, null, privateCap);
+  assert.equal(result.status, 502);
+  assert.equal(result.data.cause, "provider_error");
+  assert.equal(result.data.providerStatus, 413);
+  assert.match(result.data.message, /smaller pages/);
+});
+
 test("callback completion is browser-only and preserves the durable return URL", async () => {
   const f = fixture();
   await f.own();
@@ -515,6 +554,33 @@ test("callback completion is browser-only and preserves the durable return URL",
     user_id: composioUserId(orgId(), "alice"),
   });
   assert.equal((await f.deps.composioReturns!.entries()).length, 0);
+  assert.deepEqual(
+    f.audits.filter((e) => e.action.startsWith("composio.conn")).map((e) => [e.action, e.resource]),
+    [["composio.connected", "gmail"]],
+  );
+});
+
+test("connects without a return page are still audited on completion, and failed completions too", async () => {
+  const f = fixture();
+  await f.own();
+  f.replies.push(
+    { session_id: "trs_example" },
+    { redirect_url: "https://connect.composio.dev/link/lk_test", connected_account_id: "ca_test" },
+  );
+  assert.equal((await f.invoke("/v1/composio/authorize", { toolkit: "outlook" })).status, 200);
+  f.replies.push({ connected_account_id: "ca_test" });
+  assert.deepEqual((await f.invoke("/v1/composio/complete-auth", { sessionUri: "opaque" })).data, { returnTo: null });
+  f.replies.push(new Response("bad", { status: 400 }));
+  assert.equal((await f.invoke("/v1/composio/complete-auth", { sessionUri: "opaque" })).status, 400);
+  assert.equal((await f.invoke("/v1/composio/complete-auth", { sessionUri: null })).status, 400);
+  assert.deepEqual(
+    f.audits.filter((e) => e.action.startsWith("composio.conn")).map((e) => [e.action, e.resource]),
+    [
+      ["composio.connected", "outlook"],
+      ["composio.connect_failed", "unknown"],
+      ["composio.connect_failed", "unknown"],
+    ],
+  );
 });
 
 test("finished runs and stale lease capabilities cannot reuse backend connection access", async () => {
@@ -584,7 +650,11 @@ test("expired callback returns are discarded after successful browser verificati
   const f = fixture();
   await f.own();
   const key = `${composioUserId(orgId(), "alice")}:ca_test`;
-  await f.deps.composioReturns!.put(key, { url: "https://qm.example/old", expiresAt: Date.now() - 1 });
+  await f.deps.composioReturns!.put(key, {
+    url: "https://qm.example/old",
+    toolkit: "gmail",
+    expiresAt: Date.now() - 1,
+  });
   f.replies.push({ connected_account_id: "ca_test" });
   assert.deepEqual((await f.invoke("/v1/composio/complete-auth", { sessionUri: "opaque" })).data, { returnTo: null });
   assert.equal(await f.deps.composioReturns!.get(key), null);
@@ -812,4 +882,301 @@ test("linked identities retain provider accounts and Slack status until unlinked
   } finally {
     installPrincipalLinks(null);
   }
+});
+
+test("authorization failures keep a redacted upstream cause for operators", async (t) => {
+  const f = fixture();
+  await f.own();
+  const logged: string[] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => logged.push(args.map(String).join(" ")));
+  f.replies.push(
+    new Response(JSON.stringify({ error: "toolkit not enabled", echoed: "private-key", api_key: "sk-other" }), {
+      status: 400,
+      headers: { "x-request-id": "req_123" },
+    }),
+  );
+  const r = await f.invoke("/v1/composio/authorize", { toolkit: "gmail" });
+  assert.equal(r.status, 502);
+  assert.equal(r.data.error, "composio_authorization_failed");
+  assert.doesNotMatch(r.text, /toolkit not enabled|private-key|req_123/);
+  const report = logged.find((line) => line.includes("composio: authorize"));
+  assert.ok(report, "authorization failure is reported");
+  assert.match(report, /toolkit=gmail/);
+  assert.match(report, /http 400/);
+  assert.match(report, /toolkit not enabled/);
+  assert.match(report, /req_123/);
+  assert.doesNotMatch(report, /private-key|sk-other/);
+});
+
+async function slackReplyFixture() {
+  const f = fixture();
+  await f.own();
+  f.app.getSessionForViewer = async (id, viewer) =>
+    id === "session" && viewer === "alice" ? { session: { threadRef: "ch:C123:123.456" } } : null;
+  f.deps.slackAccounts = createMemoryMap();
+  await f.deps.slackAccounts.put("alice", {
+    principalId: "alice",
+    memberId: "alice",
+    accountId: "ca_alice",
+    userId: "U123",
+    teamId: "T123",
+    user: "Alice",
+    workspace: "Test",
+  });
+  const account = {
+    id: "ca_alice",
+    user_id: composioUserId(orgId(), "alice"),
+    toolkit: { slug: "slack" },
+    status: "ACTIVE",
+  };
+  const identity = { data: { ok: true, user_id: "U123", team_id: "T123" } };
+  const message = { sessionId: "session", text: "Hello", clientMessageId: "01234567-0123-4123-8123-012345678901" };
+  return { ...f, account, identity, message };
+}
+
+test("Slack replies use only the viewer's verified user connection and server-side thread destination", async () => {
+  const f = await slackReplyFixture();
+  f.replies.push(f.account, f.identity, { data: { ok: true } }, { data: { ok: true, ts: "123.789" } });
+  const result = await f.invoke("/v1/composio/slack/reply", {
+    ...f.message,
+    channel: "CATTACK",
+    accountId: "ca_other",
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.sent, true);
+  const receipts = await f.deps.deliveries!.pending("web");
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0]!.text, "Hello");
+  assert.deepEqual(receipts[0]!.destination.webTranscript, {
+    kind: "slack_reply",
+    sessionId: "session",
+    ts: "123.789",
+    name: "Alice",
+  });
+  const request = JSON.parse(String(f.calls.at(-1)!.init!.body));
+  assert.equal(request.connected_account_id, "ca_alice");
+  assert.equal(request.endpoint, "https://slack.com/api/chat.postMessage");
+  assert.deepEqual(request.body, {
+    channel: "C123",
+    thread_ts: "123.456",
+    text: "Hello",
+    client_msg_id: f.message.clientMessageId,
+    as_user: true,
+    unfurl_links: false,
+    unfurl_media: false,
+  });
+});
+
+test("Slack reply status verifies personal access without posting", async () => {
+  const f = await slackReplyFixture();
+  f.replies.push(f.account, f.identity, { data: { ok: true } });
+  assert.equal((await f.invoke("/v1/composio/slack/reply-status", f.message)).data.connected, true);
+  assert.equal(f.calls.length, 3);
+});
+
+test("Slack replies cannot target hidden sessions or accept blank messages", async () => {
+  const f = await slackReplyFixture();
+  assert.equal((await f.invoke("/v1/composio/slack/reply", { ...f.message, sessionId: "hidden" })).status, 404);
+  assert.equal((await f.invoke("/v1/composio/slack/reply", { ...f.message, text: " " })).status, 400);
+  assert.equal((await f.invoke("/v1/composio/slack/reply", f.message, null)).status, 403);
+  assert.equal(f.calls.length, 0);
+});
+
+test("Slack replies require a linked user account and never fall back to the bot token", async () => {
+  const f = await slackReplyFixture();
+  await f.deps.slackAccounts!.delete("alice");
+  f.deps.slackEnvBotToken = "must-not-use";
+  assert.equal((await f.invoke("/v1/composio/slack/reply-status", f.message)).data.connected, false);
+  assert.equal((await f.invoke("/v1/composio/slack/reply", f.message)).status, 409);
+  assert.equal(f.calls.length, 0);
+});
+
+for (const [label, accountPatch, identityPatch] of [
+  ["another owner", { user_id: "other" }, {}],
+  ["revoked connection", { status: "REVOKED" }, {}],
+  ["bot token", {}, { bot_id: "B123" }],
+  ["another user", {}, { user_id: "UOTHER" }],
+  ["another workspace", {}, { team_id: "TOTHER" }],
+] as const)
+  test(`Slack replies reject ${label}`, async () => {
+    const f = await slackReplyFixture();
+    f.replies.push({ ...f.account, ...accountPatch }, { data: { ...f.identity.data, ...identityPatch } });
+    assert.equal((await f.invoke("/v1/composio/slack/reply", f.message)).status, 409);
+    assert.ok(f.calls.length <= 2);
+  });
+
+test("Slack replies preserve an uncertain send result without retrying", async () => {
+  const f = await slackReplyFixture();
+  f.replies.push(f.account, f.identity, { data: { ok: true } }, new Error("timeout"));
+  const result = await f.invoke("/v1/composio/slack/reply", f.message);
+  assert.equal(result.status, 502);
+  assert.match(result.data.message, /outcome is unknown/);
+  assert.equal(f.calls.length, 4);
+});
+
+test("Slack replies stop when the personal account cannot access the conversation", async () => {
+  const f = await slackReplyFixture();
+  f.replies.push(f.account, f.identity, { data: { ok: false, error: "channel_not_found" } });
+  assert.equal((await f.invoke("/v1/composio/slack/reply", f.message)).status, 403);
+  assert.equal(f.calls.length, 3);
+});
+
+test("Slack replies reject impersonation and agent capabilities", async () => {
+  const f = await slackReplyFixture();
+  assert.equal((await f.invoke("/v1/composio/slack/reply", f.message, "alice", undefined, true)).status, 403);
+  assert.equal((await f.invoke("/v1/composio/slack/reply", f.message, "alice", {} as CapabilityClaims)).status, 403);
+  assert.equal(f.calls.length, 0);
+});
+
+test("Slack replies preserve unthreaded DMs and report Slack permission failures", async () => {
+  const f = await slackReplyFixture();
+  f.app.getSessionForViewer = async () => ({ session: { threadRef: "dm:D123" } });
+  f.replies.push(f.account, f.identity, { data: { ok: true } }, { data: { ok: false, error: "missing_scope" } });
+  assert.equal((await f.invoke("/v1/composio/slack/reply", f.message)).status, 403);
+  const request = JSON.parse(String(f.calls.at(-1)!.init!.body));
+  assert.equal(request.body.channel, "D123");
+  assert.equal("thread_ts" in request.body, false);
+});
+
+async function nativeSlackFixture(linked = true) {
+  const f = await slackReplyFixture();
+  const { createDirectoryStore } = await import("../src/directory/directory-store.ts");
+  f.deps.slackAccounts = createMemoryMap();
+  f.deps.connectorTokens = f.deps.keychain;
+  f.deps.oauthEnv = { SLACK_OAUTH_CLIENT_ID: "native-client", SLACK_OAUTH_CLIENT_SECRET: "native-secret" };
+  f.deps.directory = createDirectoryStore();
+  await f.deps.directory.replace([{ principalId: "alice", slackId: "U123", displayName: "Alice", type: "internal" }]);
+  f.deps.slackEnvBotToken = "workspace-bot";
+  if (linked) await f.deps.connectorTokens!.setConnectorToken("slack.com", "alice", { accessToken: "alice-user" });
+  const nativeCalls: Array<{ method: string; token: string; payload?: object }> = [];
+  const nativeReplies: unknown[] = [];
+  f.deps.slackWebClient = (token, options) => {
+    assert.equal(options.retryConfig?.retries, 0);
+    assert.equal(options.rejectRateLimitedCalls, true);
+    return {
+      async apiCall(method, payload) {
+        nativeCalls.push({ method, token, payload });
+        if (token === "workspace-bot") return { ok: true, team_id: "T123" };
+        const value = nativeReplies.shift();
+        if (value instanceof Error) throw value;
+        if ((value as { ok?: boolean })?.ok === false)
+          throw Object.assign(new Error("Slack API error"), { code: "slack_webapi_platform_error", data: value });
+        return value as { ok: boolean };
+      },
+    };
+  };
+  const nativeIdentity = { ok: true, user_id: "U123", team_id: "T123", user: "Alice", team: "Test" };
+  return { ...f, nativeCalls, nativeReplies, nativeIdentity };
+}
+
+test("native Slack replies use the authenticated user's token and server destination without Composio", async () => {
+  const f = await nativeSlackFixture();
+  f.nativeReplies.push(f.nativeIdentity, { ok: true }, { ok: true, ts: "123.789" });
+  const result = await f.invoke("/v1/composio/slack/reply", { ...f.message, channel: "COTHER" });
+  assert.equal(result.data.sent, true);
+  const receipts = await f.deps.deliveries!.pending("web");
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0]!.text, "Hello");
+  assert.deepEqual(receipts[0]!.destination.webTranscript, {
+    kind: "slack_reply",
+    sessionId: "session",
+    ts: "123.789",
+    name: "Alice",
+  });
+  assert.equal(f.calls.length, 0);
+  const sent = f.nativeCalls.at(-1)!;
+  assert.equal(sent.method, "chat.postMessage");
+  assert.equal(sent.token, "alice-user");
+  assert.deepEqual(sent.payload, {
+    channel: "C123",
+    thread_ts: "123.456",
+    text: "Hello",
+    client_msg_id: f.message.clientMessageId,
+    as_user: true,
+    unfurl_links: false,
+    unfurl_media: false,
+  });
+});
+
+test("native Slack rejects bot, wrong person, and wrong workspace tokens", async () => {
+  for (const invalid of [{ bot_id: "B123" }, { user_id: "UOTHER" }, { team_id: "TOTHER" }]) {
+    const f = await nativeSlackFixture();
+    f.nativeReplies.push({ ...f.nativeIdentity, ...invalid });
+    const result = await f.invoke("/v1/composio/slack/reply", f.message);
+    assert.equal(result.status, 409);
+    assert.equal(
+      f.nativeCalls.some((c) => c.method === "chat.postMessage"),
+      false,
+    );
+  }
+});
+
+test("native Slack connection status and linking work without a Composio credential", async () => {
+  const f = await nativeSlackFixture(false);
+  f.deps.keychain = undefined;
+  f.deps.serviceCreds = undefined;
+  assert.deepEqual((await f.invoke("/v1/composio/slack")).data, {
+    connected: false,
+    nativeOAuth: true,
+    workspaceInstalled: true,
+  });
+  assert.equal((await f.invoke("/v1/composio/slack/reply-status", { sessionId: "session" })).data.connected, false);
+  await f.deps.connectorTokens!.setConnectorToken("slack.com", "alice", { accessToken: "alice-user" });
+  f.nativeReplies.push(f.nativeIdentity);
+  assert.equal((await f.invoke("/v1/composio/slack")).data.connected, true);
+});
+
+test("configured native OAuth preserves an existing Composio connection", async () => {
+  const f = await nativeSlackFixture(false);
+  await f.deps.slackAccounts!.put("alice", {
+    principalId: "alice",
+    memberId: "alice",
+    accountId: "ca_alice",
+    userId: "U123",
+    teamId: "T123",
+    user: "Alice",
+    workspace: "Test",
+  });
+  f.replies.push(f.account);
+  assert.equal((await f.invoke("/v1/composio/slack")).data.connected, true);
+  f.replies.push(f.account, f.identity, { data: { ok: true } }, { data: { ok: true, ts: "123.789" } });
+  assert.equal((await f.invoke("/v1/composio/slack/reply", f.message)).data.sent, true);
+  assert.equal(f.nativeCalls.length, 0);
+});
+
+test("native Slack access denial and uncertain sends never fall through to another transport", async () => {
+  for (const sending of [false, true]) {
+    const f = await nativeSlackFixture();
+    f.nativeReplies.push(f.nativeIdentity, { ok: sending });
+    if (sending) f.nativeReplies.push(new Error("timeout"));
+    const result = await f.invoke("/v1/composio/slack/reply", f.message);
+    assert.equal(result.status, sending ? 502 : 403);
+    if (sending) assert.match(result.data.message, /outcome is unknown/);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("a confirmed Slack send is distinguished from a failed transcript write", async () => {
+  const f = await slackReplyFixture();
+  f.deps.deliveries!.enqueue = async () => {
+    throw new Error("database unavailable");
+  };
+  f.replies.push(f.account, f.identity, { data: { ok: true } }, { data: { ok: true, ts: "123.789" } });
+  const result = await f.invoke("/v1/composio/slack/reply", f.message);
+  assert.equal(result.status, 502);
+  assert.equal(result.data.error, "transcript_unavailable");
+  assert.match(result.data.message, /Slack sent your message.*Do not resend/);
+});
+
+test("Slack reply failures redact both provider credentials from diagnostics", async (t) => {
+  const logged: string[] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => logged.push(args.map(String).join(" ")));
+  const composio = await slackReplyFixture();
+  composio.replies.push(new Response("provider rejected private-key", { status: 502 }));
+  assert.equal((await composio.invoke("/v1/composio/slack/reply", composio.message)).status, 502);
+  const native = await nativeSlackFixture();
+  native.nativeReplies.push(new Error("provider rejected alice-user"));
+  assert.equal((await native.invoke("/v1/composio/slack/reply", native.message)).status, 502);
+  assert.match(logged.join("\n"), /provider rejected/);
+  assert.doesNotMatch(logged.join("\n"), /private-key|alice-user/);
 });
