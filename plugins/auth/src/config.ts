@@ -1,4 +1,11 @@
 import { isMissingOrPlaceholder } from "../../chassis/src/env.ts";
+import {
+  emailConfigured,
+  readEmailConfig,
+  senderAddress,
+  type EmailConfig,
+} from "../../chassis/src/email-config.ts";
+export { emailConfigured, senderAddress } from "../../chassis/src/email-config.ts";
 import { parsePasswordHash } from "./password.ts";
 
 export interface AuthConfig extends EmailConfig {
