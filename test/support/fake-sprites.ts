@@ -210,7 +210,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
       script
         .replace(/\btimeout \d+ /g, "")
         .replace(/\bsha256sum -c --status\b/g, "shasum -a 256 -c --status")
-        .replace(/\bmv -Tf\b/g, "mv -fh")
+        .replace(/\bmv -Tf\b/g, process.platform === "darwin" ? "mv -fh" : "mv -Tf")
         .replace(/\/proc\/pressure\/io/g, `${home}/.proc-pressure-io`)
         .replace(/\/proc\/loadavg/g, `${home}/.proc-loadavg`)
         .replace(/\/usr\/local/g, `${home}/.usr-local`)
