@@ -488,6 +488,11 @@ this section with evidence before promoting the current candidate.
       production web build passed.
 - [x] Final admin, web UI, auth, and portal production images built and booted.
 - [x] Repository format, core/contract typechecks, ESLint, Knip, and Oxlint pass.
+- [x] Fly staging deployed the final core, web UI, and portal images; live image
+      identity, health, S3 durability, private-session smoke, and deployment
+      conformance all passed. The web image now reuses its production npm cache
+      and bounds dependency retries so the SheetJS CDN and Depot's transient
+      esbuild `ETXTBSY` race cannot leave a build hanging indefinitely.
 - [ ] Complete a live staging acceptance test with both real Claude and Codex
       personal subscriptions; test credentials were intentionally not copied
       into the isolated runner.
