@@ -493,11 +493,13 @@ this section with evidence before promoting the current candidate.
       into the isolated runner.
 - [ ] Complete real-browser speech and login/email acceptance against staging.
 - [ ] Resolve or explicitly accept the remaining production audit findings.
-      As of 2026-10-28, root retains `body-parser` (high) and `qs` (moderate):
-      fixed releases exist but are still rejected by the repository's seven-day
-      package-age policy. Web retains five upstream dependency-chain findings
-      with no supported fix path (`zod`/LM Studio and KaTeX/mini-lit); connector
-      SDK is clean. The direct critical DOMPurify finding was fixed.
+      As of 2026-10-28, the root and connector SDK audits are clean. The root
+      uses exact security overrides for `body-parser` 2.4.0 and `qs` 6.17.0;
+      these are deliberate exceptions to the seven-day package-age policy
+      because the production image's mandatory audit otherwise cannot build.
+      Web retains five upstream dependency-chain findings with no supported fix
+      path (`zod`/LM Studio and KaTeX/mini-lit). The direct critical DOMPurify
+      finding was fixed.
 
 ## Incident signatures worth searching in logs
 
