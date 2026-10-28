@@ -58,6 +58,9 @@ export const CORE_SECRET_SPECS: readonly RuntimeSecretSpec[] = [
   { name: "GOOGLE_OAUTH_CLIENT_SECRET", requiredWhen: "google-oauth" },
   { name: "DROPBOX_OAUTH_CLIENT_SECRET", requiredWhen: "dropbox-oauth" },
   { name: "LINEAR_OAUTH_CLIENT_SECRET", requiredWhen: "linear-oauth" },
+  { name: "SMTP_HOST", requiredWhen: "smtp" },
+  { name: "SMTP_USERNAME", requiredWhen: "smtp" },
+  { name: "SMTP_PASSWORD", requiredWhen: "smtp" },
 ];
 
 function sandboxBackendSelected(env: NodeJS.ProcessEnv, backend: string): boolean {

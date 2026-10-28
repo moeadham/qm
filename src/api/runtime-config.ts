@@ -63,11 +63,21 @@ export async function userRuntimeConfigBody(
     account === "openai" ? null : store.get(actorId, "anthropic"),
     account === "anthropic" ? null : store.get(actorId, "openai"),
   ]);
-  const snapshot = await runtimeConfigBody(ctx, scope, async (choice) => {
-    const route = resolveIndividualAuthRouting(anthropic, openai, choice.modelId);
-    return route?.harness === choice.harnessId && route.model === choice.modelId ? null : "account_runtime_unavailable";
-  });
-  const route = resolveIndividualAuthRouting(anthropic, openai, snapshot.effective.modelId);
+  const snapshot = await runtimeConfigBody(
+    ctx,
+    scope,
+    async (choice) => {
+      const route = resolveIndividualAuthRouting(anthropic, openai, choice.modelId);
+      return route?.harness === choice.harnessId && route.model === choice.modelId
+        ? null
+        : "account_runtime_unavailable";
+    },
+    purpose,
+    requested,
+  );
+  const route =
+    resolveIndividualAuthRouting(anthropic, openai, snapshot.effective.modelId) ??
+    (snapshot.scopeOverride ? null : resolveIndividualAuthRouting(anthropic, openai, undefined));
   if (!route?.model || !snapshot.modelsByHarness[route.harness]?.includes(route.model)) return snapshot;
   const { unavailableReason: _, ...available } = snapshot;
   return {
