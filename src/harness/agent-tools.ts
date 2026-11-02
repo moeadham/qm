@@ -49,6 +49,7 @@ import {
 import { SANDBOX_CAPABILITY_TTL_MS } from "../auth/capability-token.ts";
 import { CRON_FIRE_NOTE_MAX_CHARS } from "../api/control-service.ts";
 import { utcMinute } from "../util/time.ts";
+import { chatSurface } from "../surfaces/chat-surface.ts";
 
 function describePublishAudience(a: PublishAudienceDescriptor | undefined): string {
   if (!a) return "Owned by you.";
@@ -3356,7 +3357,8 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       admin.description;
 
   const surfaceName = opts?.surfaceName ?? "slack";
-  const surfaceLabel = surfaceName === "slack" ? "Slack" : surfaceName;
+  const chat = chatSurface(surfaceName);
+  const surfaceLabel = chat?.label ?? surfaceName;
   const surface = defineTool({
     name: surfaceName,
     label: surfaceName,
@@ -3393,9 +3395,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         Type.String({
           description:
             "post/reach: the message to send. edit: the new message content. Use Markdown, including [label](url) links; the surface renders it." +
-            (surfaceName === "slack"
-              ? " To @-mention on Slack, use `<@U…>` for a person or `<!subteam^S…>` for a user group (ids appear in People here / read / search results). A typed `@name` is plain text and pings no one; @here/@channel/@everyone never ping."
-              : ""),
+            (chat?.mentionHint ?? ""),
         }),
       ),
       channel: Type.Optional(

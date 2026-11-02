@@ -41,6 +41,7 @@ import { resolveTurnFastMode, turnRuntimePurpose } from "./turn-options.ts";
 import { orgId } from "../config.ts";
 import { renderGatewayContext } from "./gateway-context.ts";
 import { deriveTurnOutcome, approvalBlocksInput } from "./turn-outcome.ts";
+import { chatSurface, isChatSurface } from "../surfaces/chat-surface.ts";
 import { applyPromptVars, loadProtocolFile, type PromptVars } from "../resolution/prompt-vars.ts";
 import { cleanBrandingLabel, resolveBranding } from "../resolution/branding.ts";
 import { resolveTurnContext } from "../resolution/turn-context.ts";
@@ -1038,7 +1039,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       resolution.grantedHandles = context.listFiles();
       let memoryView = await context.memorySnapshot(false);
       const isWeb = input.surface === "web";
-      const isSlack = input.surface === "slack";
+      const chat = chatSurface(input.surface);
       const surfaceTool = input.surface ?? "slack";
       const branding = await resolveBranding(deps.config, resolution.orgScopeId, deps.brandingDefault);
       const botName = branding.selfLabel ?? "QM";
@@ -1055,12 +1056,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const frameVars: PromptVars = {
         botName,
         surfaceTool,
-        surfaceLabel: isWeb ? `the ${botName} web app` : "Slack",
+        surfaceLabel: isWeb ? `the ${botName} web app` : (chat?.label ?? "Slack"),
         conversationType: { dm: "private 1:1", group: "group conversation", channel: "channel conversation" }[
           conversation.kind
         ],
         web: isWeb,
-        slack: isSlack,
+        chat: Boolean(chat),
       };
       if (modeName === "mode-conversation") {
         frameVars.userName = cleanBrandingLabel(actor.displayName, 80) ?? "there";
@@ -1087,8 +1088,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         botName,
         botHandle,
         orgName,
+        surfaceLabel: chat?.label ?? "Slack",
         web: isWeb,
-        slack: isSlack,
+        chat: Boolean(chat),
+        chatLinkHint: chat?.linkHint ?? "",
         sessions: isWeb && surfaceName === "web" && Boolean(sessionSyscalls) && !input.swarm,
       });
       let systemPrompt = `${modeFrame}\n\n${resolution.systemPrompt}\n\n${sharedCore}`;
@@ -2417,7 +2420,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (ambientTurn) assignSessionTitle();
 
         if (input.runId) {
-          if ((input.surface === "slack" || input.surface === "monitor") && input.runLeaseToken) {
+          if ((isChatSurface(input.surface) || input.surface === "monitor") && input.runLeaseToken) {
             await deps.runs
               ?.setDeliveryState(input.runId, input.runLeaseToken, { replying: true })
               .catch(swallowAs("orchestrator: persist reply engagement", false));
@@ -2553,7 +2556,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             sourceSessionId: session.id,
           });
         const earlyTaskAck =
-          input.surface === "slack" &&
+          isChatSurface(input.surface) &&
           humanInput &&
           conversation.kind === "dm" &&
           !input.approval &&
@@ -3821,7 +3824,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
         const stagedAttachments = attachStaging.staged();
         const harvestedAck = (() => {
-          if (input.surface !== "slack" || input.surfaceTools || !input.runId) return undefined;
+          if (!isChatSurface(input.surface) || input.surfaceTools || !input.runId) return undefined;
           const fb = deps.turnStream?.firstBlock(input.runId);
           const text = fb?.text.trim();
           return fb?.closed && text ? text : undefined;
