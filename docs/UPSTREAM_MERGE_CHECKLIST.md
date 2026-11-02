@@ -320,6 +320,10 @@ Past failures:
 - Repeated final/partial events could duplicate words or submissions.
 - Direct speech configuration access and CSP expectations diverged between the
   portal and web UI.
+- The v0.1.15 merge retained the speech markup and JavaScript but dropped the
+  speech CSS. The unbounded waveform canvas triggered a runaway resize/layout
+  loop that made the chat appear to crash. Verify the live waveform remains a
+  compact 30px-high row and that Cancel immediately restores the composer.
 
 Automated checks:
 
@@ -341,6 +345,10 @@ node --test test/playground.test.ts
 
 Staging acceptance:
 
+- [x] On 2026-11-02, a real Chrome microphone recording started on Fly staging,
+      the compact waveform rendered without freezing the page, Cancel restored
+      the composer without sending, and `[qm-speech]` reported a running audio
+      context with no error.
 - [ ] Use a real microphone for Stop/edit/Send and one-click Send flows.
 - [ ] Run longer than two minutes and stream more than 8 MiB before manually
       stopping.
@@ -493,9 +501,9 @@ this section with evidence before promoting the current candidate.
       conformance all passed. The web image now reuses its production npm cache
       and bounds dependency retries so the SheetJS CDN and Depot's transient
       esbuild `ETXTBSY` race cannot leave a build hanging indefinitely.
-- [ ] Complete a live staging acceptance test with both real Claude and Codex
-      personal subscriptions; test credentials were intentionally not copied
-      into the isolated runner.
+- [x] Live staging acceptance passed with both real Claude and Codex personal
+      subscriptions after copying their encrypted OAuth records from production
+      and re-encrypting them with staging's connector key.
 - [ ] Complete real-browser speech and login/email acceptance against staging.
 - [ ] Resolve or explicitly accept the remaining production audit findings.
       As of 2026-10-28, the root and connector SDK audits are clean. The root
