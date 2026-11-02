@@ -1,6 +1,7 @@
 import { createMemoryAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
 import { foldPrincipalId, type PrincipalLinkResolver } from "../directory/person.ts";
+import { requiresPrincipalLink } from "./identity-service.ts";
 
 export interface PrincipalLink {
   principalId: string;
@@ -107,6 +108,8 @@ export function createPrincipalLinkService(
         const aliasKey = foldPrincipalId(principalId);
         const canonicalKey = foldPrincipalId(canonicalId);
         if (aliasKey === canonicalKey) throw new PrincipalLinkError(400, "a principal cannot be linked to itself");
+        if (requiresPrincipalLink(canonicalId))
+          throw new PrincipalLinkError(400, `${canonicalId} is a linked sign-in and cannot be a canonical principal`);
         await refresh(true);
         const existing = byAlias.get(aliasKey);
         if (existing) {

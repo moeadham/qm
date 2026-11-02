@@ -441,6 +441,36 @@ test("a guest actor is refused (internal-only, input side)", async () => {
   assert.match(res.reason ?? "", /internal-only/);
 });
 
+test("a Discord actor runs only once linked to an active QM principal", async () => {
+  const { app, principalLinks, identity } = freshApp();
+  const discordTurn = () =>
+    app.turn({
+      surface: "test",
+      actor: { externalId: "discord:1234567890" },
+      conversation: { kind: "dm", threadRef: "dm:discord-dm:t1" },
+      text: "hello from discord",
+    });
+  const unlinked = await discordTurn();
+  assert.equal(unlinked.status, "refused");
+  assert.match(unlinked.reason ?? "", /internal-only/);
+
+  await principalLinks.link({
+    principalId: "discord:1234567890",
+    canonicalId: "jordan@acme.test",
+    evidence: "Discord OAuth user 1234567890",
+    linkedBy: "jordan@acme.test",
+  });
+  await identity.refresh(true);
+  const linked = await discordTurn();
+  assert.equal(linked.status, "ok", linked.reason);
+  assert.match(linked.reply ?? "", /You said: hello from discord/);
+
+  await identity.deactivate("jordan@acme.test");
+  const deactivated = await discordTurn();
+  assert.equal(deactivated.status, "refused");
+  assert.match(deactivated.reason ?? "", /internal-only/);
+});
+
 test("a channel with a non-internal audience member is refused (internal-only, output side)", async () => {
   const { app } = freshApp();
   const res = await app.turn({

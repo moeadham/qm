@@ -36,6 +36,13 @@ export interface IdentityService extends IdentityProvider {
   refresh(force?: boolean): Promise<void>;
 }
 
+const LINK_REQUIRED_PREFIXES = ["discord:"];
+
+export function requiresPrincipalLink(id: string): boolean {
+  const s = id.trim().toLowerCase();
+  return LINK_REQUIRED_PREFIXES.some((prefix) => s.startsWith(prefix));
+}
+
 export function actorAssertionActive(
   identity: Pick<IdentityService, "classify" | "isInternal">,
   actor: ActorAssertion | undefined,
@@ -86,6 +93,7 @@ export function createIdentityService(
 
   function classify(externalId: string, isExternalGuest?: boolean): Principal {
     const id = canonicalPerson(externalId);
+    if (requiresPrincipalLink(id)) return { id, type: "guest" };
     if (opts.isOverridden?.(externalId)) return { id, type: "internal" };
     const key = personKey(externalId);
     const record = deactivated.get(key);

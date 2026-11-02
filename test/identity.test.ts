@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { createIdentityService, type DeactivationRecord } from "../src/identity/identity-service.ts";
 import type { ExternalMember } from "../src/identity/external-members.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import { createPrincipalLinkService } from "../src/identity/principal-links.ts";
+import { installPrincipalLinks } from "../src/directory/person.ts";
 
 const id = createIdentityService();
 
@@ -156,4 +158,27 @@ test("an overridden principal classifies internal even when flagged guest or dea
   await svc.deactivate("U-CONTRACTOR");
   assert.equal(svc.classify("U-CONTRACTOR").type, "internal");
   assert.equal(svc.classify("U-OTHER", true).type, "guest");
+});
+
+test("an unlinked Discord sign-in is a guest; linking makes it the canonical person", async () => {
+  const links = createPrincipalLinkService();
+  installPrincipalLinks(links);
+  try {
+    const svc = createIdentityService(undefined, { isOverridden: () => true });
+    assert.equal(svc.classify("discord:42").type, "guest");
+    assert.equal(svc.classify("Discord:42").type, "guest");
+    await links.link({
+      principalId: "discord:42",
+      canonicalId: "jordan@acme.test",
+      evidence: "Discord OAuth user 42",
+      linkedBy: "jordan@acme.test",
+    });
+    assert.deepEqual(svc.classify("discord:42"), { id: "jordan@acme.test", type: "internal" });
+    await assert.rejects(
+      links.link({ principalId: "U1", canonicalId: "discord:42", evidence: "x", linkedBy: "admin" }),
+      /cannot be a canonical principal/,
+    );
+  } finally {
+    installPrincipalLinks(null);
+  }
 });

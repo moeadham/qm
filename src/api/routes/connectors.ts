@@ -26,7 +26,7 @@ import { sendJson, sendRedirect } from "../http.ts";
 import { audit } from "./shared.ts";
 import type { ApiCtx, BaseCtx, Route } from "./route.ts";
 
-const OAUTH_STATE_MAX_AGE_MS = 10 * 60_000;
+export const OAUTH_STATE_MAX_AGE_MS = 10 * 60_000;
 function oauthStateSecret(deps: ServerDeps, signingSecret: string | undefined): string {
   const value = deps.oauthStateSecret ?? signingSecret;
   if (!value) throw new Error("OAuth state secret required");
@@ -35,12 +35,12 @@ function oauthStateSecret(deps: ServerDeps, signingSecret: string | undefined): 
 
 type OAuthFlowContext = Omit<OAuthState, "issuedAt" | "nonce">;
 
-function beginOAuthFlow(deps: ServerDeps, secret: string | undefined, state: OAuthFlowContext): Promise<string> {
+export function beginOAuthFlow(deps: ServerDeps, secret: string | undefined, state: OAuthFlowContext): Promise<string> {
   if (deps.oauthFlows) return deps.oauthFlows.start(state);
   return sealOAuthState(state, { secret: oauthStateSecret(deps, secret) });
 }
 
-async function resumeOAuthFlow(deps: ServerDeps, secret: string | undefined, param: string): Promise<OAuthState> {
+export async function resumeOAuthFlow(deps: ServerDeps, secret: string | undefined, param: string): Promise<OAuthState> {
   const stored = deps.oauthFlows ? await deps.oauthFlows.finish(param) : null;
   if (stored) return stored;
   return openOAuthState(param, { secret: oauthStateSecret(deps, secret), maxAgeMs: OAUTH_STATE_MAX_AGE_MS });
