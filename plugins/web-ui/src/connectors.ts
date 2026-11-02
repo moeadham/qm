@@ -384,7 +384,21 @@ export function clearConnectorNotice(): void {
   connectorNotice = "";
 }
 
+const DISCORD_LINK_NOTICES: Record<string, string> = {
+  connected: "Discord: linked. The QM bot now accepts your messages.",
+  wrong_account: "Discord: you signed in to a different Discord account than the one that messaged the bot.",
+  wrong_session: "Discord: finish linking in the same browser where you started, signed in as yourself.",
+  already_linked: "Discord: your QM account already has a linked Discord account. Unlink it first.",
+  linked_elsewhere: "Discord: that Discord account is linked to another QM user.",
+  inactive: "Discord: your QM account isn't active.",
+  denied: "Discord: linking was cancelled.",
+};
+
 export function noteConnectorResult(provider: string, status: string): void {
+  if (provider === "discord") {
+    connectorNotice = DISCORD_LINK_NOTICES[status] ?? "Discord: linking failed. Try again.";
+    return;
+  }
   const name = CONNECTOR_LABELS[provider]?.name ?? provider;
   connectorNotice = status === "connected" ? `${name}: connected.` : `${name}: connection failed.`;
 }

@@ -1,7 +1,6 @@
 import { createMemoryAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
-import { foldPrincipalId, type PrincipalLinkResolver } from "../directory/person.ts";
-import { requiresPrincipalLink } from "./identity-service.ts";
+import { foldPrincipalId, requiresPrincipalLink, type PrincipalLinkResolver } from "../directory/person.ts";
 
 export interface PrincipalLink {
   principalId: string;
@@ -122,6 +121,11 @@ export function createPrincipalLinkService(
             400,
             `${canonicalId} is itself linked to ${canonicalIsAlias.canonicalId}; link to that principal instead`,
           );
+        if (
+          requiresPrincipalLink(principalId) &&
+          (byCanonical.get(canonicalKey) ?? []).some((row) => requiresPrincipalLink(row.principalId))
+        )
+          throw new PrincipalLinkError(409, `${canonicalId} already has a linked Discord account; unlink it first`);
         if (byCanonical.has(aliasKey))
           throw new PrincipalLinkError(
             400,

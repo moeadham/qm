@@ -797,9 +797,8 @@ async function handleDiscordConnect(
   res: ServerResponse,
   o: { session: SessionClaims; ticket: string | null },
 ): Promise<void> {
-  const qs = new URLSearchParams({ redirectUri: `${PUBLIC_URL}/v1/discord-link/callback` });
-  if (o.ticket) qs.set("t", o.ticket);
-  const path = withSourceAuthNonce(`/v1/discord-link/start?${qs.toString()}`, CORE_SIGNING_SECRET);
+  const qs = o.ticket ? `?${new URLSearchParams({ t: o.ticket }).toString()}` : "";
+  const path = withSourceAuthNonce(`/v1/discord-link/start${qs}`, CORE_SIGNING_SECRET);
   try {
     const r = await fetch(`${CORE}${path}`, {
       headers: { ...signedHeaders(CORE_SIGNING_SECRET, "GET", path), ...portalIdentityHeaders(o.session.sub) },
@@ -840,7 +839,6 @@ async function coreImpersonate(
 function isOAuthPublicPassthrough(method: string, pathname: string): boolean {
   if (method !== "GET") return false;
   if (/^\/v1\/connectors\/oauth\/[^/]+\/callback$/.test(pathname)) return true;
-  if (pathname === "/v1/discord-link/callback") return true;
   return false;
 }
 
@@ -1238,6 +1236,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (!session) return consentBounce();
     if (session.anon) return sendHtml(res, 403, playgroundRestrictedHtml());
     return handleDiscordConnect(res, { session, ticket: url.searchParams.get("t") });
+  }
+  if (method === "GET" && pathname === "/v1/discord-link/callback") {
+    if (!session) return consentBounce();
+    if (session.anon) return sendHtml(res, 403, playgroundRestrictedHtml());
+    return proxyToUpstream(
+      req,
+      res,
+      { baseUrl: CORE, path: pathname, search: url.search },
+      FORWARD_OAUTH_HEADERS,
+      portalIdentityHeaders(session.sub),
+    );
   }
   const selfConnect = /^\/connect\/([^/]+)\/self-connect$/.exec(pathname);
   if (method === "GET" && selfConnect) {

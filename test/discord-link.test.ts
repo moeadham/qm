@@ -52,6 +52,7 @@ function start(discordUser: () => string): { base: string; built: BuiltApp; clos
     auditLog: built.auditLog,
     identity: built.identity,
     principalLinks: built.principalLinks,
+    portalUrl: "https://qm.example.test",
     oauthEnv: { DISCORD_APPLICATION_ID: "app-1", DISCORD_CLIENT_SECRET: "app-secret" } as NodeJS.ProcessEnv,
     oauthFetch: discordApi(discordUser),
   });
@@ -67,26 +68,38 @@ function start(discordUser: () => string): { base: string; built: BuiltApp; clos
   };
 }
 
-async function linkAs(
-  srv: { base: string },
-  principal: string,
-  ticketFor?: string,
-): Promise<{ status: number; location: string | null }> {
-  const redirectUri = `${srv.base}/v1/discord-link/callback`;
-  const qs = new URLSearchParams({ redirectUri });
-  if (ticketFor) qs.set("t", await mintDiscordLinkTicket(ticketFor, orgId(), SECRET));
-  const startPath = `/v1/discord-link/start?${qs.toString()}`;
+async function startLink(srv: { base: string }, principal: string, ticketFor?: string): Promise<string> {
+  const qs = ticketFor ? `?t=${encodeURIComponent(await mintDiscordLinkTicket(ticketFor, orgId(), SECRET))}` : "";
+  const startPath = `/v1/discord-link/start${qs}`;
   const startRes = await fetch(`${srv.base}${startPath}`, { headers: await headers("GET", startPath, principal) });
   assert.equal(startRes.status, 200, await startRes.clone().text());
   const authorize = new URL(((await startRes.json()) as { authorizeUrl: string }).authorizeUrl);
   assert.equal(authorize.searchParams.get("scope"), "identify");
   assert.equal(authorize.searchParams.get("client_id"), "app-1");
-  const state = authorize.searchParams.get("state")!;
-  const callback = await fetch(
-    `${srv.base}/v1/discord-link/callback?code=c1&state=${encodeURIComponent(state)}`,
-    { redirect: "manual" },
-  );
-  return { status: callback.status, location: callback.headers.get("location") };
+  assert.equal(authorize.searchParams.get("redirect_uri"), "https://qm.example.test/v1/discord-link/callback");
+  return authorize.searchParams.get("state")!;
+}
+
+async function callback(
+  srv: { base: string },
+  state: string,
+  browserPrincipal?: string,
+): Promise<{ status: number; location: string | null }> {
+  const res = await fetch(`${srv.base}/v1/discord-link/callback?code=c1&state=${encodeURIComponent(state)}`, {
+    redirect: "manual",
+    headers: browserPrincipal
+      ? { "x-portal-identity": await mintSignedPayload({ p: browserPrincipal, exp: Date.now() + 60_000 }, SECRET) }
+      : {},
+  });
+  return { status: res.status, location: res.headers.get("location") };
+}
+
+async function linkAs(
+  srv: { base: string },
+  principal: string,
+  ticketFor?: string,
+): Promise<{ status: number; location: string | null }> {
+  return callback(srv, await startLink(srv, principal, ticketFor), principal);
 }
 
 test("a signed-in QM user links the Discord account they prove with OAuth, and can unlink it", async () => {
@@ -140,16 +153,38 @@ test("a Discord account already linked to another QM user stays with them", asyn
 test("linking requires a portal-signed QM session and a single-use state", async () => {
   const srv = start(() => DISCORD_A);
   try {
-    const startPath = `/v1/discord-link/start?redirectUri=${encodeURIComponent(`${srv.base}/v1/discord-link/callback`)}`;
-    const anonymous = await fetch(`${srv.base}${startPath}`, { headers: await headers("GET", startPath) });
+    const anonymous = await fetch(`${srv.base}/v1/discord-link/start`, {
+      headers: await headers("GET", "/v1/discord-link/start"),
+    });
     assert.equal(anonymous.status, 403);
 
-    const startRes = await fetch(`${srv.base}${startPath}`, { headers: await headers("GET", startPath, JORDAN) });
-    const state = new URL(((await startRes.json()) as { authorizeUrl: string }).authorizeUrl).searchParams.get("state")!;
-    const callbackPath = `/v1/discord-link/callback?code=c1&state=${encodeURIComponent(state)}`;
-    assert.equal((await fetch(`${srv.base}${callbackPath}`, { redirect: "manual" })).status, 302);
-    const replay = await fetch(`${srv.base}${callbackPath}`, { redirect: "manual" });
-    assert.equal(replay.status, 400);
+    const state = await startLink(srv, JORDAN);
+    assert.match((await callback(srv, state, JORDAN)).location ?? "", /status=connected/);
+    assert.match((await callback(srv, state, JORDAN)).location ?? "", /status=failed/);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("an authorize URL handed to someone else cannot finish in their browser", async () => {
+  const srv = start(() => DISCORD_B);
+  try {
+    assert.match((await callback(srv, await startLink(srv, JORDAN), CASEY)).location ?? "", /status=wrong_session/);
+    assert.match((await callback(srv, await startLink(srv, JORDAN))).location ?? "", /status=wrong_session/);
+    assert.equal(srv.built.identity.classify(`discord:${DISCORD_B}`).type, "guest");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("a QM user keeps one Discord account until they unlink it", async () => {
+  let discordUser = DISCORD_A;
+  const srv = start(() => discordUser);
+  try {
+    assert.match((await linkAs(srv, JORDAN)).location ?? "", /status=connected/);
+    discordUser = DISCORD_B;
+    assert.match((await linkAs(srv, JORDAN)).location ?? "", /status=already_linked/);
+    assert.equal(srv.built.identity.classify(`discord:${DISCORD_B}`).type, "guest");
   } finally {
     await srv.close();
   }

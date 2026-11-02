@@ -16,6 +16,12 @@ export function foldPrincipalId(id: string | null | undefined): string {
   return s.includes("@") ? s.toLowerCase() : s;
 }
 
+export const DISCORD_PRINCIPAL_PREFIX = "discord:";
+
+export function requiresPrincipalLink(id: string): boolean {
+  return id.trim().toLowerCase().startsWith(DISCORD_PRINCIPAL_PREFIX);
+}
+
 export function canonicalPerson(id: string): string {
   const key = foldPrincipalId(id);
   if (!key) return id;

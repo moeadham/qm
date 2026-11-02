@@ -1,7 +1,6 @@
 import { mintSignedPayload, verifySignedPayload } from "../auth/signed-token.ts";
-import { personIds } from "../directory/person.ts";
+import { DISCORD_PRINCIPAL_PREFIX as ALIAS_PREFIX, personIds } from "../directory/person.ts";
 
-const ALIAS_PREFIX = "discord:";
 const SNOWFLAKE = /^\d{15,22}$/;
 const TICKET_TTL_MS = 30 * 60_000;
 const DISCORD_API = "https://discord.com/api/v10";

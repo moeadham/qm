@@ -1,6 +1,6 @@
 import type { ActorAssertion, Principal } from "../types.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
-import { canonicalPerson, foldPrincipalId, personIds, personKey } from "../directory/person.ts";
+import { canonicalPerson, foldPrincipalId, personIds, personKey, requiresPrincipalLink } from "../directory/person.ts";
 import { externalMemberActive, type ExternalMember } from "./external-members.ts";
 
 interface IdentityProvider {
@@ -34,13 +34,6 @@ export interface IdentityService extends IdentityProvider {
   removeExternalMember(principalId: string): Promise<void>;
   hydrate(): Promise<void>;
   refresh(force?: boolean): Promise<void>;
-}
-
-const LINK_REQUIRED_PREFIXES = ["discord:"];
-
-export function requiresPrincipalLink(id: string): boolean {
-  const s = id.trim().toLowerCase();
-  return LINK_REQUIRED_PREFIXES.some((prefix) => s.startsWith(prefix));
 }
 
 export function actorAssertionActive(
