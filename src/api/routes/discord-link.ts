@@ -28,7 +28,7 @@ async function discordClient(deps: ServerDeps): Promise<DiscordOAuthClient | nul
 }
 
 function callbackUrl(deps: ServerDeps): string | null {
-  const base = (deps.portalUrl ?? deps.publicUrl)?.replace(/\/$/, "");
+  const base = deps.portalUrl?.replace(/\/$/, "");
   return base ? `${base}${DISCORD_LINK_CALLBACK_PATH}` : null;
 }
 
