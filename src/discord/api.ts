@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { REST } from "@discordjs/rest";
 import { safeChunks } from "../surfaces/safe-cut.ts";
 import { swallowAs } from "../util/errors.ts";
+import { sleep } from "../util/async.ts";
 import { WebSocketManager } from "@discordjs/ws";
 
 export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | "timestamp" | "mentions"> & {
@@ -62,6 +63,7 @@ export interface DiscordGateway {
 }
 
 export const DISCORD_MESSAGE_LIMIT = 2_000;
+const CLOSE_WAIT_MS = 5_000;
 export const DISCORD_UNKNOWN_MESSAGE = 10008;
 
 export function discordErrorCode(error: unknown): number | undefined {
@@ -186,14 +188,28 @@ export function createDiscordGateway(token: string, rest: REST): DiscordGateway 
       } as unknown as REST;
       const gateway = new WebSocketManager({ token, intents: INTENTS, rest: gatedRest });
       const client = new Client({ rest, gateway });
-      client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => handlers.onMessage(data));
-      client.on(GatewayDispatchEvents.InteractionCreate, ({ data }) => handlers.onInteraction(data));
+      client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => {
+        if (!closing) handlers.onMessage(data);
+      });
+      client.on(GatewayDispatchEvents.InteractionCreate, ({ data }) => {
+        if (!closing) handlers.onInteraction(data);
+      });
       let fail!: (error: Error) => void;
       const closed = new Promise<Error>((resolve) => (fail = resolve));
-      const destroy = async (): Promise<void> => {
-        await Promise.resolve(gateway.destroy()).catch(swallowAs("discord: destroy gateway", undefined));
+      let destroying: Promise<void> | undefined;
+      const destroy = (): Promise<void> =>
+        (destroying ??= Promise.race([
+          Promise.resolve(gateway.destroy()).catch(swallowAs("discord: destroy gateway", undefined)),
+          sleep(CLOSE_WAIT_MS, { unref: true }),
+        ]).finally(() => {
+          destroying = undefined;
+        }));
+      const destroyIfClosing = (): void => {
+        if (closing) setTimeout(() => void destroy(), 0);
       };
       gateway.on("error", (error) => fail(error));
+      gateway.on("ready", destroyIfClosing);
+      gateway.on("resumed", destroyIfClosing);
       const ready = gateway.connect();
       ready.catch(() => {});
       return {
@@ -201,7 +217,14 @@ export function createDiscordGateway(token: string, rest: REST): DiscordGateway 
         closed,
         close: async () => {
           closing = true;
-          await destroy();
+          const settled = await Promise.race([
+            ready.then(
+              () => true,
+              () => true,
+            ),
+            sleep(CLOSE_WAIT_MS, { unref: true }).then(() => false),
+          ]);
+          if (settled) await destroy();
         },
       };
     },

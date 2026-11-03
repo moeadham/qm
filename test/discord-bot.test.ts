@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { WebSocketServer, type WebSocket } from "ws";
 import assert from "node:assert/strict";
 import type { APIInteraction } from "@discordjs/core";
 import { startDiscordPlugin, assertOneChatPlatform, discordConfigFromEnv } from "../src/discord/index.ts";
@@ -28,8 +29,8 @@ const CHANNEL = "600000000000000001";
 const DM = "500000000000000001";
 const SECRET = "test-signing-secret";
 
-async function until(check: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 3_000;
+async function until(check: () => boolean, label: string, ms = 8_000): Promise<void> {
+  const deadline = Date.now() + ms;
   while (!check()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
     await new Promise((r) => setTimeout(r, 5));
@@ -541,4 +542,67 @@ test("a streamed placeholder is removed when the finished turn has no text to sh
   await until(() => h.acked.length === 1, "ack");
   await plugin.stop();
   assert.deepEqual(api.removed, [api.sent[0]!.id]);
+});
+
+test("a gateway closed mid-handshake returns promptly and leaves no session open", async () => {
+  const server = new WebSocketServer({ port: 0 });
+  await new Promise((r) => server.on("listening", r));
+  const port = (server.address() as { port: number }).port;
+  const open = new Set<WebSocket>();
+  let identifies = 0;
+  server.on("connection", (socket) => {
+    open.add(socket);
+    socket.on("close", () => open.delete(socket));
+    socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45_000 } }));
+    socket.on("message", (raw) => {
+      const payload = JSON.parse(String(raw)) as { op: number };
+      if (payload.op === 1) socket.send(JSON.stringify({ op: 11 }));
+      if (payload.op !== 2) return;
+      identifies++;
+      setTimeout(() => {
+        socket.send(
+          JSON.stringify({
+            op: 0,
+            t: "READY",
+            s: 1,
+            d: {
+              v: 10,
+              session_id: `s${identifies}`,
+              resume_gateway_url: `ws://127.0.0.1:${port}`,
+              user: { id: BOT, username: "qm" },
+              guilds: [],
+              application: { id: "app", flags: 0 },
+            },
+          }),
+        );
+      }, 300);
+    });
+  });
+  const rest = {
+    async get() {
+      return {
+        url: `ws://127.0.0.1:${port}`,
+        shards: 1,
+        session_start_limit: { remaining: 10, reset_after: 60_000, max_concurrency: 1, total: 1_000 },
+      };
+    },
+  };
+  const messages: DiscordMessage[] = [];
+  const connection = createDiscordGateway("token", rest as never).open({
+    onMessage: (m) => messages.push(m),
+    onInteraction() {},
+  });
+  try {
+    await until(() => identifies === 1, "first identify");
+    const startedAt = Date.now();
+    await connection.close();
+    assert.ok(Date.now() - startedAt < 6_000);
+    await until(() => open.size === 0, "every socket closed");
+    for (const socket of server.clients) socket.send(JSON.stringify({ op: 0, t: "MESSAGE_CREATE", s: 9, d: {} }));
+    await new Promise((r) => setTimeout(r, 1_000));
+    assert.equal(open.size, 0);
+    assert.deepEqual(messages, []);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
 });

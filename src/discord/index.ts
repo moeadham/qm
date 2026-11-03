@@ -20,6 +20,7 @@ export { discordConfigFromEnv, assertOneChatPlatform, type DiscordConfig } from 
 
 const GATEWAY_RETRY_MS = 5_000;
 const GATEWAY_MAX_BACKOFF_MS = 30 * 60_000;
+const GATEWAY_TRANSIENT_BACKOFF_MS = 60_000;
 const DELIVERY_SWEEP_MS = 5_000;
 const ENVELOPE_REPLAY_SWEEP_MS = 60_000;
 
@@ -64,6 +65,7 @@ export async function startDiscordPlugin(
   let stopped = false;
   let connected = false;
   let fatalCloses = 0;
+  let transientFailures = 0;
   let nextAttemptAt = 0;
   let release!: () => void;
   const stopSignal = new Promise<void>((resolve) => (release = resolve));
@@ -81,6 +83,7 @@ export async function startDiscordPlugin(
         return;
       }
       fatalCloses = 0;
+      transientFailures = 0;
       console.log(`[discord] gateway connected as ${self.username}`);
       await api.registerCommands(QM_COMMANDS).catch(swallowAs("discord: register commands", undefined));
       const outcome = await ended;
@@ -99,9 +102,10 @@ export async function startDiscordPlugin(
     try {
       await core.holdLease("gateway", runGateway);
     } catch (error) {
-      nextAttemptAt = fatalCloses
-        ? Date.now() + Math.min(GATEWAY_RETRY_MS * 2 ** fatalCloses, GATEWAY_MAX_BACKOFF_MS)
-        : 0;
+      const backoff = fatalCloses
+        ? Math.min(GATEWAY_RETRY_MS * 2 ** fatalCloses, GATEWAY_MAX_BACKOFF_MS)
+        : Math.min(GATEWAY_RETRY_MS * 2 ** transientFailures++, GATEWAY_TRANSIENT_BACKOFF_MS);
+      nextAttemptAt = Date.now() + backoff;
       throw error;
     } finally {
       connected = false;
