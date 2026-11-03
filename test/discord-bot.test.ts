@@ -544,21 +544,20 @@ test("a streamed placeholder is removed when the finished turn has no text to sh
   assert.deepEqual(api.removed, [api.sent[0]!.id]);
 });
 
-test("a gateway closed mid-handshake returns promptly and leaves no session open", async () => {
+async function fakeDiscordGatewayServer(readyDelayMs: number) {
   const server = new WebSocketServer({ port: 0 });
   await new Promise((r) => server.on("listening", r));
   const port = (server.address() as { port: number }).port;
-  const open = new Set<WebSocket>();
-  let identifies = 0;
+  const state = { open: new Set<WebSocket>(), identifies: 0, port, server };
   server.on("connection", (socket) => {
-    open.add(socket);
-    socket.on("close", () => open.delete(socket));
+    state.open.add(socket);
+    socket.on("close", () => state.open.delete(socket));
     socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45_000 } }));
     socket.on("message", (raw) => {
       const payload = JSON.parse(String(raw)) as { op: number };
       if (payload.op === 1) socket.send(JSON.stringify({ op: 11 }));
       if (payload.op !== 2) return;
-      identifies++;
+      state.identifies++;
       setTimeout(() => {
         socket.send(
           JSON.stringify({
@@ -567,7 +566,7 @@ test("a gateway closed mid-handshake returns promptly and leaves no session open
             s: 1,
             d: {
               v: 10,
-              session_id: `s${identifies}`,
+              session_id: `s${state.identifies}`,
               resume_gateway_url: `ws://127.0.0.1:${port}`,
               user: { id: BOT, username: "qm" },
               guilds: [],
@@ -575,7 +574,7 @@ test("a gateway closed mid-handshake returns promptly and leaves no session open
             },
           }),
         );
-      }, 300);
+      }, readyDelayMs);
     });
   });
   const rest = {
@@ -592,17 +591,38 @@ test("a gateway closed mid-handshake returns promptly and leaves no session open
     onMessage: (m) => messages.push(m),
     onInteraction() {},
   });
+  return { state, connection, messages, stop: () => new Promise((r) => server.close(r)) };
+}
+
+test("a gateway closed mid-handshake returns promptly and leaves no session open", async () => {
+  const { state, connection, messages, stop } = await fakeDiscordGatewayServer(300);
   try {
-    await until(() => identifies === 1, "first identify");
+    await until(() => state.identifies === 1, "first identify");
     const startedAt = Date.now();
     await connection.close();
     assert.ok(Date.now() - startedAt < 6_000);
-    await until(() => open.size === 0, "every socket closed");
-    for (const socket of server.clients) socket.send(JSON.stringify({ op: 0, t: "MESSAGE_CREATE", s: 9, d: {} }));
+    await until(() => state.open.size === 0, "every socket closed");
     await new Promise((r) => setTimeout(r, 1_000));
-    assert.equal(open.size, 0);
+    assert.equal(state.open.size, 0);
     assert.deepEqual(messages, []);
   } finally {
-    await new Promise((r) => server.close(r));
+    await stop();
+  }
+});
+
+test("a gateway closed while a ready session reconnects leaves no session behind", async () => {
+  const { state, connection, messages, stop } = await fakeDiscordGatewayServer(10);
+  try {
+    await connection.ready;
+    for (const socket of state.open) socket.close(1000);
+    await new Promise((r) => setTimeout(r, 50));
+    await connection.close();
+    await until(() => state.identifies === 2, "reconnect identify");
+    await until(() => state.open.size === 0, "every socket closed");
+    await new Promise((r) => setTimeout(r, 1_500));
+    assert.equal(state.open.size, 0);
+    assert.deepEqual(messages, []);
+  } finally {
+    await stop();
   }
 });

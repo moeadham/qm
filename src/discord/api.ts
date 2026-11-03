@@ -15,7 +15,15 @@ import { REST } from "@discordjs/rest";
 import { safeChunks } from "../surfaces/safe-cut.ts";
 import { swallowAs } from "../util/errors.ts";
 import { sleep } from "../util/async.ts";
-import { WebSocketManager } from "@discordjs/ws";
+import {
+  SimpleContextFetchingStrategy,
+  WebSocketManager,
+  WebSocketShard,
+  WebSocketShardEvents,
+  managerToFetchingStrategyOptions,
+  type IShardingStrategy,
+  type SessionInfo,
+} from "@discordjs/ws";
 
 export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | "timestamp" | "mentions"> & {
   guild_id?: string;
@@ -175,6 +183,36 @@ const INTENTS =
   GatewayIntentBits.MessageContent |
   GatewayIntentBits.DirectMessages;
 
+function retainedShardStrategy(manager: WebSocketManager, shards: Map<number, WebSocketShard>): IShardingStrategy {
+  return {
+    async spawn(shardIds) {
+      const options = await managerToFetchingStrategyOptions(manager);
+      for (const id of shardIds) {
+        const shard = new WebSocketShard(new SimpleContextFetchingStrategy(manager, options), id);
+        for (const event of Object.values(WebSocketShardEvents))
+          shard.on(event, (...args: unknown[]) => (manager.emit as (...a: unknown[]) => boolean)(event, ...args, id));
+        shards.set(id, shard);
+      }
+    },
+    async connect() {
+      await Promise.all([...shards.values()].map((shard) => shard.connect()));
+    },
+    async destroy(options) {
+      await Promise.all([...shards.values()].map((shard) => shard.destroy(options)));
+    },
+    async send(id, payload) {
+      const shard = shards.get(id);
+      if (!shard) throw new RangeError(`Discord shard ${id} not found`);
+      await shard.send(payload);
+    },
+    fetchStatus() {
+      return new Map([...shards].map(([id, shard]) => [id, shard.status])) as unknown as Awaited<
+        ReturnType<IShardingStrategy["fetchStatus"]>
+      >;
+    },
+  };
+}
+
 export function createDiscordGateway(token: string, rest: REST): DiscordGateway {
   return {
     open(handlers) {
@@ -186,7 +224,16 @@ export function createDiscordGateway(token: string, rest: REST): DiscordGateway 
           return result;
         },
       } as unknown as REST;
-      const gateway = new WebSocketManager({ token, intents: INTENTS, rest: gatedRest });
+      const shards = new Map<number, WebSocketShard>();
+      const sessions = new Map<number, SessionInfo | null>();
+      const gateway = new WebSocketManager({
+        token,
+        intents: INTENTS,
+        rest: gatedRest,
+        buildStrategy: (manager) => retainedShardStrategy(manager, shards),
+        retrieveSessionInfo: (id) => sessions.get(id) ?? null,
+        updateSessionInfo: (id, info) => void sessions.set(id, info),
+      });
       const client = new Client({ rest, gateway });
       client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => {
         if (!closing) handlers.onMessage(data);
@@ -205,7 +252,9 @@ export function createDiscordGateway(token: string, rest: REST): DiscordGateway 
           destroying = undefined;
         }));
       const destroyIfClosing = (): void => {
-        if (closing) setTimeout(() => void destroy(), 0);
+        if (!closing) return;
+        const pending = destroying ?? Promise.resolve();
+        setTimeout(() => void pending.then(destroy), 0);
       };
       gateway.on("error", (error) => fail(error));
       gateway.on("ready", destroyIfClosing);
