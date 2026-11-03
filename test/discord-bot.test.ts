@@ -64,6 +64,10 @@ class FakeDiscord implements DiscordApi {
     return id;
   }
   async edit(channelId: string, messageId: string, content: string) {
+    if (this.failEdits > 0) {
+      this.failEdits--;
+      throw Object.assign(new Error("Internal Server Error"), { status: 500 });
+    }
     this.edits.push({ channelId, messageId, content });
   }
   async remove() {}
@@ -86,20 +90,24 @@ class FakeDiscord implements DiscordApi {
     return this.history.get(channelId) ?? [];
   }
   async registerCommands() {}
-  async replyEphemeral(_id: string, _token: string, content: string) {
+  failEdits = 0;
+  async deferEphemeral() {}
+  async editReply(_token: string, content: string) {
     this.ephemeral.push(content);
   }
 }
 
-function fakeGateway() {
+function fakeGateway(mode: "ready" | "hang" | "fatal" = "ready") {
   const g = {
     connects: 0,
     closes: 0,
     handlers: undefined as DiscordGatewayHandlers | undefined,
-    async connect(handlers: DiscordGatewayHandlers) {
+    open(handlers: DiscordGatewayHandlers) {
       g.connects++;
       g.handlers = handlers;
       return {
+        ready: mode === "ready" ? Promise.resolve() : new Promise<void>(() => {}),
+        closed: mode === "fatal" ? Promise.resolve(new Error("Used disallowed intents")) : new Promise<Error>(() => {}),
         close: async () => {
           g.closes++;
         },
@@ -232,7 +240,8 @@ test("a linked user's DM becomes a personal turn and a long reply is split at 2,
   assert.equal(turn.deliveryTarget, DM);
   assert.equal(turn.text, "what's up?");
   assert.ok(api.sent.length >= 2);
-  assert.ok(api.sent.every((m) => m.content.length <= 2_000 && m.channelId === DM));
+  assert.ok(api.sent.every((m) => m.content.length <= 2_000 && m.channelId === DM && m.nonce));
+  assert.equal(new Set(api.sent.map((m) => m.nonce)).size, api.sent.length);
   assert.ok(api.sent.map((m) => m.content).join("") === long, "the chunks reassemble the full reply");
   assert.deepEqual(h.acked, ["run-1"]);
 });
@@ -284,7 +293,7 @@ test("in servers the bot answers mentions in a new thread and ignores unmentione
   assert.deepEqual(api.threads, [{ channelId: CHANNEL, messageId: "800000000000000003", name: "@qm summarize this" }]);
   assert.equal(turn.conversation.kind, "channel");
   assert.equal(turn.conversation.threadRef, `discord:ch:${CHANNEL}:800000000000000003`);
-  assert.equal(turn.conversation.channelRef, `discord:${CHANNEL}`);
+  assert.equal(turn.conversation.channelRef, CHANNEL);
   assert.equal(turn.deliveryTarget, "800000000000000003");
   assert.equal(turn.text, "@qm summarize this");
   assert.deepEqual(turn.origin, { kind: "human" });
@@ -436,4 +445,42 @@ test("an instance refuses to run both chat platforms and rejects partial Discord
   assert.doesNotThrow(() => assertOneChatPlatform(discord, false));
   assert.equal(discordConfigFromEnv({}), null);
   assert.throws(() => discordConfigFromEnv({ DISCORD_BOT_TOKEN: "t", DISCORD_APPLICATION_ID: "a" }), /GUILD_IDS/);
+});
+
+test("a failed streaming edit does not stop the final reply from landing in the placeholder", async () => {
+  const h = harness({
+    snapshots: ["one", "one two", "one two three"],
+    result: () => ({ status: "ok", reply: "Final." }),
+  });
+  const api = new FakeDiscord();
+  api.failEdits = 1;
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.equal(api.sent.length, 1);
+  assert.equal(api.edits.at(-1)?.messageId, api.sent[0]!.id);
+  assert.equal(api.edits.at(-1)?.content, "Final.");
+});
+
+test("stop returns while the gateway is still connecting, and closes that connection", async () => {
+  const gateway = fakeGateway("hang");
+  const plugin = await startDiscordPlugin(cfg, harness({}).core, { api: new FakeDiscord(), gateway });
+  await until(() => gateway.connects === 1, "connect attempt");
+  const stopped = await Promise.race([
+    plugin.stop().then(() => true),
+    new Promise((r) => setTimeout(() => r(false), 500)),
+  ]);
+  assert.equal(stopped, true);
+  assert.equal(gateway.closes, 1);
+});
+
+test("a fatal gateway close releases the connection and backs off instead of reconnecting every sweep", async () => {
+  const gateway = fakeGateway("fatal");
+  const plugin = await startDiscordPlugin(cfg, harness({}).core, { api: new FakeDiscord(), gateway });
+  await until(() => gateway.closes === 1, "fatal close");
+  await new Promise((r) => setTimeout(r, 6_000));
+  await plugin.stop();
+  assert.equal(gateway.connects, 1);
 });

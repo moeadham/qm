@@ -101,6 +101,7 @@ if (config.backgroundWorkEnabled && !config.backgroundDeploymentId) {
 const slackRuntime = createSurfaceRuntimeReconciler({
   startPaused: Boolean(config.backgroundDeploymentId),
   load: async () => {
+    if (discordConfig) return null;
     const status = await built.slackInstallation.status();
     const stored = await built.slackInstallation.get();
     if (stored) {

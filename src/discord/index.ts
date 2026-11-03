@@ -10,7 +10,7 @@ import {
   type DiscordGateway,
   type DiscordMessage,
 } from "./api.ts";
-import { createDiscordBot, type AcceptGate } from "./bot.ts";
+import { createDiscordBot, discordMessageKey, type AcceptGate } from "./bot.ts";
 import { handleInteraction, QM_COMMANDS } from "./commands.ts";
 import type { DiscordConfig } from "./config.ts";
 import type { DiscordCoreClient } from "./core.ts";
@@ -19,13 +19,14 @@ import { createDiscordDeliveryPoller } from "./deliveries.ts";
 export { discordConfigFromEnv, assertOneChatPlatform, type DiscordConfig } from "./config.ts";
 
 const GATEWAY_RETRY_MS = 5_000;
+const GATEWAY_MAX_BACKOFF_MS = 30 * 60_000;
 const DELIVERY_SWEEP_MS = 5_000;
 const ENVELOPE_REPLAY_SWEEP_MS = 60_000;
 
 function messageKey(body: Record<string, unknown>): string | null {
   const id = body.id;
   const channel = body.channel_id;
-  return typeof id === "string" && typeof channel === "string" ? `discord:message:${channel}:${id}` : null;
+  return typeof id === "string" && typeof channel === "string" ? discordMessageKey(channel, id) : null;
 }
 
 export async function startDiscordPlugin(
@@ -62,20 +63,39 @@ export async function startDiscordPlugin(
 
   let stopped = false;
   let connected = false;
+  let failures = 0;
+  let nextAttemptAt = 0;
   let release!: () => void;
   const stopSignal = new Promise<void>((resolve) => (release = resolve));
+  const runGateway = async (lost: Promise<void>): Promise<void> => {
+    if (stopped) return;
+    const connection = gateway.open(handlers);
+    const ended = Promise.race([lost.then(() => null), stopSignal.then(() => null), connection.closed]);
+    try {
+      const first = await Promise.race([connection.ready.then(() => "ready" as const), ended]);
+      if (first !== "ready") {
+        if (first) throw first;
+        return;
+      }
+      failures = 0;
+      console.log(`[discord] gateway connected as ${self.username}`);
+      await api.registerCommands(QM_COMMANDS).catch(swallowAs("discord: register commands", undefined));
+      const outcome = await ended;
+      if (outcome) throw outcome;
+    } finally {
+      await connection.close();
+      console.log("[discord] gateway closed");
+    }
+  };
   const holdGateway = async (): Promise<void> => {
-    if (connected || stopped) return;
+    if (connected || stopped || Date.now() < nextAttemptAt) return;
     connected = true;
     try {
-      await core.holdLease("gateway", async (lost) => {
-        const connection = await gateway.connect(handlers);
-        console.log(`[discord] gateway connected as ${self.username}`);
-        await api.registerCommands(QM_COMMANDS).catch(swallowAs("discord: register commands", undefined));
-        await Promise.race([lost, stopSignal]);
-        await connection.close();
-        console.log("[discord] gateway closed");
-      });
+      await core.holdLease("gateway", runGateway);
+    } catch (error) {
+      failures++;
+      nextAttemptAt = Date.now() + Math.min(GATEWAY_RETRY_MS * 2 ** failures, GATEWAY_MAX_BACKOFF_MS);
+      throw error;
     } finally {
       connected = false;
     }

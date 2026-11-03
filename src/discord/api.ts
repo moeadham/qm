@@ -10,7 +10,9 @@ import {
   type APIMessage,
   type RESTPutAPIApplicationCommandsJSONBody,
 } from "@discordjs/core";
+import { createHash } from "node:crypto";
 import { REST } from "@discordjs/rest";
+import { safeChunks } from "../surfaces/safe-cut.ts";
 import { swallowAs } from "../util/errors.ts";
 import { WebSocketManager } from "@discordjs/ws";
 
@@ -40,7 +42,8 @@ export interface DiscordApi {
   channel(channelId: string): Promise<DiscordChannel>;
   recentMessages(channelId: string, limit: number): Promise<DiscordMessage[]>;
   registerCommands(commands: RESTPutAPIApplicationCommandsJSONBody): Promise<void>;
-  replyEphemeral(interactionId: string, token: string, content: string): Promise<void>;
+  deferEphemeral(interactionId: string, token: string): Promise<void>;
+  editReply(token: string, content: string): Promise<void>;
 }
 
 export interface DiscordGatewayHandlers {
@@ -48,12 +51,48 @@ export interface DiscordGatewayHandlers {
   onInteraction(interaction: APIInteraction): void;
 }
 
-export interface DiscordConnection {
+interface DiscordConnection {
+  ready: Promise<void>;
+  closed: Promise<Error>;
   close(): Promise<void>;
 }
 
 export interface DiscordGateway {
-  connect(handlers: DiscordGatewayHandlers): Promise<DiscordConnection>;
+  open(handlers: DiscordGatewayHandlers): DiscordConnection;
+}
+
+export const DISCORD_MESSAGE_LIMIT = 2_000;
+const UNKNOWN_MESSAGE = 10008;
+
+export function discordErrorCode(error: unknown): number | undefined {
+  const code = (error as { code?: unknown })?.code;
+  return typeof code === "number" ? code : undefined;
+}
+
+function messageNonce(key: string, part: number): string {
+  return createHash("sha256").update(`${key}:${part}`).digest("hex").slice(0, 25);
+}
+
+export async function postMessage(
+  api: DiscordApi,
+  channelId: string,
+  text: string,
+  opts: { key: string; editRef?: string; replyTo?: string },
+): Promise<void> {
+  for (const [i, part] of safeChunks(text, DISCORD_MESSAGE_LIMIT).entries()) {
+    if (i === 0 && opts.editRef) {
+      try {
+        await api.edit(channelId, opts.editRef, part);
+        continue;
+      } catch (error) {
+        if (discordErrorCode(error) !== UNKNOWN_MESSAGE) throw error;
+      }
+    }
+    await api.send(channelId, part, {
+      ...(i === 0 && opts.replyTo ? { replyTo: opts.replyTo } : {}),
+      nonce: messageNonce(opts.key, i),
+    });
+  }
 }
 
 const NO_PINGS_EXCEPT_USERS = { parse: [AllowedMentionsTypes.User] };
@@ -119,8 +158,11 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
     async registerCommands(commands) {
       await api.applicationCommands.bulkOverwriteGlobalCommands(applicationId, commands);
     },
-    async replyEphemeral(interactionId, token, content) {
-      await api.interactions.reply(interactionId, token, { content, flags: MessageFlags.Ephemeral });
+    async deferEphemeral(interactionId, token) {
+      await api.interactions.defer(interactionId, token, { flags: MessageFlags.Ephemeral });
+    },
+    async editReply(token, content) {
+      await api.interactions.editReply(applicationId, token, { content });
     },
   };
 }
@@ -133,19 +175,23 @@ const INTENTS =
 
 export function createDiscordGateway(token: string, rest: REST): DiscordGateway {
   return {
-    async connect(handlers) {
+    open(handlers) {
       const gateway = new WebSocketManager({ token, intents: INTENTS, rest });
       const client = new Client({ rest, gateway });
       client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => handlers.onMessage(data));
       client.on(GatewayDispatchEvents.InteractionCreate, ({ data }) => handlers.onInteraction(data));
-      gateway.on("error", (error) => console.error("[discord] gateway error:", error.message));
-      try {
-        await gateway.connect();
-      } catch (error) {
-        await Promise.resolve(gateway.destroy()).catch(swallowAs("discord: destroy failed gateway", undefined));
-        throw error;
-      }
-      return { close: async () => gateway.destroy() };
+      let fail!: (error: Error) => void;
+      const closed = new Promise<Error>((resolve) => (fail = resolve));
+      gateway.on("error", (error) => fail(error));
+      const ready = gateway.connect();
+      ready.catch((error: unknown) => fail(error instanceof Error ? error : new Error(String(error))));
+      return {
+        ready,
+        closed,
+        close: async () => {
+          await Promise.resolve(gateway.destroy()).catch(swallowAs("discord: destroy gateway", undefined));
+        },
+      };
     },
   };
 }

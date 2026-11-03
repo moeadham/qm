@@ -1,19 +1,25 @@
 import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
-import { safeChunks, safeClip } from "../surfaces/safe-cut.ts";
-import { turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
+import { safeClip } from "../surfaces/safe-cut.ts";
+import { hasRunDelivery, turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
 import type { ActorAssertion, TurnResult } from "../types.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
-import type { DiscordApi, DiscordChannel, DiscordMessage } from "./api.ts";
+import {
+  DISCORD_MESSAGE_LIMIT,
+  discordErrorCode,
+  postMessage,
+  type DiscordApi,
+  type DiscordChannel,
+  type DiscordMessage,
+} from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
 
-export const DISCORD_MESSAGE_LIMIT = 2_000;
 const THREAD_CHANNEL_TYPES = new Set([10, 11, 12]);
 const TYPING_REFRESH_MS = 8_000;
 const CONTEXT_MESSAGES = 20;
 const THREAD_NAME_LIMIT = 90;
 const THREAD_ALREADY_EXISTS = 160004;
-const DELIVERED_STATUSES = new Set<TurnResult["status"]>(["ok", "refused", "failed"]);
+const CHANNEL_CACHE_LIMIT = 5_000;
 
 export interface AcceptGate {
   persisted(): void;
@@ -33,8 +39,12 @@ export function discordDmThreadRef(dmChannelId: string): string {
   return `discord:dm:${dmChannelId}`;
 }
 
-export function discordChannelThreadRef(parentChannelId: string, threadId: string): string {
+function discordChannelThreadRef(parentChannelId: string, threadId: string): string {
   return `discord:ch:${parentChannelId}:${threadId}`;
+}
+
+export function discordMessageKey(channelId: string, messageId: string): string {
+  return `discord:${channelId}:${messageId}`;
 }
 
 export function threadRefForChannel(channel: DiscordChannel): string | undefined {
@@ -42,11 +52,6 @@ export function threadRefForChannel(channel: DiscordChannel): string | undefined
   if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.parentId)
     return discordChannelThreadRef(channel.parentId, channel.id);
   return undefined;
-}
-
-function discordErrorCode(error: unknown): number | undefined {
-  const code = (error as { code?: unknown })?.code;
-  return typeof code === "number" ? code : undefined;
 }
 
 function epochTs(iso: string): string {
@@ -67,6 +72,16 @@ export function createDiscordBot(deps: {
 }) {
   const { api, core, flow, self } = deps;
   const selfMention = `<@${self.id}>`;
+  const channels = new Map<string, DiscordChannel>();
+
+  async function channelOf(channelId: string): Promise<DiscordChannel> {
+    const cached = channels.get(channelId);
+    if (cached) return cached;
+    const channel = await api.channel(channelId);
+    if (channels.size >= CHANNEL_CACHE_LIMIT) channels.clear();
+    channels.set(channelId, channel);
+    return channel;
+  }
 
   function mentionsSelf(m: DiscordMessage): boolean {
     return m.mentions.some((u) => u.id === self.id) || m.content.includes(selfMention);
@@ -78,9 +93,10 @@ export function createDiscordBot(deps: {
     if (m.author.bot || m.webhook_id || m.author.id === self.id) return undefined;
     if (!m.guild_id) return { addressed: true };
     if (!deps.guildIds.has(m.guild_id)) return undefined;
-    const channel = await api.channel(m.channel_id);
-    if (mentionsSelf(m)) return { channel, addressed: true };
-    if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.ownerId === self.id) return { channel, addressed: false };
+    const addressed = mentionsSelf(m);
+    const channel = await channelOf(m.channel_id);
+    if (addressed) return { channel, addressed };
+    if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.ownerId === self.id) return { channel, addressed };
     return undefined;
   }
 
@@ -93,15 +109,20 @@ export function createDiscordBot(deps: {
     await api.send(await api.openDm(userId), text);
   }
 
+  async function parentName(parentId: string): Promise<string | undefined> {
+    return (await channelOf(parentId).catch(swallowAs("discord: parent channel", undefined)))?.name;
+  }
+
   async function resolvePlace(m: DiscordMessage, channel: DiscordChannel | undefined, text: string): Promise<Place> {
     if (!channel) return { kind: "dm", channelId: m.channel_id, threadRef: discordDmThreadRef(m.channel_id) };
     if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.parentId) {
+      const name = await parentName(channel.parentId);
       return {
         kind: "channel",
         channelId: channel.id,
         threadRef: discordChannelThreadRef(channel.parentId, channel.id),
-        channelRef: `discord:${channel.parentId}`,
-        ...(channel.name ? { channelName: channel.name } : {}),
+        channelRef: channel.parentId,
+        ...(name ? { channelName: name } : {}),
         youOpenedIt: channel.ownerId === self.id,
       };
     }
@@ -112,11 +133,12 @@ export function createDiscordBot(deps: {
       if (discordErrorCode(error) !== THREAD_ALREADY_EXISTS) throw error;
       threadId = m.id;
     }
+    channels.set(threadId, { id: threadId, type: 11, parentId: channel.id, ownerId: self.id, guildId: m.guild_id! });
     return {
       kind: "channel",
       channelId: threadId,
       threadRef: discordChannelThreadRef(channel.id, threadId),
-      channelRef: `discord:${channel.id}`,
+      channelRef: channel.id,
       ...(channel.name ? { channelName: channel.name } : {}),
       youOpenedIt: true,
     };
@@ -158,28 +180,26 @@ export function createDiscordBot(deps: {
   function createReplyWriter(channelId: string) {
     let placeholder: string | undefined;
     let chain: Promise<void> = Promise.resolve();
-    const enqueue = (step: () => Promise<void>): Promise<void> => {
-      chain = chain.then(step);
-      return chain;
-    };
     return {
       stream(text: string, onPlaceholder: (messageId: string) => Promise<void>): void {
         const shown = safeClip(text, DISCORD_MESSAGE_LIMIT - 1);
-        void enqueue(async () => {
-          if (placeholder) return api.edit(channelId, placeholder, shown);
-          placeholder = await api.send(channelId, shown);
-          await onPlaceholder(placeholder);
-        }).catch(swallowAs("discord: stream reply", undefined));
+        chain = chain
+          .then(async () => {
+            if (placeholder) return api.edit(channelId, placeholder, shown);
+            const posted = await api.send(channelId, shown);
+            try {
+              await onPlaceholder(posted);
+              placeholder = posted;
+            } catch (error) {
+              await api.remove(channelId, posted).catch(swallowAs("discord: remove unrecorded placeholder", undefined));
+              throw error;
+            }
+          })
+          .catch(swallowAs("discord: stream reply", undefined));
       },
-      async finish(text: string): Promise<void> {
-        await chain.catch(() => {});
-        const parts = safeChunks(text, DISCORD_MESSAGE_LIMIT);
-        await enqueue(async () => {
-          for (const [i, part] of parts.entries()) {
-            if (i === 0 && placeholder) await api.edit(channelId, placeholder, part);
-            else await api.send(channelId, part);
-          }
-        });
+      async finish(text: string, key: string): Promise<void> {
+        await chain;
+        await postMessage(api, channelId, text, { key, ...(placeholder ? { editRef: placeholder } : {}) });
       },
     };
   }
@@ -193,17 +213,37 @@ export function createDiscordBot(deps: {
     return "";
   }
 
+  function startTyping(channelId: string): () => void {
+    const tick = (): void => void api.typing(channelId).catch(swallowAs("discord: typing", undefined));
+    tick();
+    const timer = setInterval(tick, TYPING_REFRESH_MS);
+    return () => clearInterval(timer);
+  }
+
   async function handleMessage(m: DiscordMessage, stage?: () => Promise<AcceptGate>): Promise<void> {
     const relevant = await relevantPlace(m);
     if (!relevant) return;
     const gate = await stage?.();
-    if (!core.linkedPrincipal(m.author.id)) {
+    if (!(await core.linkedPrincipal(m.author.id))) {
       await promptLink(m.author.id);
       return gate?.persisted();
     }
     const text = m.content.replaceAll(selfMention, `@${self.username}`).trim();
     if (!text) return gate?.persisted();
-    const place = await resolvePlace(m, relevant.channel, text);
+    const messageKey = discordMessageKey(m.channel_id, m.id);
+    let place: Place;
+    try {
+      place = await resolvePlace(m, relevant.channel, text);
+    } catch (error) {
+      gate?.persisted();
+      console.error(`[discord] could not open a thread for ${messageKey}: ${errMessage(error)}`);
+      await api
+        .send(m.channel_id, "I couldn't start a thread here. Check that I can create threads in this channel.", {
+          replyTo: m.id,
+        })
+        .catch(swallowAs("discord: thread failure note", undefined));
+      return;
+    }
     const actor: ActorAssertion = { externalId: `discord:${m.author.id}`, displayName: displayName(m.author) };
     const writer = createReplyWriter(place.channelId);
     let queuedRunId: string | undefined;
@@ -212,8 +252,7 @@ export function createDiscordBot(deps: {
       accepted = true;
       gate?.persisted();
     };
-    const typing = setInterval(() => void api.typing(place.channelId).catch(() => {}), TYPING_REFRESH_MS);
-    void api.typing(place.channelId).catch(() => {});
+    const stopTyping = relevant.addressed ? startTyping(place.channelId) : () => {};
     try {
       const body: CoreTurnBody = {
         actor,
@@ -232,7 +271,7 @@ export function createDiscordBot(deps: {
           details: { channel: place.channelId },
           botHandle: self.username,
         },
-        redeliveryKey: `discord:${m.channel_id}:${m.id}`,
+        redeliveryKey: messageKey,
         ...(place.kind === "channel" ? await threadContext(place, m) : {}),
       };
       let result: TurnResult;
@@ -251,8 +290,11 @@ export function createDiscordBot(deps: {
         });
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));
-        console.error(`[discord] turn errored ch=${m.channel_id} msg=${m.id}: ${errMessage(error)}`);
-        if (relevant.addressed) await writer.finish(`⚠️ ${turnFailureText(error)}`);
+        console.error(`[discord] turn errored for ${messageKey}: ${errMessage(error)}`);
+        if (relevant.addressed)
+          await writer
+            .finish(`⚠️ ${turnFailureText(error)}`, `failure:${messageKey}`)
+            .catch(swallowAs("discord: failure note", undefined));
         return;
       }
       if (!accepted) accept();
@@ -260,7 +302,7 @@ export function createDiscordBot(deps: {
       const reply = replyText(result, relevant.addressed);
       const runId = queuedRunId;
       try {
-        if (reply) await writer.finish(reply);
+        if (reply) await writer.finish(reply, runId ? `run:${runId}` : messageKey);
       } catch (error) {
         if (runId) flow.inFlightRuns.delete(runId);
         console.error(
@@ -269,13 +311,11 @@ export function createDiscordBot(deps: {
         );
         return;
       }
-      if (runId && DELIVERED_STATUSES.has(result.status)) flow.ackRunDelivery(runId);
+      if (runId && hasRunDelivery(result)) flow.ackRunDelivery(runId);
     } finally {
-      clearInterval(typing);
+      stopTyping();
     }
   }
 
   return { handleMessage };
 }
-
-export type DiscordBot = ReturnType<typeof createDiscordBot>;

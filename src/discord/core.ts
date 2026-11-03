@@ -10,7 +10,7 @@ import {
 } from "../surfaces/surface-core-client.ts";
 
 export interface DiscordCoreClient extends SurfaceCoreClient {
-  linkedPrincipal(discordId: string): string | undefined;
+  linkedPrincipal(discordId: string): Promise<string | undefined>;
   linkUrl(discordId: string): Promise<string | undefined>;
   allowLinkPrompt(discordId: string): Promise<boolean>;
   unlink(discordId: string): Promise<boolean>;
@@ -27,13 +27,15 @@ export interface DiscordCoreClientDeps extends SurfaceCoreClientDeps {
 }
 
 export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCoreClient {
+  const linkedPrincipal = async (discordId: string): Promise<string | undefined> => {
+    await deps.identity.refresh();
+    const principal = deps.identity.classify(discordAlias(discordId));
+    return deps.identity.isInternal(principal) ? principal.id : undefined;
+  };
   return {
     ...createSurfaceCoreClient("discord", deps),
 
-    linkedPrincipal(discordId) {
-      const principal = deps.identity.classify(discordAlias(discordId));
-      return deps.identity.isInternal(principal) ? principal.id : undefined;
-    },
+    linkedPrincipal,
 
     async linkUrl(discordId) {
       const base = deps.portalUrl?.replace(/\/+$/, "");
@@ -50,7 +52,7 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
       const link = await unlinkDiscordAccount(
         { links: deps.principalLinks, identity: deps.identity, auditLog: deps.auditLog },
         discordId,
-        discordAlias(discordId),
+        (await linkedPrincipal(discordId)) ?? discordAlias(discordId),
       );
       return link !== null;
     },

@@ -38,7 +38,7 @@ async function answer(
   subcommand: string | undefined,
   channelId: string | undefined,
 ): Promise<string> {
-  const linked = core.linkedPrincipal(userId);
+  const linked = await core.linkedPrincipal(userId);
   if (subcommand === "link") {
     if (linked) return `Your Discord account is already linked to ${linked}.`;
     const url = await core.linkUrl(userId);
@@ -66,6 +66,7 @@ export async function handleInteraction(
   const userId = interaction.member?.user.id ?? interaction.user?.id;
   if (!userId) return;
   const option = "options" in interaction.data ? interaction.data.options?.[0] : undefined;
+  await api.deferEphemeral(interaction.id, interaction.token);
   let content: string;
   try {
     content =
@@ -76,5 +77,5 @@ export async function handleInteraction(
     console.error(`[discord] /qm ${option?.name ?? "?"} failed:`, errMessage(error));
     content = "That didn't work. Try again in a moment.";
   }
-  await api.replyEphemeral(interaction.id, interaction.token, content);
+  await api.editReply(interaction.token, content);
 }

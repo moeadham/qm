@@ -30,6 +30,10 @@ export function createInFlightThreadMap(): {
   };
 }
 
+export function hasRunDelivery(result: TurnResult): boolean {
+  return result.status === "ok" || result.status === "refused" || result.status === "failed";
+}
+
 export type CoreTurnBody = Omit<TurnRequest, "surface">;
 
 interface TurnHooks {
@@ -139,7 +143,7 @@ export function createTurnFlow(
     if (result?.status === "refused" && result.refusalKind === "security_quarantine") {
       return result;
     }
-    if (result && (result.status === "ok" || result.status === "refused" || result.status === "failed")) {
+    if (result && hasRunDelivery(result)) {
       if (!hooks.deferDeliveryAck) ackRunDelivery(runId);
     } else {
       inFlightRuns.delete(runId);
