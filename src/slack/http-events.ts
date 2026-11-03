@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import bolt from "@slack/bolt";
 import type { Receiver, ReceiverEvent, App as BoltApp } from "@slack/bolt";
 import { createDeferredEnvelopeAck, describeEnvelope, envelopeStageFor, isGatedEnvelope } from "./deferred-ack.ts";
-import type { EnvelopeStaging } from "./envelope-staging.ts";
+import type { EnvelopeStaging } from "../surfaces/envelope-staging.ts";
 import { errMessage } from "../util/errors.ts";
 import { PayloadTooLargeError, readBody } from "../../plugins/chassis/src/http.ts";
 

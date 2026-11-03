@@ -1,6 +1,6 @@
 export { isBoundaryRefusal, refusalDelivery, postThenAckRunDelivery, refusalNote } from "./refusals.ts";
 export { inlineCode, clip, sleep } from "./util.ts";
-export { safeChunks } from "./safe-cut.ts";
+export { safeChunks } from "../surfaces/safe-cut.ts";
 export {
   decodeSlackEntities,
   resolveMentionsInText,
@@ -48,7 +48,6 @@ export {
   createDeduper,
   dedupedRun,
   isBareStop,
-  createInFlightThreadMap,
   maybeInterceptStop,
 } from "./message-gating.ts";
 export {
@@ -105,7 +104,7 @@ export {
   formatSlackTs,
   renderConversationView,
   mergeConsecutiveTurns,
-} from "./conversation.ts";
+} from "../surfaces/conversation.ts";
 export {
   botIdentityFromEnv,
   botIdentityArgs,

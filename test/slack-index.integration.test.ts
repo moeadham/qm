@@ -348,6 +348,9 @@ class FakeCore implements SlackCoreClient {
   holdDirectorySync<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null> {
     return fn(new Promise<void>(() => {}));
   }
+  holdLease<T>(_name: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null> {
+    return fn(new Promise<void>(() => {}));
+  }
 
   holdEnvelopeReplay<T>(_account: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null> {
     return fn(new Promise<void>(() => {}));

@@ -2,7 +2,7 @@ import { SocketModeClient } from "@slack/socket-mode";
 import type { Receiver, ReceiverEvent, App as BoltApp } from "@slack/bolt";
 import { errMessage } from "../util/errors.ts";
 import { parseLogLevel } from "./payloads.ts";
-import type { EnvelopeStaging } from "./envelope-staging.ts";
+import type { EnvelopeStaging } from "../surfaces/envelope-staging.ts";
 
 const ACK_CAP_MS = 2_500;
 

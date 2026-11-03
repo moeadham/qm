@@ -7,13 +7,13 @@ export class SlackPluginStartCleanupError extends AggregateError {
   }
 }
 
-export interface ReloadableSlackConfig<Config> {
+export interface ReloadableSurfaceConfig<Config> {
   version: string;
   config: Config;
 }
 
-export function createSlackRuntimeReconciler<Config>(opts: {
-  load: () => Promise<ReloadableSlackConfig<Config> | null>;
+export function createSurfaceRuntimeReconciler<Config>(opts: {
+  load: () => Promise<ReloadableSurfaceConfig<Config> | null>;
   startPlugin: (config: Config) => Promise<{ stop(): Promise<void> }>;
   intervalMs?: number;
   startPaused?: boolean;
@@ -61,7 +61,7 @@ export function createSlackRuntimeReconciler<Config>(opts: {
           active = { plugin, version: previous.version, config: previous.config };
         } catch (rollbackError) {
           if (rollbackError instanceof SlackPluginStartCleanupError) pendingCleanup = rollbackError.cleanup;
-          throw new AggregateError([error, rollbackError], "Slack reload and rollback both failed", {
+          throw new AggregateError([error, rollbackError], "Surface reload and rollback both failed", {
             cause: rollbackError,
           });
         }

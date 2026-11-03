@@ -11,6 +11,7 @@ import {
   discordAuthorizeUrl,
   linkedDiscordId,
   verifiedDiscordUser,
+  unlinkDiscordAccount,
   verifyDiscordLinkTicket,
   type DiscordFetch,
   type DiscordOAuthClient,
@@ -84,7 +85,9 @@ async function discordLinkStart(ctx: ApiCtx): Promise<void> {
   const ticket = url.searchParams.get("t");
   let subject: string | undefined;
   if (ticket) {
-    const discordId = deps.signingSecret ? await verifyDiscordLinkTicket(ticket, configOrgId(), deps.signingSecret) : null;
+    const discordId = deps.signingSecret
+      ? await verifyDiscordLinkTicket(ticket, configOrgId(), deps.signingSecret)
+      : null;
     if (!discordId)
       return sendJson(res, 400, {
         error: "invalid_link",
@@ -168,15 +171,14 @@ async function discordUnlink(ctx: ApiCtx): Promise<void> {
   if (!deps.principalLinks) return sendJson(res, 404, { error: "not_found" });
   await deps.principalLinks.refresh(true);
   const discordId = linkedDiscordId(principal);
-  const link = discordId ? await deps.principalLinks.unlink(discordAlias(discordId)) : null;
+  const link = discordId
+    ? await unlinkDiscordAccount(
+        { links: deps.principalLinks, identity: deps.identity, auditLog: deps.auditLog },
+        discordId,
+        principal,
+      )
+    : null;
   if (!link) return sendJson(res, 404, { error: "not_found" });
-  await deps.identity?.refresh(true);
-  audit(deps, {
-    principalId: principal,
-    action: "discord_link.delete",
-    resource: `${link.principalId} -> ${link.canonicalId}`,
-    scopeLabel: principal,
-  });
   return sendJson(res, 200, { ok: true });
 }
 

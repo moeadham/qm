@@ -63,7 +63,7 @@ import { createAwsRoleBroker, type AwsRoleBroker } from "./auth/aws-role-broker.
 import type { SessionShare, SessionShareStore } from "./sessions/session-share.ts";
 import { createModelOverlayStore, type ModelOverlayStore } from "./model/model-overlay-store.ts";
 import { mkdirSync } from "node:fs";
-import type { StagedEnvelope } from "./slack/envelope-staging.ts";
+import type { StagedEnvelope } from "./surfaces/envelope-staging.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
@@ -382,6 +382,7 @@ import { startSession } from "./api/start-session.ts";
 import { createSwarmStore, type SwarmStorage } from "./swarms/swarm-store.ts";
 import { createSwarmService } from "./swarms/swarm-service.ts";
 import { createSlackCoreClient, type SlackCoreClient } from "./api/slack-core-client.ts";
+import { createDiscordCoreClient, type DiscordCoreClient } from "./discord/core.ts";
 import { createSurfaceContextPuller } from "./api/surface-context-puller.ts";
 import { createEngagedRegistry } from "./wake/engaged-registry.ts";
 import { createWakeSweep, type WakeSweep } from "./wake/sweep.ts";
@@ -579,6 +580,7 @@ export interface BuiltApp {
   sessionShareBytes: DurableByteStore;
   skillSyncEngine: SkillSyncEngine;
   slackCore: SlackCoreClient;
+  discordCore: DiscordCoreClient;
 }
 
 const MEMORY_CAPTURE_ENTRY_WINDOW = 2_000;
@@ -2373,6 +2375,7 @@ export function buildApp(
         resume: (ask, grant) => askResolution!(ask, grant),
       })
     : undefined;
+  const stagedEnvelopes = artifactMap<StagedEnvelope>("slack_staged_envelopes");
   const slackCore = createSlackCoreClient({
     identity,
     memory,
@@ -2385,7 +2388,7 @@ export function buildApp(
     inboxEvent: (event) => inboxRealtime.onConversationEvent(event),
     app,
     leaderLease,
-    stagedEnvelopes: artifactMap<StagedEnvelope>("slack_staged_envelopes"),
+    stagedEnvelopes,
     config: configStore,
     runtimeFallback: fallback,
     blobTransfer,
@@ -2398,6 +2401,26 @@ export function buildApp(
     ackModelId: () => auxiliaryModelForProvider("anthropic"),
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
+  });
+  const discordCore = createDiscordCoreClient({
+    app,
+    blobTransfer,
+    deliveries,
+    errors,
+    metrics,
+    runs,
+    turnStream,
+    leaderLease,
+    stagedEnvelopes,
+    identity,
+    principalLinks,
+    linkPrompts: config.databaseUrl
+      ? createPostgresRateLimiter(config.databaseUrl, { maxPerWindow: 1, windowMs: 6 * 3_600_000 })
+      : createRateLimiter({ maxPerWindow: 1, windowMs: 6 * 3_600_000 }),
+    orgId: config.orgId,
+    auditLog,
+    ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
+    ...(config.publicWebUrl ? { portalUrl: config.publicWebUrl } : {}),
   });
   runs.onTerminal((run) => {
     void runs
@@ -3074,6 +3097,7 @@ export function buildApp(
         : createLocalDurableByteStore(join(config.dataDir, "session-shares")),
     skillSyncEngine,
     slackCore,
+    discordCore,
   };
 }
 

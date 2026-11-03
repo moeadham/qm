@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSlackRuntimeReconciler, SlackPluginStartCleanupError } from "../src/surfaces/slack-runtime.ts";
+import { createSurfaceRuntimeReconciler, SlackPluginStartCleanupError } from "../src/surfaces/surface-runtime.ts";
 
 test("Slack runtime activates, reloads, and removes durable admin configuration", async () => {
   let desired: { version: string; config: { botToken: string } } | null = null;
   const events: string[] = [];
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => desired,
     startPlugin: async (config) => {
       events.push(`start:${config.botToken}`);
@@ -38,7 +38,7 @@ test("Slack runtime activates, reloads, and removes durable admin configuration"
 test("Slack runtime restores the previous configuration when a reload cannot start", async () => {
   let desired = { version: "1", config: "first" };
   const events: string[] = [];
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => desired,
     startPlugin: async (config) => {
       events.push(`start:${config}`);
@@ -61,7 +61,7 @@ test("Slack runtime keeps retrying a failed stop before starting replacement cre
   let desired = { version: "1", config: "first" };
   let stopAttempts = 0;
   const events: string[] = [];
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => desired,
     startPlugin: async (config) => {
       events.push(`start:${config}`);
@@ -85,7 +85,7 @@ test("Slack stop finishes cleanup even when the pending configuration load fails
   const loading = Promise.withResolvers<void>();
   let loads = 0;
   let stops = 0;
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => {
       if (++loads > 1) {
         await loading.promise;
@@ -113,7 +113,7 @@ test("Slack stop fences a pending load and repeated starts leave no polling time
   const loading = Promise.withResolvers<void>();
   let loads = 0;
   let starts = 0;
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => {
       loads++;
       await loading.promise;
@@ -144,7 +144,7 @@ test("Slack stop waits for an opening socket, collapses repeated stops, and perm
   const opened = Promise.withResolvers<void>();
   let starts = 0;
   let stops = 0;
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => ({ version: "1", config: "first" }),
     startPlugin: async () => {
       starts++;
@@ -178,7 +178,7 @@ test("Slack stop during a failed replacement does not resurrect rollback credent
   const opening = Promise.withResolvers<void>();
   let desired = { version: "1", config: "first" };
   const events: string[] = [];
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => desired,
     startPlugin: async (config) => {
       events.push(`start:${config}`);
@@ -207,7 +207,7 @@ test("Slack stop during a failed replacement does not resurrect rollback credent
 test("Slack cannot resume after failed socket closure until stop succeeds", async () => {
   let starts = 0;
   let stops = 0;
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => ({ version: "1", config: "first" }),
     startPlugin: async () => {
       starts++;
@@ -235,7 +235,7 @@ test("uncertain failed startup cleanup blocks repeated stop acknowledgments and 
   let desired = { version: "1", config: "first" };
   let cleanupAllowed = false;
   const events: string[] = [];
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => desired,
     startPlugin: async (config) => {
       events.push(`start:${config}`);
@@ -274,7 +274,7 @@ test("a rollback startup with incomplete cleanup also blocks relinquishment", as
   let desired = { version: "1", config: "first" };
   let firstStarts = 0;
   let cleanupAllowed = false;
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     load: async () => desired,
     startPlugin: async (config) => {
       if (config === "second") throw new Error("replacement failed");
@@ -295,7 +295,7 @@ test("a rollback startup with incomplete cleanup also blocks relinquishment", as
 
 test("a controlled inactive Slack runtime cannot open a socket through configuration reconciliation", async () => {
   let starts = 0;
-  const runtime = createSlackRuntimeReconciler({
+  const runtime = createSurfaceRuntimeReconciler({
     startPaused: true,
     load: async () => ({ version: "installed", config: {} }),
     startPlugin: async () => {

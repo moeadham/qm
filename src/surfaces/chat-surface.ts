@@ -11,6 +11,12 @@ const CHAT_SURFACES: Readonly<Record<string, ChatSurface>> = {
       " To @-mention on Slack, use `<@U…>` for a person or `<!subteam^S…>` for a user group (ids appear in People here / read / search results). A typed `@name` is plain text and pings no one; @here/@channel/@everyone never ping.",
     linkHint: "; Slack-style links are also supported: `<https://example.com|label>`",
   },
+  discord: {
+    label: "Discord",
+    mentionHint:
+      " To @-mention on Discord, use `<@123…>` with the person's numeric Discord id. A typed `@name` is plain text and pings no one; @here/@everyone and role mentions never ping.",
+    linkHint: "; links use `[label](https://example.com)`",
+  },
 };
 
 export function chatSurface(surface: string | undefined): ChatSurface | undefined {

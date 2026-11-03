@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createMemorySurfaceCache } from "../src/surface-cache/surface-cache.ts";
 import { createSlackHistoryReader } from "../src/slack/history.ts";
 import { createConversationSerializer } from "../src/slack/conversation-view.ts";
-import { renderConversationView } from "../src/slack/conversation.ts";
+import { renderConversationView } from "../src/surfaces/conversation.ts";
 import type { SlackCoreClient } from "../src/api/slack-core-client.ts";
 import type { BotIdentity, Directory } from "../src/slack/directory.ts";
 

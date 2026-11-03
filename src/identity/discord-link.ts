@@ -1,5 +1,7 @@
 import { mintSignedPayload, verifySignedPayload } from "../auth/signed-token.ts";
 import { DISCORD_PRINCIPAL_PREFIX as ALIAS_PREFIX, personIds } from "../directory/person.ts";
+import type { AuditLog } from "../audit/audit-log.ts";
+import type { PrincipalLink, PrincipalLinkService } from "./principal-links.ts";
 
 const SNOWFLAKE = /^\d{15,22}$/;
 const TICKET_TTL_MS = 30 * 60_000;
@@ -113,4 +115,26 @@ export async function verifiedDiscordUser(opts: {
   if (typeof user.id !== "string" || !SNOWFLAKE.test(user.id) || user.bot === true)
     throw new Error("Discord returned an unusable user");
   return { id: user.id, username: typeof user.username === "string" ? user.username : user.id };
+}
+
+export async function unlinkDiscordAccount(
+  deps: {
+    links: Pick<PrincipalLinkService, "unlink">;
+    identity?: { refresh(force?: boolean): Promise<void> };
+    auditLog?: Pick<AuditLog, "record">;
+  },
+  discordId: string,
+  actor: string,
+): Promise<PrincipalLink | null> {
+  const link = await deps.links.unlink(discordAlias(discordId));
+  if (!link) return null;
+  await deps.identity?.refresh(true);
+  deps.auditLog?.record({
+    at: Date.now(),
+    principalId: actor,
+    action: "discord_link.delete",
+    resource: `${link.principalId} -> ${link.canonicalId}`,
+    scopeLabel: actor,
+  });
+  return link;
 }

@@ -215,3 +215,10 @@ export function parseLogLevel(v: string | undefined): LogLevel {
   console.error(`[slack] unknown log level "${v}" — using info`);
   return bolt.LogLevel.INFO;
 }
+
+export function envelopeKey(account: string, body: Record<string, unknown>): string | null {
+  const event = body.event as { type?: string; channel?: string; ts?: string; event_ts?: string } | undefined;
+  if (body.type !== "event_callback" || !event?.type || !event.channel) return null;
+  const ts = event.ts ?? event.event_ts;
+  return ts ? `slack:${account}:${event.type}:${event.channel}:${ts}` : null;
+}

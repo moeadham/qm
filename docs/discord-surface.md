@@ -21,35 +21,30 @@ Status: in progress on branch `claude/slack-qm-integration-o4y3ag`. This is the 
 | `DISCORD_CLIENT_SECRET` | OAuth client secret, used only for account linking |
 | `DISCORD_GUILD_IDS` | Comma-separated allowlist of servers the bot acts in |
 
-The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it from the configured portal URL and linking reports itself unconfigured without one. Enable the **Message Content** and **Server Members** privileged intents. Invite with scopes `bot applications.commands` and permissions `309237771328` (view channels, send messages, add reactions, embed links, attach files, read history, create public threads, send in threads, manage messages).
+The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it from the configured portal URL and linking reports itself unconfigured without one. Enable the **Message Content** privileged intent; the gateway refuses to connect without it. Invite with scopes `bot applications.commands` and permissions `309237771328` (view channels, send messages, add reactions, embed links, attach files, read history, create public threads, send in threads, manage messages).
 
 ## Done
 
 1. `11b033b` Chat-surface table (`src/surfaces/chat-surface.ts`) replaces `surface === "slack"` checks that apply to any chat platform; prompts render identically for Slack.
 2. `8cf5c45`, `0b36212`, `14806ac` Identity guard and self-serve linking: `src/identity/discord-link.ts`, `src/api/routes/discord-link.ts`, portal `/connect/discord` and callback handler, web UI link notices. Independent review accepted (86/100) after fixes.
+3. PR 3, bot and core chat (`src/discord/`). Shared surface pieces moved to `src/surfaces/`: `surface-core-client.ts` (generic half of the Slack core client, plus a streaming `onSnapshot` hook), `turn-flow.ts`, `delivery-claims.ts`, `envelope-staging.ts` (caller supplies the key), `conversation.ts`, `safe-cut.ts`, `surface-runtime.ts` (`createSurfaceRuntimeReconciler`). Startup refuses Slack and Discord together. The gateway runs under the `discord:gateway` lease, deliveries under `discord:delivery-dispatch`, staged-message replay under `discord:envelope-replay`; staged messages share the existing `slack_staged_envelopes` table. Link prompts are limited to one per user per six hours through the rate-limit table. Intents: Guilds, GuildMessages, MessageContent, DirectMessages.
+
+   Not yet in PR 3: the conversation audience is the requester only (linked members who can view the channel need the member roster, PR 5); the `discord` tool's read actions still go through the Slack context puller; principal rows carrying approval, keychain or deploy-access cards are reported undeliverable until PR 4; no stop button on a status message.
 
 ## Remaining
 
-### PR 3: bot, core chat
-- `src/discord/` started from `src/index.ts` under the same background-work and blue-green gating as Slack, using a renamed generic reconciler (`createSurfaceRuntimeReconciler`, from `src/surfaces/slack-runtime.ts`). Refuse to start when Slack is also configured.
-- Dependencies `@discordjs/ws`, `@discordjs/rest`, `@discordjs/core`, pinned.
-- Gateway held under `leaderLease.hold("discord:gateway", …)`: Discord sends every event to every connection, so exactly one instance connects. Intents: Guilds, GuildMessages, MessageContent, DirectMessages, GuildMessageReactions, DirectMessageReactions, GuildMembers.
-- Split the generic half of `src/api/slack-core-client.ts` into a surface core client, and extract the delivery claim loop (`src/slack/deliveries.ts`), envelope staging and conversation-view rendering into `src/surfaces/` now that Discord is their second caller.
-- Gating: DMs always; in servers an @mention, or an unprompted reply in a thread where the bot has a stake. Unlinked authors get the link-prompt DM (`mintDiscordLinkTicket`).
-- Conversation model: DM `discord:dm:<dmChannelId>` in the user's personal scope; a mention starts a thread, `discord:ch:<parentChannelId>:<threadId>` with `channelRef` `discord:<parentChannelId>`.
-- Actor `externalId: "discord:<id>"`; core canonicalizes. Audience is the requester plus linked members who can view the channel.
-- Replies: typing indicator, placeholder edited as the reply streams (about one edit per second), split at 2,000 characters, Markdown passthrough.
-- Delivery poller for `type:"discord"` rows under the `discord:delivery-dispatch` lease; targets `<channelId>[:<replyToMessageId>]` or `principal:<id>`.
-- `/qm link|unlink|stop`; stop also via a status-message button.
-- Add `discord` to `src/surfaces/chat-surface.ts` with its label and mention syntax.
+### PR 3 follow-ups
+- Live QA once the bot is in the test server with Message Content enabled, then the staging end-to-end pass.
 
 ### PR 4: interactions, files, reactions
+- Status-message stop button; reaction and member intents when their features land.
 - Approval buttons with the existing `hilo_*`, `keychain_*`, `deploy_access_*` ids over `INTERACTION_CREATE`, deferred within 3 seconds; generalize the Slack-only gate in `src/core/approval-store.ts`.
 - Inbound attachments only from Discord's CDN hosts into `stageBlob`; outbound uploads within the server limit, otherwise a QM file link.
 - `[[react: …]]` directives and inbound reactions on messages the bot has a stake in.
 - Private replies: ephemeral for interactions, DM otherwise.
 
 ### PR 5: directory, hand-offs, admin, docs
+- Channel audience: the requester plus linked members who can view the channel (needs the GuildMembers intent).
 - Channel directory push with `discord:` ids; people come from QM links, not a Discord roster.
 - `reach` and principal deliveries target the configured platform.
 - Pinned model header and channel topic.
