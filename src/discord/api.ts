@@ -25,7 +25,7 @@ import {
   type SessionInfo,
 } from "@discordjs/ws";
 
-export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | "timestamp" | "mentions"> & {
+export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | "timestamp" | "mentions" | "type"> & {
   guild_id?: string;
   webhook_id?: string;
   author: Pick<APIMessage["author"], "id" | "username" | "global_name" | "bot">;

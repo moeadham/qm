@@ -1,3 +1,4 @@
+import { MessageType } from "@discordjs/core";
 import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
 import { safeClip } from "../surfaces/safe-cut.ts";
@@ -20,6 +21,7 @@ const CONTEXT_MESSAGES = 20;
 const THREAD_NAME_LIMIT = 90;
 const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
+const CONVERSATION_MESSAGE_TYPES = new Set<number>([MessageType.Default, MessageType.Reply]);
 
 export interface AcceptGate {
   persisted(): void;
@@ -153,7 +155,7 @@ export function createDiscordBot(deps: {
     const nameById = new Map<string, string>([[self.id, self.username]]);
     for (const m of raw) nameById.set(m.author.id, displayName(m.author));
     const messages: RecentMessage[] = raw
-      .filter((m) => m.id !== trigger.id && (m.content.trim() || m.author.id === self.id))
+      .filter((m) => m.id !== trigger.id && CONVERSATION_MESSAGE_TYPES.has(m.type) && m.content.trim())
       .map((m) => ({
         ts: epochTs(m.timestamp),
         name: displayName(m.author),

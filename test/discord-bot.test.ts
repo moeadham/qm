@@ -222,6 +222,7 @@ function dm(author: string, content: string, id = "m1"): DiscordMessage {
     channel_id: DM,
     content,
     timestamp: "2026-11-03T10:00:00.000Z",
+    type: 0,
     mentions: [],
     author: { id: author, username: author === ALICE ? "alice" : "mallory", global_name: null },
   };
@@ -318,6 +319,12 @@ test("a reply in a thread the bot owns is heard without a mention as an ambient 
   api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
   api.history.set(thread, [
     {
+      ...dm(BOT, "", "800000000000000007"),
+      type: 21,
+      channel_id: thread,
+      author: { id: BOT, username: "qm", global_name: null, bot: true },
+    },
+    {
       ...dm(BOT, "earlier answer", "800000000000000008"),
       channel_id: thread,
       author: { id: BOT, username: "qm", global_name: null, bot: true },
@@ -339,7 +346,7 @@ test("a reply in a thread the bot owns is heard without a mention as an ambient 
   assert.equal(turn.conversation.threadRef, `discord:ch:${CHANNEL}:${thread}`);
   assert.equal(turn.priorTurns?.length, 1);
   assert.equal(turn.priorTurns?.[0]?.role, "assistant");
-  assert.match(turn.priorTurns?.[0]?.text ?? "", /earlier answer$/);
+  assert.match(turn.priorTurns?.[0]?.text ?? "", /^\[~\w+\] earlier answer$/);
   assert.equal(api.threads.length, 0);
   assert.equal(api.sent.length, 0);
   assert.deepEqual(h.acked, []);
