@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import type { APIInteraction } from "@discordjs/core";
 import { startDiscordPlugin, assertOneChatPlatform, discordConfigFromEnv } from "../src/discord/index.ts";
 import { createDiscordCoreClient, type DiscordCoreClient } from "../src/discord/core.ts";
-import type { DiscordApi, DiscordChannel, DiscordGatewayHandlers, DiscordMessage } from "../src/discord/api.ts";
+import {
+  createDiscordGateway,
+  type DiscordApi,
+  type DiscordChannel,
+  type DiscordGatewayHandlers,
+  type DiscordMessage,
+} from "../src/discord/api.ts";
 import { verifyDiscordLinkTicket } from "../src/identity/discord-link.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { createRateLimiter } from "../src/ratelimit/rate-limiter.ts";
@@ -70,7 +76,11 @@ class FakeDiscord implements DiscordApi {
     }
     this.edits.push({ channelId, messageId, content });
   }
-  async remove() {}
+  removed: string[] = [];
+  threadExists = false;
+  async remove(_channelId: string, messageId: string) {
+    this.removed.push(messageId);
+  }
   async typing() {}
   async openDm(userId: string) {
     const dm = this.dmFor.get(userId) ?? `dm-${userId}`;
@@ -78,6 +88,7 @@ class FakeDiscord implements DiscordApi {
     return dm;
   }
   async startThread(channelId: string, messageId: string, name: string) {
+    if (this.threadExists) throw Object.assign(new Error("thread exists"), { code: 160004 });
     this.threads.push({ channelId, messageId, name });
     return messageId;
   }
@@ -483,4 +494,51 @@ test("a fatal gateway close releases the connection and backs off instead of rec
   await new Promise((r) => setTimeout(r, 6_000));
   await plugin.stop();
   assert.equal(gateway.connects, 1);
+});
+
+test("a gateway closed while it is still fetching its URL never starts a session", async () => {
+  const rest = {
+    async get() {
+      await new Promise((r) => setTimeout(r, 100));
+      return {
+        url: "ws://127.0.0.1:9",
+        shards: 1,
+        session_start_limit: { remaining: 10, reset_after: 1_000, max_concurrency: 1, total: 1_000 },
+      };
+    },
+  };
+  const connection = createDiscordGateway("token", rest as never).open({ onMessage() {}, onInteraction() {} });
+  await new Promise((r) => setTimeout(r, 20));
+  await connection.close();
+  await assert.rejects(connection.ready, /closed while connecting/);
+});
+
+test("when a person already opened a thread on the mention, the bot replies there without claiming it", async () => {
+  const h = harness({ result: () => ({ status: "silent" }) });
+  const api = new FakeDiscord();
+  api.threadExists = true;
+  const mention = "800000000000000020";
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  api.channels.set(mention, { id: mention, type: 11, parentId: CHANNEL, ownerId: ALICE, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  const base = { ...dm(ALICE, ""), channel_id: CHANNEL, guild_id: GUILD };
+  handlers.onMessage({ ...base, id: mention, content: `<@${BOT}> hi`, mentions: [{ id: BOT } as never] });
+  await until(() => h.turns.length === 1, "mention turn");
+  handlers.onMessage({ ...base, channel_id: mention, id: "800000000000000021", content: "chatting among ourselves" });
+  await new Promise((r) => setTimeout(r, 50));
+  await plugin.stop();
+
+  assert.equal(h.turns.length, 1);
+  assert.equal(h.turns[0]!.deliveryTarget, mention);
+  assert.doesNotMatch(h.turns[0]!.conversationHeader ?? "", /thread you started/);
+  assert.match(h.turns[0]!.conversationHeader ?? "", /replying in a thread/);
+});
+
+test("a streamed placeholder is removed when the finished turn has no text to show", async () => {
+  const h = harness({ snapshots: ["drafting"], result: () => ({ status: "ok", reply: "" }) });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "make me a file"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+  assert.deepEqual(api.removed, [api.sent[0]!.id]);
 });

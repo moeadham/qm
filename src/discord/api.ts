@@ -62,7 +62,7 @@ export interface DiscordGateway {
 }
 
 export const DISCORD_MESSAGE_LIMIT = 2_000;
-const UNKNOWN_MESSAGE = 10008;
+export const DISCORD_UNKNOWN_MESSAGE = 10008;
 
 export function discordErrorCode(error: unknown): number | undefined {
   const code = (error as { code?: unknown })?.code;
@@ -85,7 +85,7 @@ export async function postMessage(
         await api.edit(channelId, opts.editRef, part);
         continue;
       } catch (error) {
-        if (discordErrorCode(error) !== UNKNOWN_MESSAGE) throw error;
+        if (discordErrorCode(error) !== DISCORD_UNKNOWN_MESSAGE) throw error;
       }
     }
     await api.send(channelId, part, {
@@ -176,20 +176,32 @@ const INTENTS =
 export function createDiscordGateway(token: string, rest: REST): DiscordGateway {
   return {
     open(handlers) {
-      const gateway = new WebSocketManager({ token, intents: INTENTS, rest });
+      let closing = false;
+      const gatedRest = {
+        async get(...args: Parameters<REST["get"]>) {
+          const result = await rest.get(...args);
+          if (closing) throw new Error("Discord gateway closed while connecting");
+          return result;
+        },
+      } as unknown as REST;
+      const gateway = new WebSocketManager({ token, intents: INTENTS, rest: gatedRest });
       const client = new Client({ rest, gateway });
       client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => handlers.onMessage(data));
       client.on(GatewayDispatchEvents.InteractionCreate, ({ data }) => handlers.onInteraction(data));
       let fail!: (error: Error) => void;
       const closed = new Promise<Error>((resolve) => (fail = resolve));
+      const destroy = async (): Promise<void> => {
+        await Promise.resolve(gateway.destroy()).catch(swallowAs("discord: destroy gateway", undefined));
+      };
       gateway.on("error", (error) => fail(error));
       const ready = gateway.connect();
-      ready.catch((error: unknown) => fail(error instanceof Error ? error : new Error(String(error))));
+      ready.catch(() => {});
       return {
         ready,
         closed,
         close: async () => {
-          await Promise.resolve(gateway.destroy()).catch(swallowAs("discord: destroy gateway", undefined));
+          closing = true;
+          await destroy();
         },
       };
     },

@@ -63,7 +63,7 @@ export async function startDiscordPlugin(
 
   let stopped = false;
   let connected = false;
-  let failures = 0;
+  let fatalCloses = 0;
   let nextAttemptAt = 0;
   let release!: () => void;
   const stopSignal = new Promise<void>((resolve) => (release = resolve));
@@ -74,14 +74,20 @@ export async function startDiscordPlugin(
     try {
       const first = await Promise.race([connection.ready.then(() => "ready" as const), ended]);
       if (first !== "ready") {
-        if (first) throw first;
+        if (first) {
+          fatalCloses++;
+          throw first;
+        }
         return;
       }
-      failures = 0;
+      fatalCloses = 0;
       console.log(`[discord] gateway connected as ${self.username}`);
       await api.registerCommands(QM_COMMANDS).catch(swallowAs("discord: register commands", undefined));
       const outcome = await ended;
-      if (outcome) throw outcome;
+      if (outcome) {
+        fatalCloses++;
+        throw outcome;
+      }
     } finally {
       await connection.close();
       console.log("[discord] gateway closed");
@@ -93,8 +99,9 @@ export async function startDiscordPlugin(
     try {
       await core.holdLease("gateway", runGateway);
     } catch (error) {
-      failures++;
-      nextAttemptAt = Date.now() + Math.min(GATEWAY_RETRY_MS * 2 ** failures, GATEWAY_MAX_BACKOFF_MS);
+      nextAttemptAt = fatalCloses
+        ? Date.now() + Math.min(GATEWAY_RETRY_MS * 2 ** fatalCloses, GATEWAY_MAX_BACKOFF_MS)
+        : 0;
       throw error;
     } finally {
       connected = false;

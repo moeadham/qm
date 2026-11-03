@@ -3,13 +3,12 @@ import { drainClaimedDeliveries } from "../surfaces/delivery-claims.ts";
 import type { TurnFlow } from "../surfaces/turn-flow.ts";
 import type { Delivery } from "../types.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
-import { discordErrorCode, postMessage, type DiscordApi } from "./api.ts";
+import { DISCORD_UNKNOWN_MESSAGE, discordErrorCode, postMessage, type DiscordApi } from "./api.ts";
 import { discordDmThreadRef } from "./bot.ts";
 import type { DiscordCoreClient } from "./core.ts";
 
 const CLAIM_MS = 15_000;
 const RUN_RECOVERY_GRACE_MS = 15_000;
-const UNKNOWN_MESSAGE = 10008;
 const UNDELIVERABLE_CODES = new Set([10003, 10013, 50001, 50007, 50013]);
 const MAX_REPORTED = 5_000;
 
@@ -49,7 +48,7 @@ export function createDiscordDeliveryPoller(deps: {
     await attempt(d, async () => {
       if (d.destination.delete) {
         await api.remove(channelId, d.destination.delete.messageTs).catch((error: unknown) => {
-          if (discordErrorCode(error) !== UNKNOWN_MESSAGE) throw error;
+          if (discordErrorCode(error) !== DISCORD_UNKNOWN_MESSAGE) throw error;
         });
         return;
       }

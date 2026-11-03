@@ -127,20 +127,22 @@ export function createDiscordBot(deps: {
       };
     }
     let threadId: string;
+    let youOpenedIt = true;
     try {
       threadId = await api.startThread(channel.id, m.id, safeClip(text || "QM", THREAD_NAME_LIMIT));
+      channels.set(threadId, { id: threadId, type: 11, parentId: channel.id, ownerId: self.id, guildId: m.guild_id! });
     } catch (error) {
       if (discordErrorCode(error) !== THREAD_ALREADY_EXISTS) throw error;
       threadId = m.id;
+      youOpenedIt = (await channelOf(threadId)).ownerId === self.id;
     }
-    channels.set(threadId, { id: threadId, type: 11, parentId: channel.id, ownerId: self.id, guildId: m.guild_id! });
     return {
       kind: "channel",
       channelId: threadId,
       threadRef: discordChannelThreadRef(channel.id, threadId),
       channelRef: channel.id,
       ...(channel.name ? { channelName: channel.name } : {}),
-      youOpenedIt: true,
+      youOpenedIt,
     };
   }
 
@@ -179,9 +181,11 @@ export function createDiscordBot(deps: {
 
   function createReplyWriter(channelId: string) {
     let placeholder: string | undefined;
+    let streaming = true;
     let chain: Promise<void> = Promise.resolve();
     return {
       stream(text: string, onPlaceholder: (messageId: string) => Promise<void>): void {
+        if (!streaming) return;
         const shown = safeClip(text, DISCORD_MESSAGE_LIMIT - 1);
         chain = chain
           .then(async () => {
@@ -191,6 +195,7 @@ export function createDiscordBot(deps: {
               await onPlaceholder(posted);
               placeholder = posted;
             } catch (error) {
+              streaming = false;
               await api.remove(channelId, posted).catch(swallowAs("discord: remove unrecorded placeholder", undefined));
               throw error;
             }
@@ -198,8 +203,10 @@ export function createDiscordBot(deps: {
           .catch(swallowAs("discord: stream reply", undefined));
       },
       async finish(text: string, key: string): Promise<void> {
+        streaming = false;
         await chain;
-        await postMessage(api, channelId, text, { key, ...(placeholder ? { editRef: placeholder } : {}) });
+        if (text) return postMessage(api, channelId, text, { key, ...(placeholder ? { editRef: placeholder } : {}) });
+        if (placeholder) await api.remove(channelId, placeholder);
       },
     };
   }
@@ -302,7 +309,7 @@ export function createDiscordBot(deps: {
       const reply = replyText(result, relevant.addressed);
       const runId = queuedRunId;
       try {
-        if (reply) await writer.finish(reply, runId ? `run:${runId}` : messageKey);
+        await writer.finish(reply, runId ? `run:${runId}` : messageKey);
       } catch (error) {
         if (runId) flow.inFlightRuns.delete(runId);
         console.error(
