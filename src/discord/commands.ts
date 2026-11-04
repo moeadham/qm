@@ -11,8 +11,10 @@ import { homeChannelId, threadRefForChannel } from "./bot.ts";
 import type { DiscordCoreClient, ModelMenu } from "./core.ts";
 import { scopeId, type ScopeId } from "../types.ts";
 import { safeClip } from "../surfaces/safe-cut.ts";
+import { sleep } from "../util/async.ts";
 
 const CHOICE_LIMIT = 25;
+const AUTOCOMPLETE_BUDGET_MS = 2_500;
 const CHOICE_TEXT_LIMIT = 100;
 
 async function modelTarget(
@@ -76,7 +78,7 @@ async function modelSuggestions(
   const principal = await core.linkedPrincipal(userId);
   if (!principal || !channelId) return [];
   const { scope } = await modelTarget(api, channelId, principal);
-  const menu = await core.modelMenu(principal, scope);
+  const menu = await core.modelMenu(principal, scope, { refresh: false });
   if (!menu) return [];
   const wanted = typed.trim().toLowerCase();
   const options = [
@@ -188,12 +190,13 @@ export async function handleInteraction(
     const allowed = !interaction.guild_id || deps.guildIds.has(interaction.guild_id);
     const choices =
       allowed && userId && sub?.name === "model" && focused && "value" in focused
-        ? await modelSuggestions(core, api, userId, interaction.channel?.id, String(focused.value)).catch(
-            (error: unknown) => {
-              console.error("[discord] /qm model suggestions failed:", errMessage(error));
-              return [];
-            },
-          )
+        ? await Promise.race([
+            modelSuggestions(core, api, userId, interaction.channel?.id, String(focused.value)),
+            sleep(AUTOCOMPLETE_BUDGET_MS, { unref: true }).then(() => []),
+          ]).catch((error: unknown) => {
+            console.error("[discord] /qm model suggestions failed:", errMessage(error));
+            return [];
+          })
         : [];
     return api.autocomplete(interaction.id, interaction.token, choices);
   }

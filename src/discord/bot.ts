@@ -24,6 +24,11 @@ const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
 const CONVERSATION_MESSAGE_TYPES = new Set<number>([MessageType.Default, MessageType.Reply]);
 
+export interface TurnOutcome {
+  result?: TurnResult;
+  accepted: boolean;
+}
+
 export interface AcceptGate {
   persisted(): void;
   failed(reason?: string): void;
@@ -289,9 +294,9 @@ export function createDiscordBot(deps: {
   async function converse(
     channelId: string,
     body: CoreTurnBody,
-    opts: { addressed: boolean; key: string; gate?: AcceptGate },
-  ): Promise<TurnResult | undefined> {
-    const { addressed, key, gate } = opts;
+    opts: { addressed: boolean; key: string; gate?: AcceptGate; quiet?: boolean },
+  ): Promise<TurnOutcome> {
+    const { addressed, key, gate, quiet } = opts;
     const writer = createReplyWriter(channelId);
     let queuedRunId: string | undefined;
     let accepted = false;
@@ -318,15 +323,16 @@ export function createDiscordBot(deps: {
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));
         console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
-        if (addressed)
+        if (addressed && !quiet)
           await writer
             .finish(`⚠️ ${turnFailureText(error)}`, `failure:${key}`)
             .catch(swallowAs("discord: failure note", undefined));
-        return undefined;
+        return { accepted };
       }
       if (!accepted) accept();
-      if (result.steered) return result;
-      const reply = replyText(result, addressed, body.conversation.kind === "dm");
+      if (result.steered) return { result, accepted };
+      const reply =
+        quiet && result.status !== "ok" ? "" : replyText(result, addressed, body.conversation.kind === "dm");
       const runId = queuedRunId;
       try {
         await writer.finish(reply, runId ? `run:${runId}` : key);
@@ -336,23 +342,35 @@ export function createDiscordBot(deps: {
           `[discord] reply post failed for run ${runId ?? "?"}; leaving it for the delivery poller:`,
           errMessage(error),
         );
-        return result;
+        return { result, accepted };
       }
       if (runId && hasRunDelivery(result)) flow.ackRunDelivery(runId);
-      return result;
+      return { result, accepted };
     } finally {
       stopTyping();
     }
   }
 
-  async function resumeTurn(body: CoreTurnBody, key: string): Promise<TurnResult | undefined> {
-    if (isSubagentThreadRef(body.conversation.threadRef))
-      return flow.callCore(body, {}).catch((error: unknown) => {
-        console.error(`[discord] delegated approval ${key} errored: ${errMessage(error)}`);
-        return undefined;
-      });
-    if (!body.deliveryTarget) return undefined;
-    return converse(body.deliveryTarget, body, { addressed: true, key });
+  async function resumeTurn(body: CoreTurnBody, key: string): Promise<TurnOutcome> {
+    if (isSubagentThreadRef(body.conversation.threadRef)) {
+      let accepted = false;
+      return flow
+        .callCore(body, {
+          onQueued: () => {
+            accepted = true;
+          },
+          onSteered: () => {
+            accepted = true;
+          },
+        })
+        .then((result) => ({ result, accepted: true }))
+        .catch((error: unknown) => {
+          console.error(`[discord] delegated approval ${key} errored: ${errMessage(error)}`);
+          return { accepted };
+        });
+    }
+    if (!body.deliveryTarget) return { accepted: false };
+    return converse(body.deliveryTarget, body, { addressed: true, key, quiet: true });
   }
 
   return { handleMessage, resumeTurn };

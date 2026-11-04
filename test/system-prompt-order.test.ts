@@ -1343,4 +1343,15 @@ test("a scheduled run that delivers to a Discord conversation gets the Discord s
     seen.map((turn) => turn.surfaceName),
     ["discord", "slack", "slack"],
   );
+
+  const monitor = await orchestrator.handleTurn(
+    dm("monitor:m1:exit", "the build finished", {
+      surface: "monitor",
+      surfaceTools: true,
+      origin: { kind: "automation", destination: { type: "discord", target: "thread-1" } },
+    }),
+  );
+  assert.equal(monitor.status, "ok");
+  assert.equal(seen.at(-1)!.surfaceName, "discord");
+  assert.match(seen.at(-1)!.systemPrompt, /Your words reach people ONLY through the `discord` tool/);
 });

@@ -1053,7 +1053,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       let surfaceName = input.surface ?? "slack";
       if (triggerDestination) surfaceName = isChatSurface(triggerDestination.type) ? triggerDestination.type : "slack";
       const delivered = chatSurface(surfaceName);
-      const surfaceTool = input.surface ?? "slack";
       const branding = await resolveBranding(deps.config, resolution.orgScopeId, deps.brandingDefault);
       const botName = branding.selfLabel ?? "QM";
       const orgName = branding.orgName ?? "this organization";
@@ -1068,7 +1067,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       else if (modeName === "mode-conversation") frameMd = MODE_CONVERSATION_MD;
       const frameVars: PromptVars = {
         botName,
-        surfaceTool,
+        surfaceTool: surfaceName,
         surfaceLabel: isWeb ? `the ${botName} web app` : (delivered?.label ?? "Slack"),
         conversationType: { dm: "private 1:1", group: "group conversation", channel: "channel conversation" }[
           conversation.kind

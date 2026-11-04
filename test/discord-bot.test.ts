@@ -1027,14 +1027,22 @@ test("/qm model in a DM lists and sets the user's ChatGPT subscription models fo
     assert.ok(api.suggestions[0]!.some((c) => c.value === "pi:codex/gpt-5.6-sol"));
     assert.ok(api.suggestions[0]!.every((c) => c.value === "default" || c.value.startsWith("pi:codex/")));
 
+    const other = api.suggestions[0]!.find(
+      (c) => c.value.startsWith("pi:codex/") && c.value !== "pi:codex/gpt-5.6-sol",
+    );
+    await built.config.setRuntimeSelectionLatest("personal:alice@example.com" as never, {
+      harnessId: "pi",
+      modelId: other!.value.slice("pi:".length),
+      effortLevel: "max",
+      fastMode: false,
+    });
     assert.match(
       await answer("pi:codex/gpt-5.6-sol"),
       /^Done\. New turns in your DMs with me and your personal QM chats use \*\*/,
     );
-    assert.deepEqual(
-      (await built.config.getRuntimeSelectionDurable("personal:alice@example.com" as never))?.modelId,
-      "codex/gpt-5.6-sol",
-    );
+    const saved = await built.config.getRuntimeSelectionDurable("personal:alice@example.com" as never);
+    assert.equal(saved?.modelId, "codex/gpt-5.6-sol");
+    assert.equal(saved?.effortLevel, "max");
     assert.match(await answer(), /use \*\*.+\*\*\.\n/);
     assert.match(await answer("claude-sonnet-5"), /I don't have a model called "claude-sonnet-5" for you here/);
     assert.match(await answer("default"), /use the default model again/);
@@ -1064,5 +1072,38 @@ test("/qm model in a server thread sets the channel's model, including Claude su
   assert.deepEqual(
     (await built.config.getRuntimeSelectionDurable(`channel:${CHANNEL}` as never))?.modelId,
     "claude-sonnet-5",
+  );
+});
+
+test("an approval core accepted but whose wait then fails stays decided instead of offering a second run", async () => {
+  const h = harness({
+    approvals: { [REQUEST_ID]: storedApproval(`discord:dm:${DM}`) },
+    result: () => {
+      throw new Error("connection reset while waiting");
+    },
+  });
+  const api = await clickApproval(h, [`qm:cmd:once:${REQUEST_ID}`], (a) => a.edits.length >= 1 && h.turns.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(api.edits.length, 1);
+  assert.match(api.edits[0]!.content, /^Allowed once/);
+  assert.deepEqual(api.edits[0]!.buttons, []);
+  assert.equal(
+    api.sent.some((m) => m.content.startsWith("⚠️")),
+    false,
+  );
+});
+
+test("a refused approval replay is reported once, on the card, not again in the conversation", async () => {
+  const h = harness({
+    approvals: { [REQUEST_ID]: storedApproval(`discord:dm:${DM}`) },
+    result: () => ({ status: "refused", reason: "the command is blocked by policy" }),
+  });
+  const api = await clickApproval(h, [`qm:cmd:once:${REQUEST_ID}`], (a) => a.edits.length === 2);
+
+  assert.match(api.edits[1]!.content, /I couldn't continue/);
+  assert.equal(
+    api.sent.some((m) => m.content.includes("⚠️")),
+    false,
   );
 });

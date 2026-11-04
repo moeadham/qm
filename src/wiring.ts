@@ -2700,20 +2700,7 @@ export function buildApp(
   orchestratorDeps.control = createControlService(app, scheduler, admin);
   orchestratorDeps.validateScheduledRuntime = (scope, choice, purpose, actorId) =>
     availableRuntimeError({ deps: runtimeDeps }, scope, choice, purpose, actorId);
-  orchestratorDeps.runtime = createRuntimeService(
-    {
-      config: configStore,
-      harnessId: fallbackHarness,
-      get baseModelDefault() {
-        return fallback.modelId;
-      },
-      providerKeys: providerKeysPresent(config),
-      modelCredentials,
-      modelCredentialFetch: overrides.modelCredentialFetch,
-      refreshModels,
-    },
-    app,
-  );
+  orchestratorDeps.runtime = createRuntimeService(runtimeDeps, app);
   const finishCredentials = (handle: SandboxHandle, processId: string) =>
     finishProcessCredentials({ sandbox, processes: processes!, ...(keychain ? { keychain } : {}) }, handle, processId);
   const monitorPoller: MonitorPoller | null =

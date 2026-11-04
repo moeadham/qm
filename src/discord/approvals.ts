@@ -17,10 +17,11 @@ import {
   type ApprovalButton,
   type DiscordCard,
 } from "./approval-cards.ts";
+import type { TurnOutcome } from "./bot.ts";
 import type { DiscordCoreClient } from "./core.ts";
 
-function stillPending(result: TurnResult | undefined, requestId: string): boolean {
-  if (!result) return true;
+function stillPending({ result, accepted }: TurnOutcome, requestId: string): boolean {
+  if (!result) return !accepted;
   if (result.status !== "pending_approval") return false;
   const pending = result.pendingApprovals ?? [];
   return !pending.length || pending.some((p) => p.requestId === requestId);
@@ -29,7 +30,7 @@ function stillPending(result: TurnResult | undefined, requestId: string): boolea
 export function createApprovalButtons(deps: {
   api: DiscordApi;
   core: DiscordCoreClient;
-  resumeTurn(body: CoreTurnBody, key: string): Promise<TurnResult | undefined>;
+  resumeTurn(body: CoreTurnBody, key: string): Promise<TurnOutcome>;
 }) {
   const { api, core } = deps;
   const oneAtATime = createKeyedQueue();
@@ -57,8 +58,9 @@ export function createApprovalButtons(deps: {
     } as CoreTurnBody;
     const decision = commandDecisionText(button.scope, record.command);
     await show({ content: decision, buttons: [] });
-    const result = await deps.resumeTurn(body, `approval:${button.id}`);
-    if (stillPending(result, button.id)) return show(retryCard(record, result));
+    const outcome = await deps.resumeTurn(body, `approval:${button.id}`);
+    const { result } = outcome;
+    if (stillPending(outcome, button.id)) return show(retryCard(record, result));
     if (result?.status === "failed" || result?.status === "refused")
       return show({ content: `${decision}\n⚠️ I couldn't continue: ${userFacingFailureClause(result)}.`, buttons: [] });
     if (isSubagentThreadRef(body.conversation.threadRef) && approved)

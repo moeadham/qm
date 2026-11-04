@@ -6,6 +6,7 @@ import type { DeploymentAccessRequest } from "../surfaces/deploy-access.ts";
 import {
   availableRuntimeError,
   matchRuntimeModel,
+  validateRuntimeChoice,
   userRuntimeConfigBody,
   type RuntimeDeps,
 } from "../api/runtime-config.ts";
@@ -23,7 +24,7 @@ export interface DiscordCoreClient extends SurfaceCoreClient {
   allowLinkPrompt(discordId: string): Promise<boolean>;
   unlink(discordId: string): Promise<boolean>;
   deploymentAccessRequest(deliveryId: string): Promise<DeploymentAccessRequest | undefined>;
-  modelMenu(principalId: string, scope: ScopeId): Promise<ModelMenu | undefined>;
+  modelMenu(principalId: string, scope: ScopeId, opts?: { refresh?: boolean }): Promise<ModelMenu | undefined>;
   setModel(principalId: string, scope: ScopeId, query: string): Promise<SetModelResult>;
 }
 
@@ -49,9 +50,13 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     const principal = deps.identity.classify(discordAlias(discordId));
     return deps.identity.isInternal(principal) ? principal.id : undefined;
   };
-  const modelMenu = async (principalId: string, scope: ScopeId): Promise<ModelMenu | undefined> => {
+  const modelMenu = async (
+    principalId: string,
+    scope: ScopeId,
+    opts: { refresh?: boolean } = {},
+  ): Promise<ModelMenu | undefined> => {
     if (!deps.runtime?.config) return undefined;
-    await deps.runtime.refreshModels?.();
+    if (opts.refresh !== false) await deps.runtime.refreshModels?.();
     return userRuntimeConfigBody({ deps: deps.runtime }, scope, principalId);
   };
   return {
@@ -67,7 +72,13 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
       if (query.toLowerCase() !== "default") {
         const match = matchRuntimeModel(menu, query, menu.approvedHarnesses);
         if (!match.ok) return match;
-        choice = { harnessId: match.harnessId, modelId: match.modelId, effortLevel: "auto", fastMode: false };
+        const kept = {
+          harnessId: match.harnessId,
+          modelId: match.modelId,
+          effortLevel: menu.effective.effortLevel ?? "auto",
+          fastMode: menu.effective.fastMode ?? false,
+        };
+        choice = validateRuntimeChoice(kept) ? { ...kept, effortLevel: "auto", fastMode: false } : kept;
         const error = await availableRuntimeError({ deps: runtime }, scope, choice, undefined, principalId);
         if (error) return { ok: false, error };
       }
