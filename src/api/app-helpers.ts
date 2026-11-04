@@ -226,7 +226,10 @@ export function createAppHelpers(deps: AppDeps, app: App) {
           );
           if (claimed.id === runId && !shutdown?.aborted) return withAdminLink(result);
         } catch (error) {
-          if (claimed.id === runId && !shutdown?.aborted) throw error;
+          if (claimed.id === runId && !shutdown?.aborted) {
+            const after = await deps.runs.get(runId);
+            if (after?.status !== "pending") throw error;
+          }
           swallow("inline run did not complete", error);
         }
         continue;

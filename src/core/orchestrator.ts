@@ -554,6 +554,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         !external && deps.runs
           ? await delegatedAuthorizationOrigin(input, { runs: deps.runs, sessions: deps.sessions })
           : undefined;
+      const delegatedModelOrigin =
+        delegatedOrigin ??
+        (!external && deps.runs && input.readOnly
+          ? await delegatedAuthorizationOrigin(
+              input,
+              { runs: deps.runs, sessions: deps.sessions },
+              { allowReadOnly: true },
+            )
+          : undefined);
       const authorizationOrigin = sessionTurn ? (delegatedOrigin ?? { kind: "automation" as const }) : input.origin;
       const liveTurn = authorizationOrigin.kind === "human" && allInternal && !external;
       const liveAuthorTurn =
@@ -3106,7 +3115,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           const account = external
             ? "company"
             : (input.modelAccount ?? (await deps.config?.getModelAccountDurable(actor.id)) ?? "company");
-          if (userCredStore && (humanInput || ownerModelAuth) && account !== "company") {
+          if (
+            userCredStore &&
+            (humanInput || delegatedModelOrigin !== undefined || ownerModelAuth) &&
+            account !== "company"
+          ) {
             const [anthCred, oaiCred] = await Promise.all([
               account === "openai" ? null : userCredStore.get(actor.id, "anthropic"),
               account === "anthropic" ? null : userCredStore.get(actor.id, "openai"),
@@ -3128,14 +3141,30 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 claudeOauthToken = derived.accessToken;
                 userHarnessOverride = routing.harness;
                 userModelOverride = routing.model;
-              }
+              } else
+                throw new ProviderTurnError(
+                  "Your connected Claude account could not refresh. Retry the turn; if it keeps failing, reconnect Claude in Settings → AI access.",
+                  {
+                    code: "auth",
+                    retryable: true,
+                    raw: "Anthropic subscription OAuth refresh returned no access token",
+                  },
+                );
             } else if (routing?.kind === "oauth" && routing.provider === "openai" && oaiCred?.oauth) {
               const derived = await userCredStore.derivedOAuth(actor.id, "openai");
               if (derived) {
                 userProviderKeys = { [CODEX_SUBSCRIPTION_PROVIDER]: derived.accessToken };
                 userHarnessOverride = routing.harness;
                 userModelOverride = routing.model;
-              }
+              } else
+                throw new ProviderTurnError(
+                  "Your connected ChatGPT account could not refresh. Retry the turn; if it keeps failing, reconnect ChatGPT in Settings → AI access.",
+                  {
+                    code: "auth",
+                    retryable: true,
+                    raw: "OpenAI subscription OAuth refresh returned no access token",
+                  },
+                );
             }
             if (!userHarnessOverride) {
               throw new NonRetryableTurnError(
