@@ -9,8 +9,6 @@ import {
   DISCORD_LINK_PROVIDER,
   discordAlias,
   discordAuthorizeUrl,
-  discordLinkEvidence,
-  discordUsernameFromEvidence,
   linkedDiscordId,
   verifiedDiscordUser,
   unlinkDiscordAccount,
@@ -66,12 +64,11 @@ async function discordLinkStatus(ctx: ApiCtx): Promise<void> {
   const discordId = linkedDiscordId(principal);
   const alias = discordId ? foldPrincipalId(discordAlias(discordId)) : undefined;
   const link = alias ? rows.find((row) => foldPrincipalId(row.principalId) === alias) : undefined;
-  const username = link ? discordUsernameFromEvidence(link.evidence) : undefined;
   return sendJson(ctx.res, 200, {
     configured: (await discordClient(ctx.deps)) !== null,
     linked: discordId !== undefined,
     ...(discordId ? { discordId } : {}),
-    ...(username ? { username } : {}),
+    ...(link?.label ? { username: link.label } : {}),
     ...(link ? { linkedAt: link.createdAt } : {}),
   });
 }
@@ -149,7 +146,8 @@ async function discordLinkCallback(ctx: BaseCtx): Promise<void> {
       await links.link({
         principalId: alias,
         canonicalId: state.principalId,
-        evidence: discordLinkEvidence(user),
+        evidence: `Discord OAuth user ${user.id} (${user.username})`,
+        label: user.username,
         linkedBy: state.principalId,
       });
     } catch (error) {

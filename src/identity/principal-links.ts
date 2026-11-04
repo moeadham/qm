@@ -6,6 +6,7 @@ export interface PrincipalLink {
   principalId: string;
   canonicalId: string;
   evidence: string;
+  label?: string;
   linkedBy: string;
   createdAt: number;
 }
@@ -14,6 +15,7 @@ interface PrincipalLinkInput {
   principalId: unknown;
   canonicalId: unknown;
   evidence: unknown;
+  label?: string;
   linkedBy: string;
 }
 
@@ -104,6 +106,7 @@ export function createPrincipalLinkService(
           throw new PrincipalLinkError(400, `evidence must say how the two identities were verified as one person`);
         const principalId = input.principalId.trim();
         const canonicalId = input.canonicalId.trim();
+        const label = input.label?.trim().slice(0, MAX_ID_LENGTH);
         const aliasKey = foldPrincipalId(principalId);
         const canonicalKey = foldPrincipalId(canonicalId);
         if (aliasKey === canonicalKey) throw new PrincipalLinkError(400, "a principal cannot be linked to itself");
@@ -135,6 +138,7 @@ export function createPrincipalLinkService(
           principalId,
           canonicalId,
           evidence,
+          ...(label ? { label } : {}),
           linkedBy: input.linkedBy,
           createdAt: Date.now(),
         });
