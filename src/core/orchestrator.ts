@@ -1049,6 +1049,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       let memoryView = await context.memorySnapshot(false);
       const isWeb = input.surface === "web";
       const chat = chatSurface(input.surface);
+      const triggerDestination = input.origin.kind === "automation" ? input.origin.destination : undefined;
+      let surfaceName = input.surface ?? "slack";
+      if (triggerDestination) surfaceName = isChatSurface(triggerDestination.type) ? triggerDestination.type : "slack";
+      const delivered = chatSurface(surfaceName);
       const surfaceTool = input.surface ?? "slack";
       const branding = await resolveBranding(deps.config, resolution.orgScopeId, deps.brandingDefault);
       const botName = branding.selfLabel ?? "QM";
@@ -1065,7 +1069,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const frameVars: PromptVars = {
         botName,
         surfaceTool,
-        surfaceLabel: isWeb ? `the ${botName} web app` : (chat?.label ?? "Slack"),
+        surfaceLabel: isWeb ? `the ${botName} web app` : (delivered?.label ?? "Slack"),
         conversationType: { dm: "private 1:1", group: "group conversation", channel: "channel conversation" }[
           conversation.kind
         ],
@@ -1076,8 +1080,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         frameVars.userName = cleanBrandingLabel(actor.displayName, 80) ?? "there";
         frameVars.userEmail = actor.id.includes("@") ? actor.id : undefined;
       }
-      const surfaceName =
-        input.origin.kind === "automation" && input.origin.destination ? "slack" : (input.surface ?? "slack");
       const sessionSyscalls =
         !external &&
         deps.sessionSyscalls &&
@@ -1097,10 +1099,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         botName,
         botHandle,
         orgName,
-        surfaceLabel: chat?.label ?? "Slack",
+        surfaceLabel: delivered?.label ?? "Slack",
         web: isWeb,
         chat: Boolean(chat),
-        chatLinkHint: chat?.linkHint ?? "",
+        chatLinkHint: delivered?.linkHint ?? "",
         sessions: isWeb && surfaceName === "web" && Boolean(sessionSyscalls) && !input.swarm,
       });
       let systemPrompt = `${modeFrame}\n\n${resolution.systemPrompt}\n\n${sharedCore}`;

@@ -342,3 +342,32 @@ describe("runTrigger: a busy session defers a fire instead of consuming it", () 
     assert.equal((await d.deliveries.pending("slack")).length, 1);
   });
 });
+
+describe("runTrigger: a cron created in a Discord conversation delivers back to it", () => {
+  for (const [label, ownerScopeId, target] of [
+    ["DM", scopeId("personal", "U1"), "500000000000000001"],
+    ["server thread", scopeId("channel", "600000000000000001"), "800000000000000001"],
+  ] as const) {
+    it(`queues the fire's reply as a discord delivery to the ${label}`, async () => {
+      let req: TurnRequest | undefined;
+      const d = deps(async (r) => {
+        req = r;
+        return { status: "ok", reply: "daily summary" };
+      });
+      const destination: Destination = { type: "discord", target, audienceScopeId: ownerScopeId };
+      const out = await runTrigger(d, {
+        owner: "U1",
+        ownerScopeId,
+        input: "summarize today",
+        fireKey: `cron:discord-${label}:1`,
+        surface: "cron",
+        destination,
+      });
+      assert.equal(out.ran, true);
+      assert.deepEqual(req?.triggerDestination, destination);
+      const [delivery] = await d.deliveries.pending("discord");
+      assert.equal(delivery?.text, "daily summary");
+      assert.deepEqual(delivery?.destination, destination);
+    });
+  }
+});
