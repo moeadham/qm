@@ -1,9 +1,12 @@
+import { approvalDeliveryKey, approvalDeliveryRecipient } from "../core/approval-store.ts";
+import { samePerson } from "../directory/person.ts";
 import { linkedDiscordId } from "../identity/discord-link.ts";
 import { drainClaimedDeliveries } from "../surfaces/delivery-claims.ts";
 import type { TurnFlow } from "../surfaces/turn-flow.ts";
 import type { Delivery } from "../types.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
-import { DISCORD_UNKNOWN_MESSAGE, discordErrorCode, postMessage, type DiscordApi } from "./api.ts";
+import { DISCORD_UNKNOWN_MESSAGE, discordErrorCode, messageNonce, postMessage, type DiscordApi } from "./api.ts";
+import { commandApprovalCard, deployAccessCard, keychainCard, type DiscordCard } from "./approval-cards.ts";
 import { discordDmThreadRef } from "./bot.ts";
 import type { DiscordCoreClient } from "./core.ts";
 
@@ -40,6 +43,36 @@ export function createDiscordDeliveryPoller(deps: {
     }
   }
 
+  async function approvalCard(d: Delivery): Promise<DiscordCard | "skip" | undefined> {
+    const { commandApprovalId, keychainAskId, deploymentAccess } = d.destination;
+    if (keychainAskId) {
+      if (d.idempotencyKey !== `ask:${keychainAskId}:notice`) return "skip";
+      const view = await core.keychainApprovals?.card(keychainAskId);
+      return view?.ask.status === "pending" ? keychainCard(view) : "skip";
+    }
+    if (commandApprovalId) {
+      const approval = await core.getApproval(commandApprovalId);
+      const requester = approvalDeliveryRecipient(approval?.request?.actor as { externalId?: string } | undefined);
+      if (
+        !approval ||
+        !requester ||
+        !samePerson(requester, d.destination.target) ||
+        d.idempotencyKey !== approvalDeliveryKey(commandApprovalId, approval)
+      )
+        return "skip";
+      return commandApprovalCard(approval);
+    }
+    if (deploymentAccess) return deployAccessCard(d.text, d.id);
+    return undefined;
+  }
+
+  async function postCard(channelId: string, d: Delivery, card: DiscordCard): Promise<void> {
+    await api.send(channelId, card.content, {
+      buttons: card.buttons,
+      nonce: messageNonce(d.idempotencyKey ?? d.id, 0),
+    });
+  }
+
   async function deliverConversation(d: Delivery): Promise<void> {
     const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
     if (runId && flow.inFlightRuns.has(runId)) return;
@@ -52,6 +85,9 @@ export function createDiscordDeliveryPoller(deps: {
         });
         return;
       }
+      const card = await approvalCard(d);
+      if (card === "skip") return;
+      if (card) return postCard(channelId, d, card);
       if (d.destination.react || d.destination.pin || d.attachments?.length)
         console.log(`[discord] delivery ${d.id}: reactions, pins and files are not delivered on Discord yet`);
       if (!d.text.trim()) return;
@@ -64,11 +100,16 @@ export function createDiscordDeliveryPoller(deps: {
   }
 
   async function deliverToPrincipal(d: Delivery): Promise<void> {
-    if (d.destination.commandApprovalId || d.destination.keychainAskId || d.destination.deploymentAccess)
-      return reportUndeliverable(d.id, "approval cards are not available on Discord yet");
     const discordId = linkedDiscordId(d.destination.target);
     if (!discordId) return reportUndeliverable(d.id, "recipient has no linked Discord account");
     await attempt(d, async () => {
+      const card = await approvalCard(d);
+      if (card === "skip") return;
+      if (card) {
+        const dm = await api.openDm(discordId);
+        await postCard(dm, d, card);
+        return { recipientThreadRef: discordDmThreadRef(dm) };
+      }
       if (!d.text.trim()) return;
       const dm = await api.openDm(discordId);
       await postMessage(api, dm, d.text.trim(), { key: d.idempotencyKey ?? d.id });

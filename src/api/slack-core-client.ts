@@ -7,10 +7,6 @@ import {
   type SlackSessionStatusState,
 } from "../slack/session-status.ts";
 import type { FeatureFlagStore } from "../feature-flags.ts";
-import { decideDeploymentAccess } from "../slack/deploy-access.ts";
-import type { IdentityService } from "../identity/identity-service.ts";
-import type { ActorAssertion } from "../types.ts";
-import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import { createTaskAcknowledgements, type TaskAckState, type TaskAcknowledgements } from "../slack/task-ack.ts";
 import { orgId as configOrgId } from "../config.ts";
 import { resolveBranding } from "../resolution/branding.ts";
@@ -20,7 +16,7 @@ import {
   type SurfaceCoreClient,
   type SurfaceCoreClientDeps,
 } from "../surfaces/surface-core-client.ts";
-import type { PendingApproval, ScopeId, SurfaceContextRequest, SurfaceContextResult, TurnRequest } from "../types.ts";
+import type { ScopeId, SurfaceContextRequest, SurfaceContextResult, TurnRequest } from "../types.ts";
 import { buffer } from "node:stream/consumers";
 import { scopeId } from "../types.ts";
 import type { MemoryService } from "../memory/memory-service.ts";
@@ -34,12 +30,6 @@ import type { RuntimeChoice } from "../harness/harness.ts";
 import { modelDisplayName } from "../model/pi-models.ts";
 import type { ConversationEvent } from "../loops/sources/adapter.ts";
 import { slackConversationRef } from "../loops/sources/slack.ts";
-
-interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
-  createdAt?: number;
-  reason?: string;
-  request?: Record<string, unknown>;
-}
 
 interface DirectoryPush {
   members?: Array<{ principalId: string; displayName: string; type: "internal"; slackId?: string; avatarUrl?: string }>;
@@ -59,8 +49,6 @@ interface DirectoryPush {
 
 export interface SlackCoreClient extends SurfaceCoreClient {
   privateContinuationSource?(runId: string): Promise<TurnRequest | null>;
-  decideDeploymentAccess(value: string, actor: ActorAssertion, approve: boolean): Promise<string>;
-  keychainApprovals?: KeychainApprovals;
   taskAcknowledgements?: TaskAcknowledgements;
   sessionStatus?: SlackSessionStatus;
   externalSlackParticipants(): Promise<boolean>;
@@ -76,7 +64,6 @@ export interface SlackCoreClient extends SurfaceCoreClient {
   noteSurfaceHistoryGap?(container: string, note: string): Promise<void>;
   readSurfaceMessages?(container: string, opts?: ReadMessagesOpts): Promise<CachedMessage[]>;
   ingestSurfaceEvents(events: IngestEvent[], self?: { name?: string; mentionId?: string }): Promise<void>;
-  getApproval(requestId: string): Promise<StoredApprovalView | null>;
   pushDirectory(body: DirectoryPush): Promise<boolean>;
 
   holdDeliveryDispatch<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
@@ -111,8 +98,6 @@ type AckPickInput = {
 export type { SurfaceContextRequest };
 
 export interface SlackCoreClientDeps extends SurfaceCoreClientDeps {
-  identity: IdentityService;
-  keychainApprovals?: KeychainApprovals;
   taskAcknowledgements?: DurableMap<TaskAckState>;
   sessionStatus?: DurableMap<SlackSessionStatusState>;
   statusActivity?: SlackStatusActivity;
@@ -135,9 +120,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
 
   return {
     ...base,
-    decideDeploymentAccess: (value, actor, approve) =>
-      decideDeploymentAccess(deps.app, deps.identity, value, actor, approve),
-    ...(deps.keychainApprovals ? { keychainApprovals: deps.keychainApprovals } : {}),
     ...(deps.taskAcknowledgements
       ? { taskAcknowledgements: createTaskAcknowledgements(deps.taskAcknowledgements, lease, deps) }
       : {}),
@@ -227,23 +209,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       )
         return null;
       return replayableRequest(run.request);
-    },
-
-    async getApproval(requestId) {
-      const record = await deps.app.getApproval(requestId);
-      if (!record) return null;
-      return {
-        requestId: record.requestId,
-        ...(record.createdAt !== undefined ? { createdAt: record.createdAt } : {}),
-        command: record.command,
-        ...(record.reason !== undefined ? { reason: record.reason } : {}),
-        ...(record.purpose !== undefined ? { purpose: record.purpose } : {}),
-        ...(record.summary !== undefined ? { summary: record.summary } : {}),
-        ...(record.summaryDetail !== undefined ? { summaryDetail: record.summaryDetail } : {}),
-        ...(record.grantModes !== undefined ? { grantModes: record.grantModes } : {}),
-        ...(record.kind !== undefined ? { kind: record.kind } : {}),
-        ...(record.request !== undefined ? { request: record.request as unknown as Record<string, unknown> } : {}),
-      };
     },
 
     async pushDirectory(body) {

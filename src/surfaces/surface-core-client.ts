@@ -12,9 +12,18 @@ import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-l
 import type { RunStore } from "../runs/run-store.ts";
 import { isTerminal } from "../runs/run-store.ts";
 import type { GoalView, TurnStream } from "../runs/turn-stream.ts";
-import type { Delivery, ScopeId, TurnRequest, TurnResult } from "../types.ts";
+import type { ActorAssertion, Delivery, PendingApproval, ScopeId, TurnRequest, TurnResult } from "../types.ts";
+import type { IdentityService } from "../identity/identity-service.ts";
+import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import { swallowAs } from "../util/errors.ts";
+import { decideDeploymentAccess, type DeploymentAccessRequest } from "./deploy-access.ts";
 import type { StagedEnvelope } from "./envelope-staging.ts";
+
+export interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
+  createdAt?: number;
+  reason?: string;
+  request?: Record<string, unknown>;
+}
 
 export interface RunHooks {
   onReplying?(): void;
@@ -42,6 +51,9 @@ export interface SurfaceCoreClient {
   onDeliveryEnqueued(listener: () => void): () => void;
   holdLease<T>(name: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
+  getApproval(requestId: string): Promise<StoredApprovalView | null>;
+  decideDeploymentAccess(request: DeploymentAccessRequest, actor: ActorAssertion, approve: boolean): Promise<string>;
+  keychainApprovals?: KeychainApprovals;
 }
 
 export interface SurfaceCoreClientDeps {
@@ -54,6 +66,8 @@ export interface SurfaceCoreClientDeps {
   turnStream: TurnStream;
   leaderLease?: LeaderLease;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
+  identity: IdentityService;
+  keychainApprovals?: KeychainApprovals;
 }
 
 const RUN_FALLBACK_POLL_MS = 1_000;
@@ -68,6 +82,28 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
   });
 
   return {
+    ...(deps.keychainApprovals ? { keychainApprovals: deps.keychainApprovals } : {}),
+
+    decideDeploymentAccess: (request, actor, approve) =>
+      decideDeploymentAccess(deps.app, deps.identity, request, actor, approve),
+
+    async getApproval(requestId) {
+      const record = await deps.app.getApproval(requestId);
+      if (!record) return null;
+      return {
+        requestId: record.requestId,
+        ...(record.createdAt !== undefined ? { createdAt: record.createdAt } : {}),
+        command: record.command,
+        ...(record.reason !== undefined ? { reason: record.reason } : {}),
+        ...(record.purpose !== undefined ? { purpose: record.purpose } : {}),
+        ...(record.summary !== undefined ? { summary: record.summary } : {}),
+        ...(record.summaryDetail !== undefined ? { summaryDetail: record.summaryDetail } : {}),
+        ...(record.grantModes !== undefined ? { grantModes: record.grantModes } : {}),
+        ...(record.kind !== undefined ? { kind: record.kind } : {}),
+        ...(record.request !== undefined ? { request: record.request as unknown as Record<string, unknown> } : {}),
+      };
+    },
+
     async stageBlob(bytes) {
       const sha256 = createHash("sha256").update(bytes).digest("hex");
       const info = await deps.blobTransfer.put(Readable.from([Buffer.from(bytes)]), {

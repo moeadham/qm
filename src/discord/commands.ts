@@ -2,6 +2,7 @@ import {
   ApplicationCommandOptionType,
   InteractionType,
   type APIInteraction,
+  type APIMessageComponentInteraction,
   type RESTPutAPIApplicationCommandsJSONBody,
 } from "@discordjs/core";
 import { errMessage } from "../util/errors.ts";
@@ -58,10 +59,19 @@ async function answer(
 }
 
 export async function handleInteraction(
-  deps: { core: DiscordCoreClient; api: DiscordApi; guildIds: ReadonlySet<string> },
+  deps: {
+    core: DiscordCoreClient;
+    api: DiscordApi;
+    guildIds: ReadonlySet<string>;
+    buttons: { handle(interaction: APIMessageComponentInteraction): Promise<void> };
+  },
   interaction: APIInteraction,
 ): Promise<void> {
   const { core, api } = deps;
+  if (interaction.type === InteractionType.MessageComponent) {
+    if (interaction.guild_id && !deps.guildIds.has(interaction.guild_id)) return;
+    return deps.buttons.handle(interaction);
+  }
   if (interaction.type !== InteractionType.ApplicationCommand || interaction.data.name !== "qm") return;
   const userId = interaction.member?.user.id ?? interaction.user?.id;
   if (!userId) return;

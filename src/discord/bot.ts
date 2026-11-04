@@ -213,13 +213,13 @@ export function createDiscordBot(deps: {
     };
   }
 
-  function replyText(result: TurnResult, addressed: boolean): string {
+  function replyText(result: TurnResult, addressed: boolean, dm: boolean): string {
     if (result.status === "ok") return result.reply?.trim() || (result.stopped ? "Stopped." : "");
     if (result.status === "refused" || result.status === "failed")
       return addressed ? `⚠️ ${userFacingFailureClause(result)}` : "";
-    if (result.status === "pending_approval" && addressed)
-      return result.reason ?? "This conversation is waiting on an approval in the QM web app.";
-    return "";
+    if (result.status !== "pending_approval" || !addressed) return "";
+    if (!result.pendingApprovals?.length) return result.reason ?? "This conversation is waiting on a pending approval.";
+    return dm ? "" : "I sent you a DM to approve before I continue.";
   }
 
   function startTyping(channelId: string): () => void {
@@ -254,35 +254,48 @@ export function createDiscordBot(deps: {
       return;
     }
     const actor: ActorAssertion = { externalId: `discord:${m.author.id}`, displayName: displayName(m.author) };
-    const writer = createReplyWriter(place.channelId);
+    const body: CoreTurnBody = {
+      actor,
+      conversation: {
+        kind: place.kind,
+        threadRef: place.threadRef,
+        ...(place.channelRef ? { channelRef: place.channelRef } : {}),
+        ...(place.channelName ? { channelName: place.channelName } : {}),
+        audience: [actor],
+      },
+      deliveryTarget: place.channelId,
+      text,
+      origin: relevant.addressed ? { kind: "human" } : { kind: "ambient", live: true },
+      gatewayContext: {
+        location: place.kind === "dm" ? "a Discord direct message with the user" : "a Discord thread",
+        details: { channel: place.channelId },
+        botHandle: self.username,
+      },
+      redeliveryKey: messageKey,
+      ...(place.kind === "channel" ? await threadContext(place, m) : {}),
+    };
+    await converse(place.channelId, body, {
+      addressed: relevant.addressed,
+      key: messageKey,
+      ...(gate ? { gate } : {}),
+    });
+  }
+
+  async function converse(
+    channelId: string,
+    body: CoreTurnBody,
+    opts: { addressed: boolean; key: string; gate?: AcceptGate },
+  ): Promise<void> {
+    const { addressed, key, gate } = opts;
+    const writer = createReplyWriter(channelId);
     let queuedRunId: string | undefined;
     let accepted = false;
     const accept = (): void => {
       accepted = true;
       gate?.persisted();
     };
-    const stopTyping = relevant.addressed ? startTyping(place.channelId) : () => {};
+    const stopTyping = addressed ? startTyping(channelId) : () => {};
     try {
-      const body: CoreTurnBody = {
-        actor,
-        conversation: {
-          kind: place.kind,
-          threadRef: place.threadRef,
-          ...(place.channelRef ? { channelRef: place.channelRef } : {}),
-          ...(place.channelName ? { channelName: place.channelName } : {}),
-          audience: [actor],
-        },
-        deliveryTarget: place.channelId,
-        text,
-        origin: relevant.addressed ? { kind: "human" } : { kind: "ambient", live: true },
-        gatewayContext: {
-          location: place.kind === "dm" ? "a Discord direct message with the user" : "a Discord thread",
-          details: { channel: place.channelId },
-          botHandle: self.username,
-        },
-        redeliveryKey: messageKey,
-        ...(place.kind === "channel" ? await threadContext(place, m) : {}),
-      };
       let result: TurnResult;
       try {
         result = await flow.callCore(body, {
@@ -299,19 +312,19 @@ export function createDiscordBot(deps: {
         });
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));
-        console.error(`[discord] turn errored for ${messageKey}: ${errMessage(error)}`);
-        if (relevant.addressed)
+        console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
+        if (addressed)
           await writer
-            .finish(`⚠️ ${turnFailureText(error)}`, `failure:${messageKey}`)
+            .finish(`⚠️ ${turnFailureText(error)}`, `failure:${key}`)
             .catch(swallowAs("discord: failure note", undefined));
         return;
       }
       if (!accepted) accept();
       if (result.steered) return;
-      const reply = replyText(result, relevant.addressed);
+      const reply = replyText(result, addressed, body.conversation.kind === "dm");
       const runId = queuedRunId;
       try {
-        await writer.finish(reply, runId ? `run:${runId}` : messageKey);
+        await writer.finish(reply, runId ? `run:${runId}` : key);
       } catch (error) {
         if (runId) flow.inFlightRuns.delete(runId);
         console.error(
@@ -326,5 +339,9 @@ export function createDiscordBot(deps: {
     }
   }
 
-  return { handleMessage };
+  async function resumeTurn(body: CoreTurnBody, key: string): Promise<void> {
+    if (body.deliveryTarget) await converse(body.deliveryTarget, body, { addressed: true, key });
+  }
+
+  return { handleMessage, resumeTurn };
 }

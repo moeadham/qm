@@ -1,10 +1,14 @@
 import {
   API,
   AllowedMentionsTypes,
+  ButtonStyle,
   Client,
+  ComponentType,
   GatewayDispatchEvents,
   GatewayIntentBits,
   MessageFlags,
+  type APIActionRowComponent,
+  type APIButtonComponentWithCustomId,
   type APIChannel,
   type APIInteraction,
   type APIMessage,
@@ -40,10 +44,20 @@ export interface DiscordChannel {
   guildId?: string;
 }
 
+export interface DiscordButton {
+  id: string;
+  label: string;
+  style: "primary" | "secondary" | "danger";
+}
+
 export interface DiscordApi {
   me(): Promise<{ id: string; username: string }>;
-  send(channelId: string, content: string, opts?: { replyTo?: string; nonce?: string }): Promise<string>;
-  edit(channelId: string, messageId: string, content: string): Promise<void>;
+  send(
+    channelId: string,
+    content: string,
+    opts?: { replyTo?: string; nonce?: string; buttons?: DiscordButton[] },
+  ): Promise<string>;
+  edit(channelId: string, messageId: string, content: string, opts?: { buttons?: DiscordButton[] }): Promise<void>;
   remove(channelId: string, messageId: string): Promise<void>;
   typing(channelId: string): Promise<void>;
   openDm(userId: string): Promise<string>;
@@ -53,6 +67,8 @@ export interface DiscordApi {
   registerCommands(commands: RESTPutAPIApplicationCommandsJSONBody): Promise<void>;
   deferEphemeral(interactionId: string, token: string): Promise<void>;
   editReply(token: string, content: string): Promise<void>;
+  deferUpdate(interactionId: string, token: string): Promise<void>;
+  followUpEphemeral(token: string, content: string): Promise<void>;
 }
 
 export interface DiscordGatewayHandlers {
@@ -79,7 +95,7 @@ export function discordErrorCode(error: unknown): number | undefined {
   return typeof code === "number" ? code : undefined;
 }
 
-function messageNonce(key: string, part: number): string {
+export function messageNonce(key: string, part: number): string {
   return createHash("sha256").update(`${key}:${part}`).digest("hex").slice(0, 25);
 }
 
@@ -106,6 +122,32 @@ export async function postMessage(
 }
 
 const NO_PINGS_EXCEPT_USERS = { parse: [AllowedMentionsTypes.User] };
+
+const BUTTON_STYLES = {
+  primary: ButtonStyle.Primary,
+  secondary: ButtonStyle.Secondary,
+  danger: ButtonStyle.Danger,
+} as const;
+
+function components(buttons: DiscordButton[] | undefined): {
+  components?: APIActionRowComponent<APIButtonComponentWithCustomId>[];
+} {
+  if (!buttons) return {};
+  if (!buttons.length) return { components: [] };
+  return {
+    components: [
+      {
+        type: ComponentType.ActionRow,
+        components: buttons.map((b) => ({
+          type: ComponentType.Button,
+          custom_id: b.id,
+          label: b.label,
+          style: BUTTON_STYLES[b.style],
+        })),
+      },
+    ],
+  };
+}
 
 function toChannel(c: APIChannel): DiscordChannel {
   const raw = c as APIChannel & {
@@ -141,11 +183,16 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
         allowed_mentions: NO_PINGS_EXCEPT_USERS,
         ...(opts.replyTo ? { message_reference: { message_id: opts.replyTo, fail_if_not_exists: false } } : {}),
         ...(opts.nonce ? { nonce: opts.nonce, enforce_nonce: true } : {}),
+        ...components(opts.buttons),
       });
       return message.id;
     },
-    async edit(channelId, messageId, content) {
-      await api.channels.editMessage(channelId, messageId, { content, allowed_mentions: NO_PINGS_EXCEPT_USERS });
+    async edit(channelId, messageId, content, opts = {}) {
+      await api.channels.editMessage(channelId, messageId, {
+        content,
+        allowed_mentions: NO_PINGS_EXCEPT_USERS,
+        ...components(opts.buttons),
+      });
     },
     async remove(channelId, messageId) {
       await api.channels.deleteMessage(channelId, messageId);
@@ -173,6 +220,12 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
     },
     async editReply(token, content) {
       await api.interactions.editReply(applicationId, token, { content });
+    },
+    async deferUpdate(interactionId, token) {
+      await api.interactions.deferMessageUpdate(interactionId, token);
+    },
+    async followUpEphemeral(token, content) {
+      await api.interactions.followUp(applicationId, token, { content, flags: MessageFlags.Ephemeral });
     },
   };
 }

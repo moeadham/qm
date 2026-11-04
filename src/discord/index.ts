@@ -11,6 +11,7 @@ import {
   type DiscordMessage,
 } from "./api.ts";
 import { createDiscordBot, discordMessageKey, type AcceptGate } from "./bot.ts";
+import { createApprovalButtons } from "./approvals.ts";
 import { handleInteraction, QM_COMMANDS } from "./commands.ts";
 import type { DiscordConfig } from "./config.ts";
 import type { DiscordCoreClient } from "./core.ts";
@@ -42,6 +43,7 @@ export async function startDiscordPlugin(
   const flow = createTurnFlow(core, "discord");
   const bot = createDiscordBot({ api, core, flow, guildIds: cfg.guildIds, self });
   const deliveries = createDiscordDeliveryPoller({ api, core, flow });
+  const buttons = createApprovalButtons({ api, core, resumeTurn: bot.resumeTurn });
   const staging = core.stagedEnvelopes
     ? createEnvelopeStaging(core.stagedEnvelopes, { account: "discord", keyFor: messageKey })
     : undefined;
@@ -57,7 +59,7 @@ export async function startDiscordPlugin(
     onMessage: (message: DiscordMessage) =>
       void bot.handleMessage(message, stageFor(message)).catch(reportFailureAs("discord: message handler", undefined)),
     onInteraction: (interaction: Parameters<typeof handleInteraction>[1]) =>
-      void handleInteraction({ core, api, guildIds: cfg.guildIds }, interaction).catch(
+      void handleInteraction({ core, api, guildIds: cfg.guildIds, buttons }, interaction).catch(
         reportFailureAs("discord: interaction handler", undefined),
       ),
   };

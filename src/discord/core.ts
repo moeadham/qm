@@ -1,8 +1,8 @@
 import type { AuditLog } from "../audit/audit-log.ts";
 import { discordAlias, mintDiscordLinkTicket, unlinkDiscordAccount } from "../identity/discord-link.ts";
-import type { IdentityService } from "../identity/identity-service.ts";
 import type { PrincipalLinkService } from "../identity/principal-links.ts";
 import type { RateLimiter } from "../ratelimit/rate-limiter.ts";
+import type { DeploymentAccessRequest } from "../surfaces/deploy-access.ts";
 import {
   createSurfaceCoreClient,
   type SurfaceCoreClient,
@@ -14,10 +14,10 @@ export interface DiscordCoreClient extends SurfaceCoreClient {
   linkUrl(discordId: string): Promise<string | undefined>;
   allowLinkPrompt(discordId: string): Promise<boolean>;
   unlink(discordId: string): Promise<boolean>;
+  deploymentAccessRequest(deliveryId: string): Promise<DeploymentAccessRequest | undefined>;
 }
 
 export interface DiscordCoreClientDeps extends SurfaceCoreClientDeps {
-  identity: Pick<IdentityService, "classify" | "isInternal" | "refresh">;
   principalLinks: Pick<PrincipalLinkService, "unlink">;
   linkPrompts: RateLimiter;
   orgId: string;
@@ -46,6 +46,10 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
 
     async allowLinkPrompt(discordId) {
       return (await deps.linkPrompts.check(`discord-link-prompt:${discordId}`)).allowed;
+    },
+
+    async deploymentAccessRequest(deliveryId) {
+      return (await deps.deliveries.get(deliveryId))?.destination.deploymentAccess;
     },
 
     async unlink(discordId) {

@@ -7,6 +7,7 @@ import { createDiscordCoreClient, type DiscordCoreClient } from "../src/discord/
 import {
   createDiscordGateway,
   type DiscordApi,
+  type DiscordButton,
   type DiscordChannel,
   type DiscordGatewayHandlers,
   type DiscordMessage,
@@ -18,7 +19,8 @@ import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import type { LeaderLease } from "../src/persistence/leader-lease.ts";
 import type { StagedEnvelope } from "../src/surfaces/envelope-staging.ts";
 import type { Delivery, TurnRequest, TurnResult } from "../src/types.ts";
-import type { RunHooks } from "../src/surfaces/surface-core-client.ts";
+import type { RunHooks, StoredApprovalView } from "../src/surfaces/surface-core-client.ts";
+import type { KeychainApprovalView } from "../src/credentials/keychain-approval.ts";
 
 const BOT = "900000000000000001";
 const ALICE = "100000000000000001";
@@ -53,8 +55,9 @@ function sharedLease(): LeaderLease {
 }
 
 class FakeDiscord implements DiscordApi {
-  sent: Array<{ channelId: string; content: string; id: string; nonce?: string }> = [];
-  edits: Array<{ channelId: string; messageId: string; content: string }> = [];
+  sent: Array<{ channelId: string; content: string; id: string; nonce?: string; buttons?: DiscordButton[] }> = [];
+  edits: Array<{ channelId: string; messageId: string; content: string; buttons?: DiscordButton[] }> = [];
+  deferredUpdates: string[] = [];
   threads: Array<{ channelId: string; messageId: string; name: string }> = [];
   ephemeral: string[] = [];
   channels = new Map<string, DiscordChannel>();
@@ -65,17 +68,23 @@ class FakeDiscord implements DiscordApi {
   async me() {
     return { id: BOT, username: "qm" };
   }
-  async send(channelId: string, content: string, opts: { nonce?: string } = {}) {
+  async send(channelId: string, content: string, opts: { nonce?: string; buttons?: DiscordButton[] } = {}) {
     const id = `msg-${this.next++}`;
-    this.sent.push({ channelId, content, id, ...(opts.nonce ? { nonce: opts.nonce } : {}) });
+    this.sent.push({
+      channelId,
+      content,
+      id,
+      ...(opts.nonce ? { nonce: opts.nonce } : {}),
+      ...(opts.buttons ? { buttons: opts.buttons } : {}),
+    });
     return id;
   }
-  async edit(channelId: string, messageId: string, content: string) {
+  async edit(channelId: string, messageId: string, content: string, opts: { buttons?: DiscordButton[] } = {}) {
     if (this.failEdits > 0) {
       this.failEdits--;
       throw Object.assign(new Error("Internal Server Error"), { status: 500 });
     }
-    this.edits.push({ channelId, messageId, content });
+    this.edits.push({ channelId, messageId, content, ...(opts.buttons ? { buttons: opts.buttons } : {}) });
   }
   removed: string[] = [];
   threadExists = false;
@@ -105,6 +114,12 @@ class FakeDiscord implements DiscordApi {
   failEdits = 0;
   async deferEphemeral() {}
   async editReply(_token: string, content: string) {
+    this.ephemeral.push(content);
+  }
+  async deferUpdate(interactionId: string) {
+    this.deferredUpdates.push(interactionId);
+  }
+  async followUpEphemeral(_token: string, content: string) {
     this.ephemeral.push(content);
   }
 }
@@ -137,6 +152,7 @@ interface Harness {
   stopped: string[];
   deliveriesAcked: Array<{ id: string; body?: unknown }>;
   queue: Delivery[];
+  decisions: unknown[][];
 }
 
 function harness(opts: {
@@ -144,6 +160,9 @@ function harness(opts: {
   lease?: LeaderLease;
   result?: (body: TurnRequest) => TurnResult;
   snapshots?: string[];
+  approvals?: Record<string, StoredApprovalView>;
+  keychain?: KeychainApprovalView;
+  deployRequests?: Record<string, { deploymentId: string; requesterId: string }>;
 }): Harness {
   const linked = opts.linked ?? { [ALICE]: "alice@example.com" };
   const h: Harness = {
@@ -153,6 +172,7 @@ function harness(opts: {
     stopped: [],
     deliveriesAcked: [],
     queue: [],
+    decisions: [],
     core: undefined as unknown as DiscordCoreClient,
   };
   const real = createDiscordCoreClient({
@@ -205,6 +225,28 @@ function harness(opts: {
       const rows = h.queue.filter((d) => d.destination.type === type && d.deliveredAt === null);
       return rows;
     },
+    async getApproval(requestId) {
+      return opts.approvals?.[requestId] ?? null;
+    },
+    async deploymentAccessRequest(deliveryId) {
+      return opts.deployRequests?.[deliveryId];
+    },
+    async decideDeploymentAccess(request, actor, approve) {
+      h.decisions.push(["deploy", request, actor.externalId, approve]);
+      return approve ? "Approved. bob can now open the app." : "Declined.";
+    },
+    ...(opts.keychain
+      ? {
+          keychainApprovals: {
+            get: async () => opts.keychain!,
+            card: async () => opts.keychain!,
+            decide: async (id, actor, decision) => {
+              h.decisions.push(["keychain", id, actor.externalId, decision]);
+              return { ...opts.keychain!, ask: { ...opts.keychain!.ask, status: "approved" }, mode: "once" };
+            },
+          },
+        }
+      : {}),
     async ackDelivery(id, body) {
       h.deliveriesAcked.push({ id, body });
       const row = h.queue.find((d) => d.id === id);
@@ -632,4 +674,202 @@ test("a gateway closed while a ready session reconnects leaves no session behind
   } finally {
     await stop();
   }
+});
+
+const REQUEST_ID = "a1b2c3d4e5f60718";
+
+function click(customId: string, user: string, channelId: string, messageId: string): APIInteraction {
+  return {
+    id: `click-${customId}-${user}`,
+    token: "tok",
+    type: 3,
+    data: { custom_id: customId, component_type: 2 },
+    message: { id: messageId, channel_id: channelId },
+    channel: { id: channelId },
+    user: { id: user, username: user === ALICE ? "alice" : "mallory", global_name: null },
+  } as unknown as APIInteraction;
+}
+
+function linkBoth(): void {
+  const aliases: Record<string, string> = {
+    [`discord:${ALICE}`]: "alice@example.com",
+    [`discord:${MALLORY}`]: "mallory@example.com",
+  };
+  installPrincipalLinks({
+    canonical: (key) => aliases[key],
+    aliases: (key) => Object.keys(aliases).filter((alias) => aliases[alias] === key),
+  });
+}
+
+function queued(id: string, destination: Delivery["destination"], text: string, key: string): Delivery {
+  return { id, destination, text, idempotencyKey: key, createdAt: Date.now() - 60_000, deliveredAt: null };
+}
+
+test("a pending command approval reaches the requester as buttons and only their click resumes the conversation", async () => {
+  linkBoth();
+  const h = harness({
+    linked: { [ALICE]: "alice@example.com", [MALLORY]: "mallory@example.com" },
+    approvals: {
+      [REQUEST_ID]: {
+        requestId: REQUEST_ID,
+        createdAt: 5,
+        command: "rm -rf build",
+        reason: "destructive",
+        request: {
+          surface: "discord",
+          actor: { externalId: "alice@example.com" },
+          conversation: { kind: "dm", threadRef: `discord:dm:${DM}`, audience: [] },
+          deliveryTarget: DM,
+          text: "clean the build",
+          redeliveryKey: `discord:${DM}:m1`,
+        },
+      },
+    },
+    result: (body) =>
+      body.approval
+        ? { status: "ok", reply: "cleaned up" }
+        : {
+            status: "pending_approval",
+            pendingApprovals: [{ requestId: REQUEST_ID, command: "rm -rf build", reason: "destructive" }],
+          },
+  });
+  h.queue.push(
+    queued(
+      "approval-row",
+      { type: "principal", target: "alice@example.com", commandApprovalId: REQUEST_ID },
+      "Approval needed: rm -rf build",
+      `command-approval:${REQUEST_ID}:5`,
+    ),
+  );
+  const api = new FakeDiscord();
+  try {
+    const { handlers, plugin } = await boot(h, api);
+    handlers.onMessage(dm(ALICE, "clean the build"));
+    await until(() => h.turns.length === 1 && h.deliveriesAcked.length === 1, "approval card");
+    const card = api.sent.find((m) => m.buttons?.length)!;
+    assert.equal(card.channelId, `dm-${ALICE}`);
+    assert.match(card.content, /Approval needed[\s\S]*rm -rf build[\s\S]*destructive/);
+    assert.deepEqual(
+      card.buttons!.map((b) => b.id),
+      ["once", "session", "always", "deny"].map((scope) => `qm:cmd:${scope}:${REQUEST_ID}`),
+    );
+    assert.equal(
+      api.sent.some((m) => m.channelId === DM),
+      false,
+    );
+
+    handlers.onInteraction(click(`qm:cmd:once:${REQUEST_ID}`, MALLORY, card.channelId, card.id));
+    await until(() => api.ephemeral.length === 1, "refusal note");
+    assert.equal(api.ephemeral[0], "Only the person who asked can approve or deny this.");
+    assert.equal(h.turns.length, 1);
+
+    handlers.onInteraction(click(`qm:cmd:once:${REQUEST_ID}`, ALICE, card.channelId, card.id));
+    await until(() => api.sent.some((m) => m.content === "cleaned up"), "resumed reply");
+    await plugin.stop();
+  } finally {
+    installPrincipalLinks(null);
+  }
+
+  const resumed = h.turns[1]!;
+  assert.deepEqual(resumed.approval, { requestId: REQUEST_ID, approved: true, scope: "once" });
+  assert.equal(resumed.actor.externalId, `discord:${ALICE}`);
+  assert.equal(resumed.idempotencyKey, `discord-approval:${REQUEST_ID}:5`);
+  assert.equal(resumed.redeliveryKey, undefined);
+  assert.equal(resumed.text, "clean the build");
+  assert.equal(api.sent.find((m) => m.content === "cleaned up")?.channelId, DM);
+  const decided = api.edits.find((e) => /Allowed once/.test(e.content))!;
+  assert.deepEqual(decided.buttons, []);
+  assert.deepEqual(api.deferredUpdates.length, 2);
+});
+
+test("a pending approval in a server thread points the requester to their DM instead of the web app", async () => {
+  const h = harness({
+    result: () => ({
+      status: "pending_approval",
+      pendingApprovals: [{ requestId: REQUEST_ID, command: "deploy", reason: "publishes" }],
+    }),
+  });
+  const api = new FakeDiscord();
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({
+    ...dm(ALICE, `<@${BOT}> ship it`),
+    id: "800000000000000009",
+    channel_id: CHANNEL,
+    guild_id: GUILD,
+    mentions: [{ id: BOT } as never],
+  });
+  await until(() => api.sent.length === 1, "pending note");
+  await plugin.stop();
+
+  assert.deepEqual(
+    api.sent.map((m) => [m.channelId, m.content]),
+    [["800000000000000009", "I sent you a DM to approve before I continue."]],
+  );
+});
+
+test("credential and app access requests arrive as buttons that record the owner's decision", async () => {
+  linkBoth();
+  const keychain = {
+    ask: { id: "ask1", status: "pending", requestedMode: "once", requesterScopeId: `channel:${CHANNEL}` },
+    service: "github",
+    conversation: "#general",
+  } as unknown as KeychainApprovalView;
+  const access = { deploymentId: "00000000-0000-4000-8000-000000000001", requesterId: "bob@example.com" };
+  const h = harness({ keychain, deployRequests: { "access-row": access } });
+  h.queue.push(
+    queued("ask-row", { type: "discord", target: "thread-9", keychainAskId: "ask1" }, "x", "ask:ask1:notice"),
+    queued("ask-done", { type: "discord", target: "thread-9", keychainAskId: "ask1" }, "x", "ask:ask1:resolved"),
+    queued(
+      "access-row",
+      { type: "principal", target: "alice@example.com", deploymentAccess: access },
+      "bob@example.com asked to open your app.",
+      "deploy-access:1",
+    ),
+  );
+  const api = new FakeDiscord();
+  try {
+    const { handlers, plugin } = await boot(h, api);
+    await until(() => h.deliveriesAcked.length === 3, "cards delivered");
+    assert.equal(api.sent.length, 2);
+    const askCard = api.sent.find((m) => m.channelId === "thread-9")!;
+    assert.match(askCard.content, /Use your \*\*github\*\* credential in #general \(one-time access\)/);
+    assert.deepEqual(
+      askCard.buttons!.map((b) => [b.id, b.label]),
+      [
+        ["qm:key:once:ask1", "Allow once"],
+        ["qm:key:standing:ask1", "Allow"],
+        ["qm:key:deny:ask1", "Deny"],
+      ],
+    );
+    const accessCard = api.sent.find((m) => m.channelId === `dm-${ALICE}`)!;
+    assert.deepEqual(
+      accessCard.buttons!.map((b) => b.id),
+      ["qm:app:approve:access-row", "qm:app:decline:access-row"],
+    );
+
+    handlers.onInteraction(click("qm:key:once:ask1", ALICE, askCard.channelId, askCard.id));
+    handlers.onInteraction(click("qm:app:approve:access-row", ALICE, accessCard.channelId, accessCard.id));
+    await until(() => api.edits.length === 2, "cards updated");
+    await plugin.stop();
+  } finally {
+    installPrincipalLinks(null);
+  }
+
+  assert.deepEqual(h.decisions, [
+    ["keychain", "ask1", `discord:${ALICE}`, "once"],
+    ["deploy", access, `discord:${ALICE}`, true],
+  ]);
+  const askEdit = api.edits.find((e) => e.channelId === "thread-9")!;
+  assert.match(askEdit.content, /Approved — one-time access/);
+  assert.deepEqual(askEdit.buttons, []);
+  assert.deepEqual(
+    api.edits.find((e) => e.channelId === `dm-${ALICE}`),
+    {
+      channelId: `dm-${ALICE}`,
+      messageId: api.sent.find((m) => m.channelId === `dm-${ALICE}`)!.id,
+      content: "Approved. bob can now open the app.",
+      buttons: [],
+    },
+  );
 });
