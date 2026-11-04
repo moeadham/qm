@@ -44,13 +44,14 @@ export function requiresDelegation(
 export async function delegatedAuthorizationOrigin(
   request: OrchestratorInput,
   deps: { runs: Pick<RunStore, "get">; sessions: Pick<SessionStore, "getByThread" | "getForParticipant"> },
+  options: { allowReadOnly?: boolean } = {},
 ): Promise<OrchestratorInput["origin"] | undefined> {
   const seen = new Set<string>();
   let current = request;
   for (let depth = 0; depth < 32; depth++) {
     if (
       current.origin.kind === "automation" ||
-      current.readOnly ||
+      (!options.allowReadOnly && current.readOnly) ||
       current.privateSessionMessage ||
       current.swarm ||
       !current.delegatingRunId ||
@@ -82,7 +83,7 @@ export async function delegatedAuthorizationOrigin(
     if (
       parent.actor.id !== request.actor.id ||
       parent.actor.type !== "internal" ||
-      parent.readOnly ||
+      (!options.allowReadOnly && parent.readOnly) ||
       parent.privateSessionMessage ||
       parent.swarm ||
       sender.scopeId !== child.scopeId ||

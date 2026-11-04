@@ -1199,6 +1199,12 @@ test("delegated human origin retains live authority boundaries", async () => {
   assert.equal(await delegatedAuthorizationOrigin(r.run.request, r), undefined);
 });
 
+test("read-only delegation proves model authority without becoming live delegated authority", async () => {
+  const r = await delegatedHumanRig({ readOnly: true });
+  assert.equal(await delegatedAuthorizationOrigin(r.run.request, r), undefined);
+  assert.equal((await delegatedAuthorizationOrigin(r.run.request, r, { allowReadOnly: true }))?.kind, "human");
+});
+
 test("unrelated automated follow-ups cannot borrow earlier human authority", async () => {
   const r = await delegatedHumanRig();
   const claimed = await r.runs.claimById(r.run.id, "w1", 60000);

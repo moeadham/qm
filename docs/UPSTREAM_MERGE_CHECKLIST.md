@@ -3,7 +3,7 @@
 Use this checklist whenever this fork pulls a new QM release or a substantial
 upstream change. It consolidates the intentional fork behavior and production
 failures recorded in the source and deployment Git histories through
-2026-10-28.
+2026-11-04.
 
 Do not promote an upgrade because it compiles. Preserve each behavior below,
 run its automated checks, and exercise the user-visible paths in staging.
@@ -25,6 +25,9 @@ run its automated checks, and exercise the user-visible paths in staging.
       the access-token JWT and refresh normally.
 - [ ] Provider refresh errors are visible and do not first delete a still-usable
       credential.
+- [ ] A temporary OAuth refresh failure is retried, and a synchronous web turn
+      stays attached while the queued retry is pending instead of returning an
+      immediate 500.
 
 Past failures:
 
@@ -36,6 +39,9 @@ Past failures:
 - Scheduled and ordinary Codex turns reached the Responses API without a
   bearer token and failed with `401 Unauthorized: Missing Bearer ... in header`.
 - Old Codex device-login records had no expiry metadata and did not refresh.
+- A transient subscription refresh miss was classified as permanent, and the
+  synchronous web request returned the first failure even after the run had
+  been requeued successfully.
 
 Automated checks:
 
@@ -44,7 +50,8 @@ node --experimental-test-module-mocks --test \
   test/subscription-reconnect.test.ts \
   test/codex-device-login.test.ts \
   test/personal-model-account.test.ts \
-  test/subscription-model-turn.test.ts
+  test/subscription-model-turn.test.ts \
+  test/inline-provider-retry.test.ts
 
 cd plugins/web-ui
 NODE_ENV=test ALLOW_UNSIGNED_TEST_IDENTITY=1 node --test \
@@ -176,6 +183,9 @@ Source landmarks: `8cdea776`, `32308ce4`, `e1c2742f`, `57909074`, `20ca7564`.
       `text` for messages where required by the installed QM version.
 - [ ] Strict read-only children do not receive file, shell, browser, or secret
       capabilities; the parent relays source when needed.
+- [ ] A recorded `subagents open` call retains its requested harness, model,
+      thinking level, and fast-mode value so resumed parents and operators can
+      verify what actually ran.
 - [ ] Human review/import/merge/deploy gates in the Add Model skill remain in
       place.
 
@@ -186,10 +196,16 @@ Past failures:
   parent's or scope's credential.
 - Idle parents did not automatically resume after a child completed.
 - Skill calls used the wrong field name (`text` versus `task`).
+- The child ran successfully on explicit Codex subscription auth, but the
+  transcript omitted the requested runtime and the resumed parent incorrectly
+  claimed that no harness/model override had been supplied.
 
 Automated checks:
 
 ```sh
+node --experimental-test-module-mocks --test \
+  --test-name-pattern='subagents open exposes noComputer' \
+  test/agent-tools.test.ts
 node --experimental-test-module-mocks --test \
   test/session-syscalls.test.ts \
   test/subscription-model-turn.test.ts
@@ -368,6 +384,14 @@ Source landmarks: `357a3abc`, `4059977c`, `2ccc729d`, `47ef91dc`, `6dc464f5`,
       concurrency without checking memory, queue behavior, and Fly restarts.
 - [ ] Sandbox resource inventory/routing remains enabled. A failed Sprite can be
       replaced per scope without deleting its disk before recovery is assessed.
+- [ ] A healthy replacement Sprite accepts a checkpoint before becoming the
+      scoped default. Preserve the failed Sprite until recovered files are
+      verified; bulk recovery must quiesce the old default or reconcile files
+      changed during the copy.
+- [ ] `SPRITES_SNAPSHOT_S3_BUCKET` remains configured so retirement can export
+      Sprite home data to durable object storage.
+- [ ] Internal app publishing uses the configured Fly provider and dedicated
+      deploy token; a simple published page must return a working URL.
 - [ ] The shared agent Postgres credential remains an organization grant using
       the restricted `qm_agents` role/schema, not the QM application role.
 - [ ] Eligible internal agents receive `SHARED_DATABASE_URL` and CA material;
@@ -388,6 +412,11 @@ Past failures:
 - Too many concurrent workers overloaded the small core machine.
 - A Sprite became permanently unresponsive while status misleadingly reported
   `cold`/`repaired`; checkpoint lookup also failed.
+- A different Sprite stayed usable but every checkpoint failed with `JuiceFS
+clone ... file exists`, producing hundreds of repeated errors until its scope
+  moved to a healthy replacement.
+- Fly app publishing was unavailable because core defaulted to the Docker
+  publisher and had no deploy token, even though QM itself ran on Fly.
 - Agents lacked Postgres because the credential/grant was absent, not because
   the database itself was down.
 - GitHub access looked flaky when the broker token was not actually available
@@ -524,6 +553,7 @@ that model isn't available for your connected AI account
 does not support this model
 invitation emails are not configured
 overlay manager not configured
+JuiceFS rename clone
 computer isn't responding
 HTTP 403/1010
 ECONNRESET

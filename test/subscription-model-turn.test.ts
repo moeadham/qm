@@ -7,6 +7,7 @@ import { createIdempotencyStore } from "../src/idempotency/idempotency-store.ts"
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { runTrigger } from "../src/triggers/run-trigger.ts";
 import { testConfig } from "./support/test-config.ts";
+import { ProviderTurnError } from "../src/core/turn-error.ts";
 
 const pi = await import("../src/harness/pi-harness.ts");
 const seen: HarnessTurnInput[] = [];
@@ -255,6 +256,116 @@ for (const account of ["personal", "company", "disconnected"] as const) {
     }
   });
 }
+
+test("a read-only human-delegated persistent subagent inherits only the owner's ChatGPT model auth", async () => {
+  const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+  const start = seen.length;
+  try {
+    await built.config.setPersonalModelAuth("internal:alice", true, "openai");
+    built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
+    await built.config.flushScope("org:default-org");
+    await built.config.setPurposeRuntime("subagent", {
+      harnessId: "pi",
+      modelId: "codex/gpt-5.6-sol",
+      effortLevel: "auto",
+    });
+    await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+      accessToken: "test-access",
+      idToken: "test-id",
+      accountId: "owner-account",
+      expiresAt: Date.now() + 3600000,
+    });
+    const actor = { id: "internal:alice", type: "internal" as const };
+    const parentThread = "web:internal:alice:delegation-parent";
+    const parent = await built.sessions.getOrCreateByThread(parentThread, "dm", "personal:internal:alice");
+    await built.sessions.addParticipant(parent.id, actor.id);
+    const parentConversation = { kind: "dm" as const, threadRef: parentThread, audience: [actor] };
+    const parentRun = (
+      await built.runs.enqueue({
+        sessionId: parentThread,
+        request: {
+          surface: "web",
+          actor,
+          conversation: parentConversation,
+          origin: { kind: "human" },
+          text: "Delegate this review",
+          readOnly: true,
+          skipMemory: true,
+        },
+      })
+    ).run;
+    const claimed = await built.runs.claimById(parentRun.id, "test-parent", 60_000);
+    assert.ok(claimed?.leaseToken);
+    await built.runs.complete(parentRun.id, claimed.leaseToken, { status: "ok", reply: "delegated" });
+
+    const childThread = "agent:main:subagent:subscription-delegation";
+    const child = await built.sessions.getOrCreateByThread(childThread, "dm", "personal:internal:alice");
+    await built.sessions.setParentSession(child.id, parent.id);
+    await built.sessions.addParticipant(child.id, actor.id);
+    await built.sessions.setSpawnMeta(child.id, {
+      surface: "web",
+      actor,
+      conversation: parentConversation,
+      origin: { kind: "human" },
+    });
+    const childRun = (
+      await built.runs.enqueue({
+        sessionId: childThread,
+        request: {
+          surface: "web",
+          actor,
+          conversation: { ...parentConversation, threadRef: childThread },
+          origin: { kind: "human" },
+          sessionSenderId: parent.id,
+          delegatingRunId: parentRun.id,
+          text: "Review the delegated change",
+          readOnly: true,
+          skipMemory: true,
+        },
+      })
+    ).run;
+    built.runtime.startBackground();
+    const completed = await built.runs.waitFor(childRun.id, 5_000);
+    assert.equal(completed.status, "done", JSON.stringify(completed.result));
+    assert.equal(completed.result?.status, "ok", JSON.stringify(completed.result));
+    assert.equal(seen.length, start + 1);
+    assert.equal(seen[start]?.runtime?.modelId, "codex/gpt-5.6-sol");
+    assert.deepEqual(seen[start]?.providerKeys, { "openai-codex": "test-access" });
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
+test("a temporary subscription refresh failure remains retryable", async () => {
+  const built = buildApp(testConfig({ harness: "mock", maxAttempts: 1, seedSkills: false }));
+  try {
+    await built.config.setPersonalModelAuth("internal:alice", true, "anthropic");
+    built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
+    await built.config.flushScope("org:default-org");
+    await built.userModelCredentials.setOAuth("internal:alice", "anthropic", {
+      accessToken: "stale-claude",
+      refreshToken: "refresh-token",
+      expiresAt: Date.now() + 3600000,
+    });
+    mock.method(built.userModelCredentials, "derivedOAuth", async () => null);
+    await assert.rejects(
+      built.app.turn({
+        surface: "cron",
+        triggered: true,
+        origin: { kind: "automation", useOwnerModelAuth: true },
+        actor: { externalId: "internal:alice" },
+        conversation: { kind: "dm", threadRef: "temporary-claude-refresh" },
+        text: "Retry after the provider recovers",
+        harness: "claude",
+        model: "claude-opus-5-5",
+        skipMemory: true,
+      }),
+      (error: unknown) => error instanceof ProviderTurnError && error.code === "auth" && error.retryable === true,
+    );
+  } finally {
+    await built.runtime.stop();
+  }
+});
 
 for (const connected of [true, false]) {
   test(`background-command watch ${connected ? "uses the owner's ChatGPT subscription" : "fails closed without borrowing another account"}`, async () => {
