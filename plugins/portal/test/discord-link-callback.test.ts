@@ -16,7 +16,7 @@ const core = createServer((req, res) => {
   const header = req.headers[PORTAL_IDENTITY_HEADER];
   const actor = typeof header === "string" ? verifyPortalIdentity(header, identitySecret, Date.now()) : null;
   seen.push({ path: `${url.pathname}${url.search}`, principal: actor?.p ?? null });
-  res.writeHead(302, { location: "/connectors?connector=discord&status=connected" });
+  res.writeHead(302, { location: "/settings?discord=connected" });
   res.end();
 });
 await new Promise<void>((resolve) => core.listen(0, "127.0.0.1", resolve));

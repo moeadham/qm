@@ -31,6 +31,8 @@ The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it fr
 
    Not yet in PR 3: the conversation audience is the requester only (linked members who can view the channel need the member roster, PR 5); the `discord` tool's read actions still go through the Slack context puller; principal rows carrying approval, keychain or deploy-access cards are reported undeliverable until PR 4; no stop button on a status message; streaming shows only when the run executes on the gateway instance (other instances' deltas never reach its local turn stream), otherwise the reply arrives whole. A gateway stopped before READY during a Discord incident that accepts IDENTIFY but never answers READY keeps identifying about every 15 seconds until READY arrives; it processes nothing and is torn down then.
 
+4. Web UI settings show a Discord account card (`plugins/web-ui/src/discord-account.ts`) next to the Slack one when linking is configured: the linked Discord username and link date with an Unlink button, or a link button to `/connect/discord`. The OAuth callback returns to `/settings?discord=<status>`, and `GET /v1/discord-link` reports `username` and `linkedAt` from the stored link.
+
 ## Remaining
 
 ### PR 3 follow-ups
@@ -49,7 +51,7 @@ The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it fr
 - Channel directory push with `discord:` ids; people come from QM links, not a Discord roster.
 - `reach` and principal deliveries target the configured platform.
 - Pinned model header and channel topic.
-- Admin install page (stored bot token) and linked-accounts view; "Connect Discord" in web UI settings.
+- Admin install page (stored bot token) and linked-accounts view.
 - Operator docs: this file, plus what Discord cannot do (email lookup, group DMs, acting as the user, Slack's AI pane, Slack Connect external access, HTTP events).
 
 ## Verification

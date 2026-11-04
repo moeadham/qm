@@ -108,13 +108,18 @@ test("a signed-in QM user links the Discord account they prove with OAuth, and c
     assert.equal(srv.built.identity.classify(`discord:${DISCORD_A}`).type, "guest");
     const linked = await linkAs(srv, JORDAN, DISCORD_A);
     assert.equal(linked.status, 302);
-    assert.match(linked.location ?? "", /status=connected/);
+    assert.match(linked.location ?? "", /^\/settings\?discord=connected/);
     assert.deepEqual(srv.built.identity.classify(`discord:${DISCORD_A}`), { id: JORDAN, type: "internal" });
 
     const statusRes = await fetch(`${srv.base}/v1/discord-link`, {
       headers: await headers("GET", "/v1/discord-link", JORDAN),
     });
-    assert.deepEqual(await statusRes.json(), { configured: true, linked: true, discordId: DISCORD_A });
+    const status = (await statusRes.json()) as Record<string, unknown>;
+    assert.equal(typeof status.linkedAt, "number");
+    assert.deepEqual(
+      { ...status, linkedAt: 0 },
+      { configured: true, linked: true, discordId: DISCORD_A, username: "jordo", linkedAt: 0 },
+    );
 
     const unlink = await fetch(`${srv.base}/v1/discord-link`, {
       method: "DELETE",
@@ -122,6 +127,10 @@ test("a signed-in QM user links the Discord account they prove with OAuth, and c
     });
     assert.equal(unlink.status, 200);
     assert.equal(srv.built.identity.classify(`discord:${DISCORD_A}`).type, "guest");
+    const afterUnlink = await fetch(`${srv.base}/v1/discord-link`, {
+      headers: await headers("GET", "/v1/discord-link", JORDAN),
+    });
+    assert.deepEqual(await afterUnlink.json(), { configured: true, linked: false });
   } finally {
     await srv.close();
   }
@@ -131,7 +140,7 @@ test("a link prompt forwarded to someone else cannot bind a different Discord ac
   const srv = start(() => DISCORD_B);
   try {
     const result = await linkAs(srv, JORDAN, DISCORD_A);
-    assert.match(result.location ?? "", /status=wrong_account/);
+    assert.match(result.location ?? "", /^\/settings\?discord=wrong_account/);
     assert.equal(srv.built.identity.classify(`discord:${DISCORD_A}`).type, "guest");
     assert.equal(srv.built.identity.classify(`discord:${DISCORD_B}`).type, "guest");
   } finally {
@@ -142,8 +151,8 @@ test("a link prompt forwarded to someone else cannot bind a different Discord ac
 test("a Discord account already linked to another QM user stays with them", async () => {
   const srv = start(() => DISCORD_A);
   try {
-    assert.match((await linkAs(srv, CASEY)).location ?? "", /status=connected/);
-    assert.match((await linkAs(srv, JORDAN)).location ?? "", /status=linked_elsewhere/);
+    assert.match((await linkAs(srv, CASEY)).location ?? "", /^\/settings\?discord=connected/);
+    assert.match((await linkAs(srv, JORDAN)).location ?? "", /^\/settings\?discord=linked_elsewhere/);
     assert.equal(srv.built.identity.classify(`discord:${DISCORD_A}`).id, CASEY);
   } finally {
     await srv.close();
@@ -159,8 +168,8 @@ test("linking requires a portal-signed QM session and a single-use state", async
     assert.equal(anonymous.status, 403);
 
     const state = await startLink(srv, JORDAN);
-    assert.match((await callback(srv, state, JORDAN)).location ?? "", /status=connected/);
-    assert.match((await callback(srv, state, JORDAN)).location ?? "", /status=failed/);
+    assert.match((await callback(srv, state, JORDAN)).location ?? "", /^\/settings\?discord=connected/);
+    assert.match((await callback(srv, state, JORDAN)).location ?? "", /^\/settings\?discord=failed/);
   } finally {
     await srv.close();
   }
@@ -169,8 +178,14 @@ test("linking requires a portal-signed QM session and a single-use state", async
 test("an authorize URL handed to someone else cannot finish in their browser", async () => {
   const srv = start(() => DISCORD_B);
   try {
-    assert.match((await callback(srv, await startLink(srv, JORDAN), CASEY)).location ?? "", /status=wrong_session/);
-    assert.match((await callback(srv, await startLink(srv, JORDAN))).location ?? "", /status=wrong_session/);
+    assert.match(
+      (await callback(srv, await startLink(srv, JORDAN), CASEY)).location ?? "",
+      /^\/settings\?discord=wrong_session/,
+    );
+    assert.match(
+      (await callback(srv, await startLink(srv, JORDAN))).location ?? "",
+      /^\/settings\?discord=wrong_session/,
+    );
     assert.equal(srv.built.identity.classify(`discord:${DISCORD_B}`).type, "guest");
   } finally {
     await srv.close();
@@ -181,9 +196,9 @@ test("a QM user keeps one Discord account until they unlink it", async () => {
   let discordUser = DISCORD_A;
   const srv = start(() => discordUser);
   try {
-    assert.match((await linkAs(srv, JORDAN)).location ?? "", /status=connected/);
+    assert.match((await linkAs(srv, JORDAN)).location ?? "", /^\/settings\?discord=connected/);
     discordUser = DISCORD_B;
-    assert.match((await linkAs(srv, JORDAN)).location ?? "", /status=already_linked/);
+    assert.match((await linkAs(srv, JORDAN)).location ?? "", /^\/settings\?discord=already_linked/);
     assert.equal(srv.built.identity.classify(`discord:${DISCORD_B}`).type, "guest");
   } finally {
     await srv.close();

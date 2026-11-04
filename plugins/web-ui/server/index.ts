@@ -1316,6 +1316,8 @@ const apiRoutes: readonly WebRoute[] = [
     },
   })),
   { method: "GET", path: "/api/composio/slack", handle: (c) => relayCore(c.res, "GET", "/v1/composio/slack") },
+  { method: "GET", path: "/api/discord-link", handle: (c) => relayCore(c.res, "GET", "/v1/discord-link") },
+  { method: "DELETE", path: "/api/discord-link", handle: (c) => relayCore(c.res, "DELETE", "/v1/discord-link") },
   {
     method: "POST",
     path: "/api/composio/slack/authorize",

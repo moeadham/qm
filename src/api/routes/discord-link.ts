@@ -2,13 +2,15 @@ import { orgId as configOrgId } from "../../config.ts";
 import { verifyPortalIdentity, PORTAL_IDENTITY_HEADER } from "../../auth/portal-identity.ts";
 import { codeChallengeS256, generateCodeVerifier } from "../../connectors/oauth.ts";
 import { createEnvSecretSource } from "../../credentials/secret-source.ts";
-import { canonicalPerson, samePerson } from "../../directory/person.ts";
+import { canonicalPerson, foldPrincipalId, samePerson } from "../../directory/person.ts";
 import { PrincipalLinkError } from "../../identity/principal-links.ts";
 import {
   DISCORD_LINK_CALLBACK_PATH,
   DISCORD_LINK_PROVIDER,
   discordAlias,
   discordAuthorizeUrl,
+  discordLinkEvidence,
+  discordUsernameFromEvidence,
   linkedDiscordId,
   verifiedDiscordUser,
   unlinkDiscordAccount,
@@ -54,18 +56,23 @@ async function browserPrincipal(ctx: BaseCtx): Promise<string | null> {
 }
 
 function finish(res: BaseCtx["res"], status: string): void {
-  return sendRedirect(res, `/connectors?${new URLSearchParams({ connector: "discord", status }).toString()}`);
+  return sendRedirect(res, `/settings?${new URLSearchParams({ discord: status }).toString()}`);
 }
 
 async function discordLinkStatus(ctx: ApiCtx): Promise<void> {
   const principal = signedInPrincipal(ctx);
   if (!principal) return;
-  await ctx.deps.principalLinks?.refresh(true);
+  const rows = (await ctx.deps.principalLinks?.list()) ?? [];
   const discordId = linkedDiscordId(principal);
+  const alias = discordId ? foldPrincipalId(discordAlias(discordId)) : undefined;
+  const link = alias ? rows.find((row) => foldPrincipalId(row.principalId) === alias) : undefined;
+  const username = link ? discordUsernameFromEvidence(link.evidence) : undefined;
   return sendJson(ctx.res, 200, {
     configured: (await discordClient(ctx.deps)) !== null,
     linked: discordId !== undefined,
     ...(discordId ? { discordId } : {}),
+    ...(username ? { username } : {}),
+    ...(link ? { linkedAt: link.createdAt } : {}),
   });
 }
 
@@ -142,7 +149,7 @@ async function discordLinkCallback(ctx: BaseCtx): Promise<void> {
       await links.link({
         principalId: alias,
         canonicalId: state.principalId,
-        evidence: `Discord OAuth user ${user.id} (${user.username})`,
+        evidence: discordLinkEvidence(user),
         linkedBy: state.principalId,
       });
     } catch (error) {

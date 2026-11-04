@@ -15,6 +15,14 @@ export function discordAlias(userId: string): string {
   return `${ALIAS_PREFIX}${userId}`;
 }
 
+export function discordLinkEvidence(user: { id: string; username: string }): string {
+  return `Discord OAuth user ${user.id} (${user.username})`;
+}
+
+export function discordUsernameFromEvidence(evidence: string): string | undefined {
+  return /^Discord OAuth user \d+ \((.+)\)$/.exec(evidence)?.[1];
+}
+
 export function linkedDiscordId(principalId: string): string | undefined {
   for (const id of personIds(principalId)) {
     if (!id.toLowerCase().startsWith(ALIAS_PREFIX)) continue;
