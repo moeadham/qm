@@ -1,5 +1,6 @@
 import { MessageType } from "@discordjs/core";
 import { userFacingFailureClause } from "../core/failure-copy.ts";
+import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
 import { safeClip } from "../surfaces/safe-cut.ts";
 import { hasRunDelivery, turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
@@ -285,7 +286,7 @@ export function createDiscordBot(deps: {
     channelId: string,
     body: CoreTurnBody,
     opts: { addressed: boolean; key: string; gate?: AcceptGate },
-  ): Promise<void> {
+  ): Promise<TurnResult | undefined> {
     const { addressed, key, gate } = opts;
     const writer = createReplyWriter(channelId);
     let queuedRunId: string | undefined;
@@ -317,10 +318,10 @@ export function createDiscordBot(deps: {
           await writer
             .finish(`⚠️ ${turnFailureText(error)}`, `failure:${key}`)
             .catch(swallowAs("discord: failure note", undefined));
-        return;
+        return undefined;
       }
       if (!accepted) accept();
-      if (result.steered) return;
+      if (result.steered) return result;
       const reply = replyText(result, addressed, body.conversation.kind === "dm");
       const runId = queuedRunId;
       try {
@@ -331,16 +332,23 @@ export function createDiscordBot(deps: {
           `[discord] reply post failed for run ${runId ?? "?"}; leaving it for the delivery poller:`,
           errMessage(error),
         );
-        return;
+        return result;
       }
       if (runId && hasRunDelivery(result)) flow.ackRunDelivery(runId);
+      return result;
     } finally {
       stopTyping();
     }
   }
 
-  async function resumeTurn(body: CoreTurnBody, key: string): Promise<void> {
-    if (body.deliveryTarget) await converse(body.deliveryTarget, body, { addressed: true, key });
+  async function resumeTurn(body: CoreTurnBody, key: string): Promise<TurnResult | undefined> {
+    if (isSubagentThreadRef(body.conversation.threadRef))
+      return flow.callCore(body, {}).catch((error: unknown) => {
+        console.error(`[discord] delegated approval ${key} errored: ${errMessage(error)}`);
+        return undefined;
+      });
+    if (!body.deliveryTarget) return undefined;
+    return converse(body.deliveryTarget, body, { addressed: true, key });
   }
 
   return { handleMessage, resumeTurn };

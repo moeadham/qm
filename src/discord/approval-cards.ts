@@ -70,7 +70,7 @@ export function commandApprovalCard(approval: StoredApprovalView): DiscordCard {
 export function commandDecisionText(scope: (typeof COMMAND_SCOPES)[number], command: string): string {
   if (scope === "deny") return `Denied ${code(command)}.`;
   const label = { once: "Allowed once", session: "Allowed for this conversation", always: "Allowed always" }[scope];
-  return `${label}; running ${code(command)}…`;
+  return `${label}: ${code(command)}.`;
 }
 
 export function keychainCard(view: KeychainApprovalView): DiscordCard {

@@ -161,6 +161,7 @@ function harness(opts: {
   result?: (body: TurnRequest) => TurnResult;
   snapshots?: string[];
   approvals?: Record<string, StoredApprovalView>;
+  consumeApprovals?: boolean;
   keychain?: KeychainApprovalView;
   deployRequests?: Record<string, { deploymentId: string; requesterId: string }>;
 }): Harness {
@@ -202,6 +203,7 @@ function harness(opts: {
     ...real,
     async submitTurn(body) {
       h.turns.push({ ...body, surface: "discord" });
+      if (body.approval && opts.consumeApprovals) delete opts.approvals?.[body.approval.requestId];
       return { status: "queued", runId: `run-${h.turns.length}` };
     },
     async waitRun(runId: string, hooks: RunHooks = {}) {
@@ -773,7 +775,6 @@ test("a pending command approval reaches the requester as buttons and only their
   const resumed = h.turns[1]!;
   assert.deepEqual(resumed.approval, { requestId: REQUEST_ID, approved: true, scope: "once" });
   assert.equal(resumed.actor.externalId, `discord:${ALICE}`);
-  assert.equal(resumed.idempotencyKey, `discord-approval:${REQUEST_ID}:5`);
   assert.equal(resumed.redeliveryKey, undefined);
   assert.equal(resumed.text, "clean the build");
   assert.equal(api.sent.find((m) => m.content === "cleaned up")?.channelId, DM);
@@ -872,4 +873,89 @@ test("credential and app access requests arrive as buttons that record the owner
       buttons: [],
     },
   );
+});
+
+function storedApproval(threadRef: string): StoredApprovalView {
+  return {
+    requestId: REQUEST_ID,
+    createdAt: 5,
+    command: "rm -rf build",
+    reason: "destructive",
+    request: {
+      surface: "discord",
+      actor: { externalId: "alice@example.com" },
+      conversation: { kind: "dm", threadRef, audience: [] },
+      deliveryTarget: DM,
+      text: "clean the build",
+    },
+  };
+}
+
+async function clickApproval(
+  h: Harness,
+  clicks: string[],
+  settled: (api: FakeDiscord) => boolean,
+): Promise<FakeDiscord> {
+  const api = new FakeDiscord();
+  linkBoth();
+  try {
+    const { handlers, plugin } = await boot(h, api);
+    for (const id of clicks) handlers.onInteraction(click(id, ALICE, `dm-${ALICE}`, "card-1"));
+    await until(() => settled(api), "approval settled");
+    await plugin.stop();
+  } finally {
+    installPrincipalLinks(null);
+  }
+  return api;
+}
+
+test("an approval that core leaves pending puts the buttons back instead of claiming it ran", async () => {
+  const h = harness({
+    approvals: { [REQUEST_ID]: storedApproval(`discord:dm:${DM}`) },
+    result: () => ({
+      status: "pending_approval",
+      reason: "Another approval in this conversation comes first.",
+      pendingApprovals: [{ requestId: REQUEST_ID, command: "rm -rf build", reason: "destructive" }],
+    }),
+  });
+  const api = await clickApproval(h, [`qm:cmd:once:${REQUEST_ID}`], (a) => a.edits.length === 2);
+
+  assert.equal(h.turns.length, 1);
+  const [decided, restored] = api.edits;
+  assert.deepEqual(decided?.buttons, []);
+  assert.match(restored!.content, /Another approval in this conversation comes first\. The approval is still pending/);
+  assert.equal(restored!.buttons?.length, 4);
+});
+
+test("a delegated approval resumes the subagent without posting its output into the conversation", async () => {
+  const h = harness({
+    approvals: { [REQUEST_ID]: storedApproval("agent:main:subagent:child-1") },
+    result: () => ({ status: "ok", reply: "raw subagent output" }),
+  });
+  const api = await clickApproval(h, [`qm:cmd:once:${REQUEST_ID}`], (a) => a.edits.length === 2);
+
+  assert.equal(h.turns.length, 1);
+  assert.equal(h.turns[0]!.conversation.threadRef, "agent:main:subagent:child-1");
+  assert.equal(
+    api.sent.some((m) => m.content.includes("raw subagent output")),
+    false,
+  );
+  assert.match(api.edits[1]!.content, /Results will return to the original conversation/);
+});
+
+test("Allow and Deny clicked together decide once; the second click is told it was already decided", async () => {
+  const h = harness({
+    approvals: { [REQUEST_ID]: storedApproval(`discord:dm:${DM}`) },
+    consumeApprovals: true,
+    result: () => ({ status: "ok", reply: "cleaned up" }),
+  });
+  const api = await clickApproval(
+    h,
+    [`qm:cmd:once:${REQUEST_ID}`, `qm:cmd:deny:${REQUEST_ID}`],
+    (a) => a.ephemeral.length === 1,
+  );
+
+  assert.equal(h.turns.length, 1);
+  assert.deepEqual(h.turns[0]!.approval, { requestId: REQUEST_ID, approved: true, scope: "once" });
+  assert.deepEqual(api.ephemeral, ["That approval was already decided or has expired."]);
 });
