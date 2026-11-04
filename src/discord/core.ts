@@ -4,6 +4,14 @@ import type { PrincipalLinkService } from "../identity/principal-links.ts";
 import type { RateLimiter } from "../ratelimit/rate-limiter.ts";
 import type { DeploymentAccessRequest } from "../surfaces/deploy-access.ts";
 import {
+  availableRuntimeError,
+  matchRuntimeModel,
+  userRuntimeConfigBody,
+  type RuntimeDeps,
+} from "../api/runtime-config.ts";
+import type { RuntimeChoice } from "../harness/harness.ts";
+import type { ScopeId } from "../types.ts";
+import {
   createSurfaceCoreClient,
   type SurfaceCoreClient,
   type SurfaceCoreClientDeps,
@@ -15,7 +23,15 @@ export interface DiscordCoreClient extends SurfaceCoreClient {
   allowLinkPrompt(discordId: string): Promise<boolean>;
   unlink(discordId: string): Promise<boolean>;
   deploymentAccessRequest(deliveryId: string): Promise<DeploymentAccessRequest | undefined>;
+  modelMenu(principalId: string, scope: ScopeId): Promise<ModelMenu | undefined>;
+  setModel(principalId: string, scope: ScopeId, query: string): Promise<SetModelResult>;
 }
+
+export type ModelMenu = Awaited<ReturnType<typeof userRuntimeConfigBody>>;
+
+export type SetModelResult =
+  | { ok: true; choice: RuntimeChoice | null }
+  | { ok: false; error: string; candidates?: Array<{ harnessId: string; modelId: string }> };
 
 export interface DiscordCoreClientDeps extends SurfaceCoreClientDeps {
   principalLinks: Pick<PrincipalLinkService, "unlink">;
@@ -24,6 +40,7 @@ export interface DiscordCoreClientDeps extends SurfaceCoreClientDeps {
   signingSecret?: string;
   portalUrl?: string;
   auditLog?: Pick<AuditLog, "record">;
+  runtime?: RuntimeDeps;
 }
 
 export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCoreClient {
@@ -32,8 +49,38 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     const principal = deps.identity.classify(discordAlias(discordId));
     return deps.identity.isInternal(principal) ? principal.id : undefined;
   };
+  const modelMenu = async (principalId: string, scope: ScopeId): Promise<ModelMenu | undefined> => {
+    if (!deps.runtime?.config) return undefined;
+    await deps.runtime.refreshModels?.();
+    return userRuntimeConfigBody({ deps: deps.runtime }, scope, principalId);
+  };
   return {
     ...createSurfaceCoreClient("discord", deps),
+
+    modelMenu,
+
+    async setModel(principalId, scope, query) {
+      const runtime = deps.runtime;
+      const menu = await modelMenu(principalId, scope);
+      if (!runtime?.config || !menu) return { ok: false, error: "runtime_unavailable" };
+      let choice: RuntimeChoice | null = null;
+      if (query.toLowerCase() !== "default") {
+        const match = matchRuntimeModel(menu, query, menu.approvedHarnesses);
+        if (!match.ok) return match;
+        choice = { harnessId: match.harnessId, modelId: match.modelId, effortLevel: "auto", fastMode: false };
+        const error = await availableRuntimeError({ deps: runtime }, scope, choice, undefined, principalId);
+        if (error) return { ok: false, error };
+      }
+      await runtime.config.setRuntimeSelectionLatest(scope, choice);
+      deps.auditLog?.record({
+        at: Date.now(),
+        principalId,
+        action: "runtime-config.update",
+        resource: "runtime-config",
+        scopeLabel: scope,
+      });
+      return { ok: true, choice };
+    },
 
     linkedPrincipal,
 

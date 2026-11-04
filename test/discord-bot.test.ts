@@ -1,3 +1,4 @@
+import "./support/auto-fake-sprites.ts";
 import { test } from "node:test";
 import { WebSocketServer, type WebSocket } from "ws";
 import assert from "node:assert/strict";
@@ -21,6 +22,9 @@ import type { StagedEnvelope } from "../src/surfaces/envelope-staging.ts";
 import type { Delivery, TurnRequest, TurnResult } from "../src/types.ts";
 import type { RunHooks, StoredApprovalView } from "../src/surfaces/surface-core-client.ts";
 import type { KeychainApprovalView } from "../src/credentials/keychain-approval.ts";
+import type { RuntimeDeps } from "../src/api/runtime-config.ts";
+import { buildApp } from "../src/wiring.ts";
+import { testConfig } from "./support/test-config.ts";
 
 const BOT = "900000000000000001";
 const ALICE = "100000000000000001";
@@ -116,6 +120,10 @@ class FakeDiscord implements DiscordApi {
   async editReply(_token: string, content: string) {
     this.ephemeral.push(content);
   }
+  suggestions: Array<Array<{ name: string; value: string }>> = [];
+  async autocomplete(_id: string, _token: string, choices: Array<{ name: string; value: string }>) {
+    this.suggestions.push(choices);
+  }
   async deferUpdate(interactionId: string) {
     this.deferredUpdates.push(interactionId);
   }
@@ -164,6 +172,7 @@ function harness(opts: {
   consumeApprovals?: boolean;
   keychain?: KeychainApprovalView;
   deployRequests?: Record<string, { deploymentId: string; requesterId: string }>;
+  runtime?: RuntimeDeps;
 }): Harness {
   const linked = opts.linked ?? { [ALICE]: "alice@example.com" };
   const h: Harness = {
@@ -198,6 +207,7 @@ function harness(opts: {
     orgId: "acme",
     signingSecret: SECRET,
     portalUrl: "https://qm.example.com/",
+    ...(opts.runtime ? { runtime: opts.runtime } : {}),
   });
   h.core = {
     ...real,
@@ -958,4 +968,101 @@ test("Allow and Deny clicked together decide once; the second click is told it w
   assert.equal(h.turns.length, 1);
   assert.deepEqual(h.turns[0]!.approval, { requestId: REQUEST_ID, approved: true, scope: "once" });
   assert.deepEqual(api.ephemeral, ["That approval was already decided or has expired."]);
+});
+
+function modelCommand(user: string, channelId: string, name?: string, autocomplete = false): APIInteraction {
+  return {
+    id: `model-${name ?? "show"}-${autocomplete}`,
+    token: "tok",
+    type: autocomplete ? 4 : 2,
+    data: {
+      name: "qm",
+      options: [
+        {
+          name: "model",
+          type: 1,
+          ...(name !== undefined ? { options: [{ name: "name", type: 3, value: name, focused: autocomplete }] } : {}),
+        },
+      ],
+    },
+    channel: { id: channelId },
+    user: { id: user },
+  } as unknown as APIInteraction;
+}
+
+async function subscribedApp(provider: "openai" | "anthropic") {
+  const built = buildApp(testConfig());
+  built.config.setApprovedHarnesses(["pi", "claude"]);
+  await built.config.flushScope("org:default-org");
+  await built.userModelCredentials.setOAuth("alice@example.com", provider, {
+    accessToken: "synthetic-access",
+    refreshToken: "synthetic-refresh",
+    expiresAt: Date.now() + 3_600_000,
+  });
+  await built.config.setPersonalModelAuth("alice@example.com", true, provider);
+  const runtime: RuntimeDeps = {
+    config: built.config,
+    userModelCredentials: built.userModelCredentials,
+    harnessId: "pi",
+    providerKeys: { anthropic: false, openai: false, openrouter: false },
+  };
+  return { built, runtime };
+}
+
+test("/qm model in a DM lists and sets the user's ChatGPT subscription models for their personal scope", async () => {
+  const { built, runtime } = await subscribedApp("openai");
+  const h = harness({ runtime });
+  const api = new FakeDiscord();
+  api.channels.set(DM, { id: DM, type: 1 });
+  const { handlers, plugin } = await boot(h, api);
+  const answer = async (name?: string) => {
+    const before = api.ephemeral.length;
+    handlers.onInteraction(modelCommand(ALICE, DM, name));
+    await until(() => api.ephemeral.length > before, `/qm model ${name ?? ""}`);
+    return api.ephemeral.at(-1)!;
+  };
+  try {
+    handlers.onInteraction(modelCommand(ALICE, DM, "sol", true));
+    await until(() => api.suggestions.length === 1, "suggestions");
+    assert.ok(api.suggestions[0]!.some((c) => c.value === "pi:codex/gpt-5.6-sol"));
+    assert.ok(api.suggestions[0]!.every((c) => c.value === "default" || c.value.startsWith("pi:codex/")));
+
+    assert.match(
+      await answer("pi:codex/gpt-5.6-sol"),
+      /^Done\. New turns in your DMs with me and your personal QM chats use \*\*/,
+    );
+    assert.deepEqual(
+      (await built.config.getRuntimeSelectionDurable("personal:alice@example.com" as never))?.modelId,
+      "codex/gpt-5.6-sol",
+    );
+    assert.match(await answer(), /use \*\*.+\*\*\.\n/);
+    assert.match(await answer("claude-sonnet-5"), /I don't have a model called "claude-sonnet-5" for you here/);
+    assert.match(await answer("default"), /use the default model again/);
+    assert.equal(await built.config.getRuntimeSelectionDurable("personal:alice@example.com" as never), null);
+  } finally {
+    await plugin.stop();
+  }
+});
+
+test("/qm model in a server thread sets the channel's model, including Claude subscription models", async () => {
+  const { built, runtime } = await subscribedApp("anthropic");
+  const h = harness({ runtime });
+  const api = new FakeDiscord();
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  api.channels.set("thread-7", { id: "thread-7", type: 11, parentId: CHANNEL, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  try {
+    handlers.onInteraction({
+      ...(modelCommand(ALICE, "thread-7", "claude:claude-sonnet-5") as object),
+      guild_id: GUILD,
+    } as APIInteraction);
+    await until(() => api.ephemeral.length === 1, "model set");
+  } finally {
+    await plugin.stop();
+  }
+  assert.match(api.ephemeral[0]!, /^Done\. New turns in #general and its threads use \*\*/);
+  assert.deepEqual(
+    (await built.config.getRuntimeSelectionDurable(`channel:${CHANNEL}` as never))?.modelId,
+    "claude-sonnet-5",
+  );
 });

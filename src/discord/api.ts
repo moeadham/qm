@@ -68,6 +68,7 @@ export interface DiscordApi {
   deferEphemeral(interactionId: string, token: string): Promise<void>;
   editReply(token: string, content: string): Promise<void>;
   deferUpdate(interactionId: string, token: string): Promise<void>;
+  autocomplete(interactionId: string, token: string, choices: Array<{ name: string; value: string }>): Promise<void>;
   followUpEphemeral(token: string, content: string): Promise<void>;
 }
 
@@ -220,6 +221,9 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
     },
     async editReply(token, content) {
       await api.interactions.editReply(applicationId, token, { content });
+    },
+    async autocomplete(interactionId, token, choices) {
+      await api.interactions.createAutocompleteResponse(interactionId, token, { choices });
     },
     async deferUpdate(interactionId, token) {
       await api.interactions.deferMessageUpdate(interactionId, token);

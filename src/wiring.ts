@@ -8,7 +8,7 @@ import { createDecisionHooks, routeTurnRuntime, turnStartState } from "./decisio
 import { createDecisionBackend } from "./decisions/providers.ts";
 import { createPostgresDecisionStore, type DecisionStore } from "./decisions/store.ts";
 import type { SlackSessionStatusState } from "./slack/session-status.ts";
-import { availableRuntimeError } from "./api/runtime-config.ts";
+import { availableRuntimeError, type RuntimeDeps } from "./api/runtime-config.ts";
 import { createApprovalStore } from "./core/approval-store.ts";
 import { createKeychainApprovals, type KeychainApprovals } from "./credentials/keychain-approval.ts";
 import { flushErrorReporting, startTiming } from "../plugins/chassis/src/error-reporting.ts";
@@ -2402,6 +2402,18 @@ export function buildApp(
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
   });
+  const runtimeDeps: RuntimeDeps = {
+    config: configStore,
+    harnessId: fallbackHarness,
+    get baseModelDefault() {
+      return fallback.modelId;
+    },
+    providerKeys: providerKeysPresent(config),
+    modelCredentials,
+    userModelCredentials,
+    modelCredentialFetch: overrides.modelCredentialFetch,
+    refreshModels,
+  };
   const discordCore = createDiscordCoreClient({
     app,
     blobTransfer,
@@ -2421,6 +2433,7 @@ export function buildApp(
     auditLog,
     ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
     ...(config.publicWebUrl ? { portalUrl: config.publicWebUrl } : {}),
+    runtime: runtimeDeps,
   });
   runs.onTerminal((run) => {
     void runs
@@ -2686,24 +2699,7 @@ export function buildApp(
   cronChanged.notify = (id) => scheduler.notifyChanged(id);
   orchestratorDeps.control = createControlService(app, scheduler, admin);
   orchestratorDeps.validateScheduledRuntime = (scope, choice, purpose, actorId) =>
-    availableRuntimeError(
-      {
-        deps: {
-          config: configStore,
-          harnessId: fallbackHarness,
-          baseModelDefault: fallback.modelId,
-          providerKeys: providerKeysPresent(config),
-          modelCredentials,
-          userModelCredentials,
-          modelCredentialFetch: overrides.modelCredentialFetch,
-          refreshModels,
-        },
-      },
-      scope,
-      choice,
-      purpose,
-      actorId,
-    );
+    availableRuntimeError({ deps: runtimeDeps }, scope, choice, purpose, actorId);
   orchestratorDeps.runtime = createRuntimeService(
     {
       config: configStore,

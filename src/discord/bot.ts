@@ -50,6 +50,10 @@ export function discordMessageKey(channelId: string, messageId: string): string 
   return `discord:${channelId}:${messageId}`;
 }
 
+export function homeChannelId(channel: DiscordChannel): string {
+  return THREAD_CHANNEL_TYPES.has(channel.type) && channel.parentId ? channel.parentId : channel.id;
+}
+
 export function threadRefForChannel(channel: DiscordChannel): string | undefined {
   if (!channel.guildId) return discordDmThreadRef(channel.id);
   if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.parentId)

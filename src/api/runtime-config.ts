@@ -233,6 +233,43 @@ export async function runtimeConfigBody(
   };
 }
 
+interface RuntimeModelMenu {
+  modelsByHarness: Partial<Record<string, readonly string[]>>;
+  modelCatalog: Record<string, { name?: string; label?: string; buttonLabel?: string } | undefined>;
+}
+
+export type RuntimeModelMatch =
+  | { ok: true; harnessId: HarnessId; modelId: string }
+  | {
+      ok: false;
+      error: "model_ambiguous" | "model_unavailable";
+      candidates: Array<{ harnessId: HarnessId; modelId: string }>;
+    };
+
+export function matchRuntimeModel(
+  menu: RuntimeModelMenu,
+  query: string,
+  harnesses: readonly HarnessId[],
+): RuntimeModelMatch {
+  const offered = harnesses.flatMap((harnessId) =>
+    (menu.modelsByHarness[harnessId] ?? []).map((modelId) => ({ harnessId, modelId })),
+  );
+  const exact = offered.filter((m) => m.modelId === query || `${m.harnessId}:${m.modelId}` === query);
+  const wanted = query.toLowerCase();
+  const matches = exact.length
+    ? exact
+    : offered.filter(({ modelId }) => {
+        const meta = menu.modelCatalog[modelId];
+        return [modelId, meta?.name, meta?.label, meta?.buttonLabel].some((label) => label?.toLowerCase() === wanted);
+      });
+  if (matches.length === 1) return { ok: true, ...matches[0]! };
+  return {
+    ok: false,
+    error: matches.length ? "model_ambiguous" : "model_unavailable",
+    candidates: matches.length ? matches : offered,
+  };
+}
+
 export function validateRuntimeChoice(choice: RuntimeChoice): string | null {
   if (!modelSupportedByHarness(choice.modelId, choice.harnessId)) return "model_not_supported";
   if (
