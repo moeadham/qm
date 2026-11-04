@@ -52,7 +52,7 @@ export class DiscordAccount extends LitElement {
   };
   private status: DiscordLinkStatus | null = null;
   private busy = false;
-  private notice: Notice | null = pageNotice;
+  private notice: Notice | null = null;
 
   protected createRenderRoot(): HTMLElement {
     return this;
@@ -61,6 +61,8 @@ export class DiscordAccount extends LitElement {
   constructor() {
     super();
     this.hidden = true;
+    this.notice = pageNotice;
+    pageNotice = null;
   }
 
   connectedCallback(): void {
@@ -81,11 +83,6 @@ export class DiscordAccount extends LitElement {
     void this.load();
   }
 
-  private show(notice: Notice | null): void {
-    pageNotice = notice;
-    this.notice = notice;
-  }
-
   private async load(): Promise<void> {
     try {
       const response = await fetch(withBase("/api/discord-link"), {
@@ -99,16 +96,11 @@ export class DiscordAccount extends LitElement {
     }
   }
 
-  private link(): void {
-    this.busy = true;
-    location.assign("/connect/discord");
-  }
-
   private async unlink(): Promise<void> {
     if (this.busy) return;
     if (!window.confirm("Unlink your Discord account? The QM bot will stop accepting your messages.")) return;
     this.busy = true;
-    this.show(null);
+    this.notice = null;
     try {
       const response = await fetch(withBase("/api/discord-link"), {
         method: "DELETE",
@@ -116,9 +108,9 @@ export class DiscordAccount extends LitElement {
       });
       if (!response.ok && response.status !== 404) throw Error("Could not unlink Discord. Try again.");
       this.status = { configured: this.status?.configured ?? true, linked: false };
-      this.show({ text: "Discord unlinked.", ok: true });
+      this.notice = { text: "Discord unlinked.", ok: true };
     } catch (error) {
-      this.show({ text: error instanceof Error ? error.message : "Could not unlink Discord.", ok: false });
+      this.notice = { text: error instanceof Error ? error.message : "Could not unlink Discord.", ok: false };
     } finally {
       this.busy = false;
     }
@@ -155,18 +147,18 @@ export class DiscordAccount extends LitElement {
                 ${this.busy ? "Unlinking…" : "Unlink"}
               </button>
             </div>`
-          : html`<button class="welcome-slack" type="button" ?disabled=${this.busy} @click=${() => this.link()}>
+          : html`<a class="welcome-slack" href="/connect/discord">
               <div class="slack-link-icon" aria-hidden="true">
                 <span class="slack-link-person">${icon(UserRound, 17)}</span>
                 <span class="slack-link-service">${discordMark(16)}</span>
                 <span class="slack-link-chain">${icon(Link2, 13)}</span>
               </div>
               <span
-                ><strong>${this.busy ? "Opening Discord…" : "Link your Discord account"}</strong
+                ><strong>Link your Discord account</strong
                 ><small>Let the QM bot accept your messages in Discord.</small></span
               >
               ${icon(ArrowUpRight, 16)}
-            </button>`
+            </a>`
       }
       ${this.renderNotice()}
     </section>`;
