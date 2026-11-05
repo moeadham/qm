@@ -259,7 +259,8 @@ export function createDiscordBot(deps: {
         .catch(swallowAs("discord: thread failure note", undefined));
       return;
     }
-    if (place.channelRef && m.guild_id) await core.rememberChannel(place.channelRef, m.guild_id);
+    if (place.channelRef && m.guild_id)
+      await core.rememberChannel(place.channelRef, m.guild_id).catch(swallowAs("discord: remember channel", undefined));
     const actor: ActorAssertion = { externalId: `discord:${m.author.id}`, displayName: displayName(m.author) };
     const body: CoreTurnBody = {
       actor,

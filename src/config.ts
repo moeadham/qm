@@ -1,3 +1,4 @@
+import { discordConfigFromEnv } from "./discord/config.ts";
 import { codexAuthFileForEnv, loadCodexAuthFile } from "./model/chatgpt-auth-file.ts";
 import {
   deploymentBrokerCredentialsFromEnv,
@@ -90,6 +91,7 @@ export interface Config {
   codexAuthFile?: string;
   /** Keychain credential id holding the Codex ChatGPT OAuth auth.json (production path). */
   codexAuthCredential?: string;
+  discordGuildIds?: string[];
   /** Keychain credential id holding a Claude Code subscription token (production path). */
   claudeAuthCredential?: string;
   claudeModel?: string;
@@ -1206,6 +1208,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   );
   const harness = harnessEnvStrict(env.HARNESS);
   const codexAuthCredential = env.CODEX_AUTH_CREDENTIAL?.trim() || undefined;
+  const discordGuildIds = [...(discordConfigFromEnv(env)?.guildIds ?? [])];
   const claudeAuthCredential = env.CLAUDE_AUTH_CREDENTIAL?.trim() || undefined;
   const codexAuthFile = codexAuthCredential ? undefined : codexAuthFileForEnv(env);
   if (env.NODE_ENV === "production" && codexAuthFile) {
@@ -1516,6 +1519,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.PI_MODEL ? { modelId: env.PI_MODEL } : {}),
     ...(codexAuthFile ? { codexAuthFile } : {}),
     ...(codexAuthCredential ? { codexAuthCredential } : {}),
+    ...(discordGuildIds.length ? { discordGuildIds } : {}),
     ...(claudeAuthCredential ? { claudeAuthCredential } : {}),
     ...(env.CLAUDE_MODEL ? { claudeModel: env.CLAUDE_MODEL } : {}),
     ...(env.CLAUDE_BIN ? { claudeBinPath: env.CLAUDE_BIN } : {}),

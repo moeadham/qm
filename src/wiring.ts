@@ -1825,7 +1825,10 @@ export function buildApp(
     onCaptureError: (e, scope) =>
       errors.record({ category: "memory", code: "capture_failed", message: errMessage(e), scopeLabel: scope }, e),
   });
-  const discordChannels = createDiscordChannels(artifactMap<DiscordChannelRecord>("discord_channels"));
+  const discordChannels = createDiscordChannels(
+    artifactMap<DiscordChannelRecord>("discord_channels"),
+    new Set(config.discordGuildIds ?? []),
+  );
   const directory = withDiscordChannels(
     config.databaseUrl ? createPostgresDirectoryStore(config.databaseUrl) : createDirectoryStore(),
     discordChannels,

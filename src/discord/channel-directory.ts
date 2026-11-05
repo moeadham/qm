@@ -11,17 +11,21 @@ export interface DiscordChannels {
   remember(channelId: string, guildId: string): Promise<void>;
 }
 
-export function createDiscordChannels(store: DurableMap<DiscordChannelRecord>): DiscordChannels {
+export function createDiscordChannels(
+  store: DurableMap<DiscordChannelRecord>,
+  allowedGuilds: ReadonlySet<string>,
+): DiscordChannels {
   const known = new Set<string>();
   return {
     async has(channelId) {
       if (known.has(channelId)) return true;
-      if (!(await store.get(channelId))) return false;
+      const record = await store.get(channelId);
+      if (!record || !allowedGuilds.has(record.guildId)) return false;
       known.add(channelId);
       return true;
     },
     async remember(channelId, guildId) {
-      if (known.has(channelId)) return;
+      if (known.has(channelId) || !allowedGuilds.has(guildId)) return;
       await store.putIfAbsent(channelId, { channelId, guildId });
       known.add(channelId);
     },
@@ -42,6 +46,7 @@ export function withDiscordChannels(
     },
     async channelMember(channelId, principalId) {
       if (await directory.channelMember(channelId, principalId)) return true;
+      if ((await directory.channelPrivacy(channelId)) !== undefined) return false;
       return isInternal(principalId) && (await channels.has(channelId));
     },
   };
