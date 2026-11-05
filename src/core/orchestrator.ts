@@ -2407,6 +2407,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const volatileContext = systemPrompt.slice(stableSystemBytes).trim();
         systemPrompt = systemPrompt.slice(0, stableSystemBytes);
 
+        let detectedReply = false;
         if (
           ambientTurn &&
           !sessionTurn &&
@@ -2468,6 +2469,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               ? { status: "react", sessionId: session.id, reactions }
               : { status: "silent", sessionId: session.id };
           }
+          detectedReply = true;
         }
         if (ambientTurn) assignSessionTitle();
 
@@ -3829,7 +3831,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ...(inbound.images.length ? { images: inbound.images } : {}),
         });
         if (
-          input.addressed &&
+          (input.addressed || detectedReply) &&
           !strictReadOnly &&
           input.surfaceTools &&
           surfaceToolDeps &&

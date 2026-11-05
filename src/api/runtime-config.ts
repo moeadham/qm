@@ -311,13 +311,13 @@ export async function availableRuntimeError(
   const choices = actorId
     ? await userRuntimeConfigBody(ctx, scope, actorId, purpose, choice)
     : await runtimeConfigBody(ctx, scope, undefined, purpose, choice);
-  const availableModel = choices.modelsByHarness[choice.harnessId]?.includes(choice.modelId)
-    ? choice.modelId
-    : codexSubscriptionModelId(choice.modelId);
-  if (
-    !choices.modelsByHarness[choice.harnessId]?.includes(availableModel) ||
-    !(await webuiModelEnabled(ctx, choice.modelId, purpose))
-  )
+  const listed = choices.modelsByHarness[choice.harnessId] ?? [];
+  const availableModel = [
+    choice.modelId,
+    codexSubscriptionModelId(choice.modelId),
+    codexProviderModelId(choice.modelId),
+  ].find((id) => listed.includes(id));
+  if (!availableModel || !(await webuiModelEnabled(ctx, choice.modelId, purpose)))
     return "runtime is no longer available or enabled on this deployment";
   return validateRuntimeChoice({
     ...choice,
