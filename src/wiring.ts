@@ -384,6 +384,7 @@ import { createSwarmStore, type SwarmStorage } from "./swarms/swarm-store.ts";
 import { createSwarmService } from "./swarms/swarm-service.ts";
 import { createSlackCoreClient, type SlackCoreClient } from "./api/slack-core-client.ts";
 import { createDiscordCoreClient, type DiscordCoreClient } from "./discord/core.ts";
+import { createDiscordChannels, withDiscordChannels, type DiscordChannelRecord } from "./discord/channel-directory.ts";
 import { createSurfaceContextPuller } from "./api/surface-context-puller.ts";
 import { createEngagedRegistry } from "./wake/engaged-registry.ts";
 import { createWakeSweep, type WakeSweep } from "./wake/sweep.ts";
@@ -1824,7 +1825,12 @@ export function buildApp(
     onCaptureError: (e, scope) =>
       errors.record({ category: "memory", code: "capture_failed", message: errMessage(e), scopeLabel: scope }, e),
   });
-  const directory = config.databaseUrl ? createPostgresDirectoryStore(config.databaseUrl) : createDirectoryStore();
+  const discordChannels = createDiscordChannels(artifactMap<DiscordChannelRecord>("discord_channels"));
+  const directory = withDiscordChannels(
+    config.databaseUrl ? createPostgresDirectoryStore(config.databaseUrl) : createDirectoryStore(),
+    discordChannels,
+    (principalId) => identity.isInternal(identity.classify(principalId)),
+  );
   const projects = createProjectStore(artifactMap<Project>("projects"), {
     isActiveMember: (principalId) => identity.isInternal(identity.classify(principalId)),
     advisoryLock,
@@ -2436,6 +2442,7 @@ export function buildApp(
     ...(config.publicWebUrl ? { portalUrl: config.publicWebUrl } : {}),
     runtime: runtimeDeps,
     sessions,
+    discordChannels,
   });
   runs.onTerminal((run) => {
     void runs

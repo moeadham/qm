@@ -259,6 +259,7 @@ export function createDiscordBot(deps: {
         .catch(swallowAs("discord: thread failure note", undefined));
       return;
     }
+    if (place.channelRef && m.guild_id) await core.rememberChannel(place.channelRef, m.guild_id);
     const actor: ActorAssertion = { externalId: `discord:${m.author.id}`, displayName: displayName(m.author) };
     const body: CoreTurnBody = {
       actor,
@@ -335,8 +336,7 @@ export function createDiscordBot(deps: {
       }
       if (!accepted) accept();
       if (result.steered) return { result, accepted };
-      const reply =
-        quiet && result.status !== "ok" ? "" : replyText(result, typing, body.conversation.kind === "dm");
+      const reply = quiet && result.status !== "ok" ? "" : replyText(result, typing, body.conversation.kind === "dm");
       const runId = queuedRunId;
       try {
         await writer.finish(reply, runId ? `run:${runId}` : key);

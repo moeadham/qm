@@ -1,3 +1,4 @@
+import type { DiscordChannels } from "./channel-directory.ts";
 import type { AuditLog } from "../audit/audit-log.ts";
 import { discordAlias, mintDiscordLinkTicket, unlinkDiscordAccount } from "../identity/discord-link.ts";
 import type { PrincipalLinkService } from "../identity/principal-links.ts";
@@ -31,6 +32,7 @@ export interface DiscordCoreClient extends SurfaceCoreClient {
     opts?: { refresh?: boolean },
   ): Promise<SessionModels | null | undefined>;
   setModel(principalId: string, threadRef: string, query: string): Promise<SetModelResult>;
+  rememberChannel(channelId: string, guildId: string): Promise<void>;
 }
 
 export type ModelMenu = Awaited<ReturnType<typeof userRuntimeConfigBody>>;
@@ -54,6 +56,7 @@ export interface DiscordCoreClientDeps extends SurfaceCoreClientDeps {
   auditLog?: Pick<AuditLog, "record">;
   runtime?: RuntimeDeps;
   sessions: Pick<SessionStore, "getByThread" | "getForParticipant" | "setRuntime">;
+  discordChannels: Pick<DiscordChannels, "remember">;
 }
 
 export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCoreClient {
@@ -79,6 +82,8 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     ...createSurfaceCoreClient("discord", deps),
 
     modelMenu,
+
+    rememberChannel: (channelId, guildId) => deps.discordChannels.remember(channelId, guildId),
 
     async setModel(principalId, threadRef, query) {
       const runtime = deps.runtime;
