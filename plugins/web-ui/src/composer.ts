@@ -145,9 +145,19 @@ function forgetThreadPick(threadRef: string): void {
   persistPreference(THREAD_PICKS_STORAGE_KEY, JSON.stringify([...threadModelPicks]));
 }
 
+function pickRuntime(value: ModelOptionValue | undefined): SessionRuntime | null {
+  const split = value ? value.indexOf(":") : -1;
+  return value && split > 0 ? { harnessId: value.slice(0, split), modelId: value.slice(split + 1) } : null;
+}
+
 function carryModelPick(fromThreadRef: string | null, toThreadRef: string): void {
-  const pick = fromThreadRef ? threadPick(fromThreadRef) : undefined;
-  if (pick) rememberThreadPick(toThreadRef, pick);
+  const source = fromThreadRef ? savedSession(fromThreadRef) : undefined;
+  const runtime = source
+    ? (source.runtime ?? null)
+    : pickRuntime(fromThreadRef ? threadModelPicks.get(fromThreadRef) : undefined);
+  if (!runtime) return;
+  rememberThreadPick(toThreadRef, runtimeValue(runtime)!);
+  saveSessionPick(toThreadRef, runtime);
 }
 
 function modelOptionFor(value: ModelOptionValue, scopeKey?: string | null): ModelOption | undefined {
@@ -240,6 +250,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   let runtimeIdentity = "";
   let unsubscribeRuntime: (() => void) | undefined;
   let effortOverride: EffortLevel | undefined;
+  let loadoutPick: ModelOptionValue | undefined;
   let fastModeOverride: boolean | undefined;
   let restoredLoadout: LoadoutEntry | undefined;
   let loadoutRestored = false;
@@ -457,7 +468,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   }
 
   function currentModelOption(): ModelOption | undefined {
-    const picked = ctx.chat.state.threadRef ? threadPick(ctx.chat.state.threadRef) : undefined;
+    const picked = ctx.chat.state.threadRef ? (threadPick(ctx.chat.state.threadRef) ?? loadoutPick) : undefined;
     return modelOptionFor(picked ?? defaultModelValue(scopeKey()), scopeKey());
   }
 
@@ -466,7 +477,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const threadRef = ctx.chat.state.threadRef;
     return (
       !!selected &&
-      !(threadRef && threadPick(threadRef) !== undefined) &&
+      !(threadRef && (threadPick(threadRef) ?? loadoutPick) !== undefined) &&
       effortOverride === undefined &&
       fastModeOverride === undefined &&
       restoredLoadout?.value !== selected.value
@@ -524,6 +535,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     if (!threadRef || !previous || !picked) return;
     if (picked.harnessId !== previous.harnessId || picked.model.id !== previous.modelId) return;
     forgetThreadPick(threadRef);
+    if (!options.prepareSubmit) saveSessionPick(threadRef, null);
     effortOverride = undefined;
     fastModeOverride = undefined;
     loadoutRestored = false;
@@ -531,6 +543,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   function restoreLoadoutSelection(): void {
     loadout = loadLoadout(loadoutKey);
+    loadoutPick = undefined;
     let selected = currentModelOption();
     const threadRef = ctx.chat.state.threadRef;
     const savedRuntime = threadRef ? savedSession(threadRef)?.runtime : undefined;
@@ -541,7 +554,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         (option) => presetModelId(option.value) === presetModelId(selected!.value),
       );
       if (preferred && preferred.value !== selected.value) {
-        rememberThreadPick(threadRef, preferred.value);
+        loadoutPick = preferred.value;
         selected = preferred;
       }
     }
@@ -549,7 +562,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const saved = loadout.find((entry) => entry.value === selected.value);
     if (!saved) return;
     const normalized = normalizeLoadoutEntry(saved, selected);
-    if (threadRef && threadPick(threadRef) !== undefined) {
+    if (threadRef && (threadPick(threadRef) ?? loadoutPick) !== undefined) {
       effortOverride ??= normalized.effort;
       fastModeOverride ??= normalized.fast;
     } else {
@@ -596,7 +609,16 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
         if (current && settings) {
           if (effortSelectionRevision === effortRevision) effortOverride = settings.effort;
           if (fastSelectionRevision === fastRevision) fastModeOverride = settings.fast;
-          if (ctx.chat.state.threadRef) rememberThreadPick(ctx.chat.state.threadRef, current.value);
+          if (ctx.chat.state.threadRef) {
+            rememberThreadPick(ctx.chat.state.threadRef, current.value);
+            if (!options.prepareSubmit)
+              saveSessionPick(ctx.chat.state.threadRef, {
+                harnessId: current.harnessId,
+                modelId: current.model.id,
+                ...(settings.effort ? { effortLevel: settings.effort } : {}),
+                ...(typeof settings.fast === "boolean" ? { fastMode: settings.fast } : {}),
+              });
+          }
           rememberActiveTweaks(current);
         } else if (
           !change.keep &&
@@ -2194,6 +2216,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   }
 
   function clearChatSelection(): void {
+    loadoutPick = undefined;
     if (ctx.chat.state.threadRef) {
       forgetThreadPick(ctx.chat.state.threadRef);
       if (!options.prepareSubmit) saveSessionPick(ctx.chat.state.threadRef, null);
@@ -2212,6 +2235,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const option = getModelOptions(scopeKey()).find((candidate) => candidate.value === value);
     if (!option) return;
     ++modelSelectionRevision;
+    loadoutPick = undefined;
     const previousDefaultEffort = defaultEffortForModel(currentModelOption()?.model);
     if (ctx.chat.state.threadRef) rememberThreadPick(ctx.chat.state.threadRef, option.value);
     agent.state.model = option.model;

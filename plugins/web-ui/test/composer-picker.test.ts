@@ -91,7 +91,7 @@ test("the personal-account picker preserves composer choices and saves context d
       if (String(input).startsWith("/api/sessions/") && init?.method === "POST") {
         const patch = JSON.parse(String(init.body));
         sessionSaves.push([String(input), patch]);
-        const { runtime: _runtime, ...row } = sessionRows[0]!;
+        const { runtime: _runtime, ...row } = sessionRows.find((r) => String(input).endsWith(`/${r.id}`))!;
         return Response.json({ session: patch.runtime ? { ...row, runtime: patch.runtime } : row });
       }
       if (String(input) !== "/api/runtime-config" || init?.method !== "PUT")
@@ -780,7 +780,28 @@ test("the personal-account picker preserves composer choices and saves context d
     await composer!.followScopeDefault(agent);
     for (let i = 0; i < 20 && sessionSaves.length === 0; i++) await tick();
     assert.deepEqual(sessionSaves, [["/api/sessions/s-picked", { runtime: null }]]);
+
+    sessionSaves.length = 0;
+    await mount();
+    button('[aria-label="Make Alpha default"]').click();
+    for (let i = 0; i < 40 && !sessionSaves.length; i++) await tick();
+    assert.equal(sessionSaves.length, 1, "making another model the default keeps this chat on its model");
+    assert.equal((sessionSaves[0]![1] as { runtime: { modelId: string } }).runtime.modelId, "gamma");
+
+    const fork = { id: "s-fork", type: "dm", scopeId: "personal:tester", threadRef: "web:tester:fork", createdAt: 2 };
+    sessionRows.push(fork);
+    const sourceRuntime = { harnessId: "pi", modelId: "beta", effortLevel: "high" };
+    sessionsState.list = [{ ...row, runtime: sourceRuntime }, { ...fork }];
+    sessionSaves.length = 0;
+    composer!.carryModelPick("web:tester:picked", "web:tester:fork");
+    for (let i = 0; i < 20 && !sessionSaves.length; i++) await tick();
+    assert.deepEqual(
+      sessionSaves,
+      [["/api/sessions/s-fork", { runtime: sourceRuntime }]],
+      "a fork keeps its source's model",
+    );
     sessionsState.list = [];
+    await composer!.refreshRuntimeSelection(null, agent, true);
     ctx.chat.state.threadRef = "web:tester:server-default";
     await mount();
     (ctx.chat as unknown as { turnRuntime: () => unknown }).turnRuntime = () => ({

@@ -1303,17 +1303,23 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (!same) await deps.sessions.setRuntime(session.id, pinned ?? null);
         savedRuntime = pinned;
       }
-      const servable = async (runtime: typeof savedRuntime): Promise<boolean> =>
-        !!runtime &&
-        isHarnessId(runtime.harnessId) &&
-        !(await deps.validateScheduledRuntime?.(
-          scopeId,
-          { ...runtime, harnessId: runtime.harnessId },
-          undefined,
-          actor.id,
-        ));
-      const sessionRuntime =
-        !input.model && !input.harness && (await servable(savedRuntime)) ? savedRuntime : undefined;
+      const sessionRuntimeProblem = async (runtime: NonNullable<typeof savedRuntime>): Promise<string | null> =>
+        isHarnessId(runtime.harnessId)
+          ? ((await deps.validateScheduledRuntime?.(
+              scopeId,
+              { ...runtime, harnessId: runtime.harnessId },
+              undefined,
+              actor.id,
+            )) ?? null)
+          : `harness ${runtime.harnessId} is not available`;
+      let sessionRuntime = !input.model && !input.harness ? savedRuntime : undefined;
+      const skipped = sessionRuntime ? await sessionRuntimeProblem(sessionRuntime) : null;
+      if (sessionRuntime && skipped) {
+        console.log(
+          `[session-runtime] session=${session.id} actor=${actor.id} skipped ${sessionRuntime.harnessId}/${sessionRuntime.modelId}: ${skipped}`,
+        );
+        sessionRuntime = undefined;
+      }
       const turnModel = input.model ?? sessionRuntime?.modelId;
       const turnHarness = input.harness ?? sessionRuntime?.harnessId;
       const turnEffort = input.thinkingLevel ?? sessionRuntime?.effortLevel;
