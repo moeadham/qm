@@ -439,6 +439,41 @@ test("an unmentioned thread message shows typing once QM decides to answer it", 
   assert.ok(api.typed.includes(thread));
 });
 
+test("an unmentioned thread message QM chose to answer reports its failure in the thread", async () => {
+  const h = harness({
+    replying: true,
+    result: () => ({ status: "failed", reason: "Provider is not configured: openai-codex" }),
+  });
+  const api = new FakeDiscord();
+  const thread = "800000000000000021";
+  api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({
+    ...dm(ALICE, "what model are you?"),
+    channel_id: thread,
+    guild_id: GUILD,
+    id: "800000000000000022",
+  });
+  await until(() => api.sent.length === 1, "failure note");
+  await plugin.stop();
+
+  assert.match(api.sent[0]!.content, /^⚠️ /);
+});
+
+test("an unmentioned thread message QM stayed quiet on posts nothing when it fails", async () => {
+  const h = harness({ result: () => ({ status: "failed", reason: "boom" }) });
+  const api = new FakeDiscord();
+  const thread = "800000000000000023";
+  api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({ ...dm(ALICE, "nice"), channel_id: thread, guild_id: GUILD, id: "800000000000000024" });
+  await until(() => h.turns.length === 1, "turn");
+  await new Promise((r) => setTimeout(r, 30));
+  await plugin.stop();
+
+  assert.equal(api.sent.length, 0);
+});
+
 test("a streamed reply posts one placeholder, edits it as text grows, records it as the run's edit ref, and finishes in place", async () => {
   const h = harness({ snapshots: ["Thinking", "Thinking about it"], result: () => ({ status: "ok", reply: "Done." }) });
   const { api, handlers, plugin } = await boot(h);

@@ -36,7 +36,7 @@ import type {
   PendingApprovalRecord,
 } from "../types.ts";
 import { scopeId as toScopeId, personalScope } from "../types.ts";
-import { desktopClientForTurn, isSessionTurn, turnOriginRequestFields } from "./turn-origin.ts";
+import { desktopClientForTurn, isLiveSpeaker, isSessionTurn, turnOriginRequestFields } from "./turn-origin.ts";
 import { resolveTurnFastMode, turnRuntimePurpose } from "./turn-options.ts";
 import { orgId } from "../config.ts";
 import { renderGatewayContext } from "./gateway-context.ts";
@@ -3163,7 +3163,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             : (input.modelAccount ?? (await deps.config?.getModelAccountDurable(actor.id)) ?? "company");
           if (
             userCredStore &&
-            (humanInput || delegatedModelOrigin !== undefined || ownerModelAuth) &&
+            ((isLiveSpeaker(input.origin) && !sessionTurn) || delegatedModelOrigin !== undefined || ownerModelAuth) &&
             account !== "company"
           ) {
             const [anthCred, oaiCred] = await Promise.all([

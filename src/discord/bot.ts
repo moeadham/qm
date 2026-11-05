@@ -327,7 +327,7 @@ export function createDiscordBot(deps: {
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));
         console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
-        if (addressed && !quiet)
+        if (typing && !quiet)
           await writer
             .finish(`⚠️ ${turnFailureText(error)}`, `failure:${key}`)
             .catch(swallowAs("discord: failure note", undefined));
@@ -336,7 +336,7 @@ export function createDiscordBot(deps: {
       if (!accepted) accept();
       if (result.steered) return { result, accepted };
       const reply =
-        quiet && result.status !== "ok" ? "" : replyText(result, addressed, body.conversation.kind === "dm");
+        quiet && result.status !== "ok" ? "" : replyText(result, typing, body.conversation.kind === "dm");
       const runId = queuedRunId;
       try {
         await writer.finish(reply, runId ? `run:${runId}` : key);

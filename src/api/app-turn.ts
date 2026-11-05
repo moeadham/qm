@@ -9,7 +9,13 @@ import { scopeId } from "../types.ts";
 import { rosterAdmits } from "../resolution/scope-membership.ts";
 import { isHalt, routeWake, type Wake } from "../wake/wake.ts";
 import type { OrchestratorInput } from "../core/orchestrator.ts";
-import { desktopClientForTurn, isPersonAuthored, isSessionTurn, resolveTurnOrigin } from "../core/turn-origin.ts";
+import {
+  desktopClientForTurn,
+  isLiveSpeaker,
+  isPersonAuthored,
+  isSessionTurn,
+  resolveTurnOrigin,
+} from "../core/turn-origin.ts";
 import { conversationScope } from "../resolution/resolution-service.ts";
 import { isTerminal, leaseLapsed } from "../runs/run-store.ts";
 import type { SessionStateEvent } from "../runs/session-state-bus.ts";
@@ -208,7 +214,7 @@ export function createTurnMethods(
       const modelAccount =
         !req.externalSlack &&
         deps.userModelCredentials &&
-        ((origin.kind === "human" && !sessionTurn) || (origin.kind === "automation" && origin.useOwnerModelAuth))
+        ((isLiveSpeaker(origin) && !sessionTurn) || (origin.kind === "automation" && origin.useOwnerModelAuth))
           ? await deps.config.getModelAccountDurable(actor.id)
           : "company";
       const individualAuth = modelAccount !== "company";

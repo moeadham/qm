@@ -613,6 +613,16 @@ test("a session's saved model reaches a ChatGPT-subscription user's non-web turn
     const bob = await built.app.turn({ ...thread, actor: { externalId: "internal:bob" }, text: "my turn" });
     assert.equal(bob.status, "ok", JSON.stringify(bob));
     assert.equal(claudeSeen.length, claudeBefore + 1, "bob's turn runs on his own Claude subscription");
+
+    const overheard = await built.app.turn({
+      ...thread,
+      actor: { externalId: "internal:alice" },
+      origin: { kind: "ambient", live: true },
+      text: "what model are you?",
+    });
+    assert.equal(overheard.status, "ok", JSON.stringify(overheard));
+    assert.equal(seen.at(-1)?.runtime?.modelId, "codex/gpt-6-astra");
+    assert.deepEqual(seen.at(-1)?.providerKeys, { "openai-codex": "test-access" });
   } finally {
     await built.runtime.stop();
   }
