@@ -97,7 +97,10 @@ class FakeDiscord implements DiscordApi {
   async remove(_channelId: string, messageId: string) {
     this.removed.push(messageId);
   }
-  async typing() {}
+  typed: string[] = [];
+  async typing(channelId: string) {
+    this.typed.push(channelId);
+  }
   async openDm(userId: string) {
     const dm = this.dmFor.get(userId) ?? `dm-${userId}`;
     this.dmFor.set(userId, dm);
@@ -170,6 +173,7 @@ function harness(opts: {
   lease?: LeaderLease;
   result?: (body: TurnRequest) => TurnResult;
   snapshots?: string[];
+  replying?: boolean;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
   keychain?: KeychainApprovalView;
@@ -221,6 +225,7 @@ function harness(opts: {
       return { status: "queued", runId: `run-${h.turns.length}` };
     },
     async waitRun(runId: string, hooks: RunHooks = {}) {
+      if (opts.replying) hooks.onReplying?.();
       for (const s of opts.snapshots ?? []) {
         hooks.onSnapshot?.(s);
         await new Promise((r) => setTimeout(r, 5));
@@ -408,6 +413,26 @@ test("a reply in a thread the bot owns is heard without a mention as an ambient 
   assert.equal(api.threads.length, 0);
   assert.equal(api.sent.length, 0);
   assert.deepEqual(h.acked, []);
+  assert.deepEqual(api.typed, [], "a turn that stays quiet never shows typing");
+});
+
+test("an unmentioned thread message shows typing once QM decides to answer it", async () => {
+  const h = harness({ replying: true });
+  const api = new FakeDiscord();
+  const thread = "800000000000000019";
+  api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({
+    ...dm(ALICE, "and the second one?"),
+    channel_id: thread,
+    guild_id: GUILD,
+    id: "800000000000000020",
+  });
+  await until(() => api.sent.length === 1, "reply");
+  await plugin.stop();
+
+  assert.equal(api.sent[0]!.content, "hello back");
+  assert.ok(api.typed.includes(thread));
 });
 
 test("a streamed reply posts one placeholder, edits it as text grows, records it as the run's edit ref, and finishes in place", async () => {

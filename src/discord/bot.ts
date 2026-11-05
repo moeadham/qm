@@ -300,7 +300,14 @@ export function createDiscordBot(deps: {
       accepted = true;
       gate?.persisted();
     };
-    const stopTyping = addressed ? startTyping(channelId) : () => {};
+    let finished = false;
+    let typing = addressed;
+    let stopTyping = addressed ? startTyping(channelId) : () => {};
+    const typeOnceReplying = (): void => {
+      if (finished || typing) return;
+      typing = true;
+      stopTyping = startTyping(channelId);
+    };
     try {
       let result: TurnResult;
       try {
@@ -311,6 +318,7 @@ export function createDiscordBot(deps: {
             accept();
           },
           onSteered: accept,
+          onReplying: typeOnceReplying,
           onSnapshot: (snapshot) =>
             writer.stream(snapshot, async (messageId) => {
               if (queuedRunId) await core.reportRunEditRef(queuedRunId, messageId);
@@ -343,6 +351,7 @@ export function createDiscordBot(deps: {
       if (runId && hasRunDelivery(result)) flow.ackRunDelivery(runId);
       return { result, accepted };
     } finally {
+      finished = true;
       stopTyping();
     }
   }
