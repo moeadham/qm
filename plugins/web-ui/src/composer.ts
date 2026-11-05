@@ -493,6 +493,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     if (changedIdentity) {
       effortOverride = undefined;
       fastModeOverride = undefined;
+      loadoutPick = undefined;
       restoredLoadout = undefined;
       loadoutRestored = false;
       runtimeIdentity = identity;
