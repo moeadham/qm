@@ -8,7 +8,7 @@ import {
   GatewayIntentBits,
   MessageFlags,
   type APIActionRowComponent,
-  type APIButtonComponentWithCustomId,
+  type APIComponentInMessageActionRow,
   type APIChannel,
   type APIInteraction,
   type APIMessage,
@@ -50,6 +50,12 @@ export interface DiscordButton {
   style: "primary" | "secondary" | "danger";
 }
 
+export interface DiscordSelect {
+  id: string;
+  placeholder: string;
+  options: Array<{ label: string; value: string; description?: string; selected?: boolean }>;
+}
+
 export interface DiscordApi {
   me(): Promise<{ id: string; username: string }>;
   send(
@@ -66,7 +72,11 @@ export interface DiscordApi {
   recentMessages(channelId: string, limit: number): Promise<DiscordMessage[]>;
   registerCommands(commands: RESTPutAPIApplicationCommandsJSONBody): Promise<void>;
   deferEphemeral(interactionId: string, token: string): Promise<void>;
-  editReply(token: string, content: string): Promise<void>;
+  editReply(
+    token: string,
+    content: string,
+    opts?: { buttons?: DiscordButton[]; select?: DiscordSelect },
+  ): Promise<void>;
   deferUpdate(interactionId: string, token: string): Promise<void>;
   autocomplete(interactionId: string, token: string, choices: Array<{ name: string; value: string }>): Promise<void>;
   followUpEphemeral(token: string, content: string): Promise<void>;
@@ -130,24 +140,42 @@ const BUTTON_STYLES = {
   danger: ButtonStyle.Danger,
 } as const;
 
-function components(buttons: DiscordButton[] | undefined): {
-  components?: APIActionRowComponent<APIButtonComponentWithCustomId>[];
+function components(
+  buttons: DiscordButton[] | undefined,
+  select?: DiscordSelect,
+): {
+  components?: APIActionRowComponent<APIComponentInMessageActionRow>[];
 } {
-  if (!buttons) return {};
-  if (!buttons.length) return { components: [] };
-  return {
-    components: [
-      {
-        type: ComponentType.ActionRow,
-        components: buttons.map((b) => ({
-          type: ComponentType.Button,
-          custom_id: b.id,
-          label: b.label,
-          style: BUTTON_STYLES[b.style],
-        })),
-      },
-    ],
-  };
+  if (!buttons && !select) return {};
+  const rows: APIActionRowComponent<APIComponentInMessageActionRow>[] = [];
+  if (select)
+    rows.push({
+      type: ComponentType.ActionRow,
+      components: [
+        {
+          type: ComponentType.StringSelect,
+          custom_id: select.id,
+          placeholder: select.placeholder,
+          options: select.options.map((o) => ({
+            label: o.label,
+            value: o.value,
+            ...(o.description ? { description: o.description } : {}),
+            ...(o.selected ? { default: true } : {}),
+          })),
+        },
+      ],
+    });
+  if (buttons?.length)
+    rows.push({
+      type: ComponentType.ActionRow,
+      components: buttons.map((b) => ({
+        type: ComponentType.Button,
+        custom_id: b.id,
+        label: b.label,
+        style: BUTTON_STYLES[b.style],
+      })),
+    });
+  return { components: rows };
 }
 
 function toChannel(c: APIChannel): DiscordChannel {
@@ -219,8 +247,11 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
     async deferEphemeral(interactionId, token) {
       await api.interactions.defer(interactionId, token, { flags: MessageFlags.Ephemeral });
     },
-    async editReply(token, content) {
-      await api.interactions.editReply(applicationId, token, { content });
+    async editReply(token, content, opts = {}) {
+      await api.interactions.editReply(applicationId, token, {
+        content,
+        ...components(opts.buttons ?? (opts.select ? [] : undefined), opts.select),
+      });
     },
     async autocomplete(interactionId, token, choices) {
       await api.interactions.createAutocompleteResponse(interactionId, token, { choices });

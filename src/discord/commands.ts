@@ -6,7 +6,8 @@ import {
   type RESTPutAPIApplicationCommandsJSONBody,
 } from "@discordjs/core";
 import { errMessage } from "../util/errors.ts";
-import type { DiscordApi } from "./api.ts";
+import type { DiscordApi, DiscordButton, DiscordSelect } from "./api.ts";
+import { CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
 import { threadRefForChannel } from "./bot.ts";
 import type { DiscordCoreClient, ModelMenu } from "./core.ts";
 import { safeClip } from "../surfaces/safe-cut.ts";
@@ -21,6 +22,129 @@ const MODEL_AFTER_FIRST_MESSAGE = "Send me a message here first, then run `/qm m
 
 async function modelThread(api: DiscordApi, channelId: string): Promise<string | undefined> {
   return threadRefForChannel(await api.channel(channelId));
+}
+
+type Reply = string | { content: string; buttons: DiscordButton[]; select?: DiscordSelect };
+
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  openrouter: "OpenRouter",
+  google: "Google",
+  xai: "xAI",
+  "qm:gateway": "Gateway",
+};
+
+function modelGroup(menu: ModelMenu, harnessId: string, modelId: string): { key: string; label: string } {
+  if (harnessId === "claude") return { key: "claude", label: "Claude" };
+  const provider = String((menu.modelCatalog[modelId] as { provider?: unknown } | undefined)?.provider ?? "other");
+  if (provider === CODEX_SUBSCRIPTION_PROVIDER || modelId.startsWith("codex/"))
+    return { key: "codex", label: "Codex (ChatGPT subscription)" };
+  return { key: `${harnessId}~${provider}`, label: PROVIDER_LABELS[provider] ?? provider };
+}
+
+function modelGroups(menu: ModelMenu) {
+  const groups = new Map<string, { label: string; models: Array<{ harnessId: string; modelId: string }> }>();
+  for (const harnessId of menu.approvedHarnesses)
+    for (const modelId of menu.modelsByHarness[harnessId] ?? []) {
+      const { key, label } = modelGroup(menu, harnessId, modelId);
+      const group = groups.get(key) ?? { label, models: [] };
+      group.models.push({ harnessId, modelId });
+      groups.set(key, group);
+    }
+  return groups;
+}
+
+function plainLabel(menu: ModelMenu, modelId: string): string {
+  const meta = menu.modelCatalog[modelId];
+  return meta?.label ?? meta?.name ?? modelId;
+}
+
+const CANCEL_BUTTON: DiscordButton = { id: "qm:model:cancel", label: "Cancel", style: "danger" };
+
+async function modelPicker(
+  core: DiscordCoreClient,
+  api: DiscordApi,
+  principal: string,
+  channelId: string,
+  groupKey?: string,
+): Promise<Reply> {
+  const threadRef = await modelThread(api, channelId);
+  if (!threadRef) return NO_MODEL_HERE;
+  const found = await core.modelMenu(principal, threadRef);
+  if (found === undefined) return "Model selection isn't available on this QM.";
+  if (!found) return MODEL_AFTER_FIRST_MESSAGE;
+  const { menu, session, current } = found;
+  const groups = modelGroups(menu);
+  const currentGroup = modelGroup(menu, current.harnessId, current.modelId);
+  const header = `⚙️ **Model for this conversation**\nCurrent: **${plainLabel(menu, current.modelId)}** · ${currentGroup.label}${session.runtime ? "" : " (default)"}`;
+  const group = groupKey ? groups.get(groupKey) : undefined;
+  if (!group)
+    return {
+      content: `${header}\n\nChoose a provider:`,
+      select: {
+        id: "qm:model:group",
+        placeholder: "Choose a provider…",
+        options: [...groups].slice(0, CHOICE_LIMIT).map(([key, g]) => ({
+          label: safeClip(
+            `${g.label} (${g.models.length} model${g.models.length === 1 ? "" : "s"})`,
+            CHOICE_TEXT_LIMIT,
+          ),
+          value: key,
+          ...(key === currentGroup.key ? { description: "current" } : {}),
+        })),
+      },
+      buttons: [
+        ...(session.runtime ? [{ id: "qm:model:default", label: "Use default", style: "secondary" as const }] : []),
+        CANCEL_BUTTON,
+      ],
+    };
+  const shown = group.models.filter((m) => `${m.harnessId}:${m.modelId}`.length <= CHOICE_TEXT_LIMIT);
+  const more = shown.length > CHOICE_LIMIT ? "\nShowing the first 25; use `/qm model name:` for the others." : "";
+  return {
+    content: `${header}\n\nChoose a ${group.label} model:${more}`,
+    select: {
+      id: "qm:model:pick",
+      placeholder: `Choose a ${group.label} model…`,
+      options: shown.slice(0, CHOICE_LIMIT).map((m) => ({
+        label: safeClip(plainLabel(menu, m.modelId), CHOICE_TEXT_LIMIT),
+        value: `${m.harnessId}:${m.modelId}`,
+        ...(m.harnessId === current.harnessId && m.modelId === current.modelId ? { selected: true } : {}),
+      })),
+    },
+    buttons: [{ id: "qm:model:back", label: "Back", style: "secondary" }, CANCEL_BUTTON],
+  };
+}
+
+async function handleModelPicker(
+  core: DiscordCoreClient,
+  api: DiscordApi,
+  interaction: APIMessageComponentInteraction,
+): Promise<void> {
+  await api.deferUpdate(interaction.id, interaction.token);
+  const show = (reply: Reply): Promise<void> =>
+    typeof reply === "string"
+      ? api.editReply(interaction.token, reply, { buttons: [] })
+      : api.editReply(interaction.token, reply.content, {
+          buttons: reply.buttons,
+          ...(reply.select ? { select: reply.select } : {}),
+        });
+  const userId = interaction.member?.user.id ?? interaction.user?.id;
+  const principal = userId ? await core.linkedPrincipal(userId) : undefined;
+  const channelId = interaction.channel?.id ?? interaction.channel_id;
+  if (!principal || !channelId) return show("Link your Discord account first with `/qm link`.");
+  const { custom_id: id } = interaction.data;
+  const picked = "values" in interaction.data ? interaction.data.values[0] : undefined;
+  try {
+    if (id === "qm:model:cancel") return await show("No change.");
+    if (id === "qm:model:group") return await show(await modelPicker(core, api, principal, channelId, picked));
+    if (id === "qm:model:back") return await show(await modelPicker(core, api, principal, channelId));
+    if (id === "qm:model:pick" && picked) return await show(await modelAnswer(core, api, principal, channelId, picked));
+    if (id === "qm:model:default") return await show(await modelAnswer(core, api, principal, channelId, "default"));
+  } catch (error) {
+    console.error(`[discord] model picker ${id} failed:`, errMessage(error));
+    await show("That didn't work. Try again in a moment.");
+  }
 }
 
 function modelLabel(menu: ModelMenu, harnessId: string, modelId: string): string {
@@ -135,12 +259,12 @@ async function answer(
   subcommand: string | undefined,
   channelId: string | undefined,
   value: string | undefined,
-): Promise<string> {
+): Promise<Reply> {
   const linked = await core.linkedPrincipal(userId);
   if (subcommand === "model") {
     if (!linked) return "Link your Discord account first with `/qm link`.";
     if (!channelId) return "Run `/qm model` in my DM or a channel I work in.";
-    return modelAnswer(core, api, linked, channelId, value);
+    return value ? modelAnswer(core, api, linked, channelId, value) : modelPicker(core, api, linked, channelId);
   }
   if (subcommand === "link") {
     if (linked) return `Your Discord account is already linked to ${linked}.`;
@@ -177,6 +301,7 @@ export async function handleInteraction(
   const { core, api } = deps;
   if (interaction.type === InteractionType.MessageComponent) {
     if (interaction.guild_id && !deps.guildIds.has(interaction.guild_id)) return;
+    if (interaction.data.custom_id.startsWith("qm:model:")) return handleModelPicker(core, api, interaction);
     return deps.buttons.handle(interaction);
   }
   if (interaction.type === InteractionType.ApplicationCommandAutocomplete) {
@@ -201,15 +326,20 @@ export async function handleInteraction(
   if (!userId) return;
   const option = "options" in interaction.data ? interaction.data.options?.[0] : undefined;
   await api.deferEphemeral(interaction.id, interaction.token);
-  let content: string;
+  let reply: Reply;
   try {
-    content =
+    reply =
       interaction.guild_id && !deps.guildIds.has(interaction.guild_id)
         ? "QM isn't enabled in this server."
         : await answer(core, api, userId, option?.name, interaction.channel?.id, optionValue(option));
   } catch (error) {
     console.error(`[discord] /qm ${option?.name ?? "?"} failed:`, errMessage(error));
-    content = "That didn't work. Try again in a moment.";
+    reply = "That didn't work. Try again in a moment.";
   }
-  await api.editReply(interaction.token, content);
+  if (typeof reply === "string") await api.editReply(interaction.token, reply);
+  else
+    await api.editReply(interaction.token, reply.content, {
+      buttons: reply.buttons,
+      ...(reply.select ? { select: reply.select } : {}),
+    });
 }

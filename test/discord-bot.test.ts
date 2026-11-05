@@ -9,6 +9,7 @@ import {
   createDiscordGateway,
   type DiscordApi,
   type DiscordButton,
+  type DiscordSelect,
   type DiscordChannel,
   type DiscordGatewayHandlers,
   type DiscordMessage,
@@ -122,8 +123,10 @@ class FakeDiscord implements DiscordApi {
   async registerCommands() {}
   failEdits = 0;
   async deferEphemeral() {}
-  async editReply(_token: string, content: string) {
+  replies: Array<{ content: string; buttons?: DiscordButton[]; select?: DiscordSelect }> = [];
+  async editReply(_token: string, content: string, opts: { buttons?: DiscordButton[]; select?: DiscordSelect } = {}) {
     this.ephemeral.push(content);
+    this.replies.push({ content, ...opts });
   }
   suggestions: Array<Array<{ name: string; value: string }>> = [];
   async autocomplete(_id: string, _token: string, choices: Array<{ name: string; value: string }>) {
@@ -1066,7 +1069,7 @@ test("/qm model in a DM sets only this conversation's session, from the user's C
     assert.ok(api.suggestions[0]!.some((c) => c.value === "pi:codex/gpt-5.6-sol"));
     assert.ok(api.suggestions[0]!.every((c) => c.value === "default" || c.value.startsWith("pi:codex/")));
 
-    assert.match(await answer(), /^This conversation uses \*\*.+\*\* \(the default\)\./);
+    assert.match(await answer(), /^⚙️ \*\*Model for this conversation\*\*\nCurrent: \*\*.+\*\* · .+ \(default\)/);
     await built.sessions.setRuntime(session.id, {
       harnessId: "pi",
       modelId: "codex/gpt-5.5",
@@ -1157,4 +1160,75 @@ test("a refused approval replay is reported once, on the card, not again in the 
     api.sent.some((m) => m.content.includes("⚠️")),
     false,
   );
+});
+
+test("/qm model with no name walks provider and model dropdowns and saves the pick on this conversation", async () => {
+  const { built, runtime } = await subscribedApp("openai");
+  const threadRef = `discord:dm:${DM}`;
+  const session = await built.sessions.getOrCreateByThread(
+    threadRef,
+    "dm",
+    "personal:alice@example.com" as never,
+    undefined,
+    "discord",
+  );
+  await built.sessions.addParticipant(session.id, "alice@example.com");
+  const h = harness({ runtime, sessions: built.sessions });
+  const api = new FakeDiscord();
+  api.channels.set(DM, { id: DM, type: 1 });
+  const { handlers, plugin } = await boot(h, api);
+  const pickerClick = async (customId: string, values?: string[]) => {
+    const before = api.replies.length;
+    handlers.onInteraction({
+      id: `pick-${customId}-${values?.join() ?? ""}`,
+      token: "tok",
+      type: 3,
+      data: { custom_id: customId, component_type: values ? 3 : 2, ...(values ? { values } : {}) },
+      message: { id: "picker", channel_id: DM },
+      channel: { id: DM },
+      user: { id: ALICE, username: "alice", global_name: null },
+    } as unknown as APIInteraction);
+    await until(() => api.replies.length > before, customId);
+    return api.replies.at(-1)!;
+  };
+  try {
+    handlers.onInteraction(modelCommand(ALICE, DM));
+    await until(() => api.replies.length === 1, "picker");
+    const providers = api.replies[0]!;
+    assert.match(providers.content, /Model for this conversation[\s\S]*\(default\)[\s\S]*Choose a provider/);
+    assert.equal(providers.select?.id, "qm:model:group");
+    const codex = providers.select!.options.find((o) => o.value === "codex");
+    assert.match(codex!.label, /^Codex \(ChatGPT subscription\) \(\d+ models?\)$/);
+    assert.equal(codex!.description, "current");
+    assert.deepEqual(
+      providers.buttons?.map((b) => b.id),
+      ["qm:model:cancel"],
+    );
+
+    const models = await pickerClick("qm:model:group", ["codex"]);
+    assert.equal(models.select?.id, "qm:model:pick");
+    assert.ok(models.select!.options.every((o) => o.value.startsWith("pi:codex/")));
+    assert.equal(models.select!.options.filter((o) => o.selected).length, 1);
+    assert.deepEqual(
+      models.buttons?.map((b) => b.id),
+      ["qm:model:back", "qm:model:cancel"],
+    );
+
+    const done = await pickerClick("qm:model:pick", ["pi:codex/gpt-5.6-sol"]);
+    assert.match(done.content, /^Done\. This conversation now uses \*\*/);
+    assert.deepEqual(done.buttons, []);
+    assert.equal((await built.sessions.getByThread(threadRef))?.runtime?.modelId, "codex/gpt-5.6-sol");
+
+    handlers.onInteraction({ ...(modelCommand(ALICE, DM) as object), id: "picker-again" } as APIInteraction);
+    await until(() => api.replies.length === 4, "picker again");
+    assert.deepEqual(
+      api.replies.at(-1)!.buttons?.map((b) => b.id),
+      ["qm:model:default", "qm:model:cancel"],
+    );
+    assert.match((await pickerClick("qm:model:default")).content, /uses the default model again/);
+    assert.equal((await built.sessions.getByThread(threadRef))?.runtime, undefined);
+    assert.equal((await pickerClick("qm:model:cancel")).content, "No change.");
+  } finally {
+    await plugin.stop();
+  }
 });
