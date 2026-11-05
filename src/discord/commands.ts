@@ -47,13 +47,20 @@ function modelGroups(menu: ModelMenu) {
   const groups = new Map<string, { label: string; models: Array<{ harnessId: string; modelId: string }> }>();
   for (const harnessId of menu.approvedHarnesses)
     for (const modelId of menu.modelsByHarness[harnessId] ?? []) {
+      if (`${harnessId}:${modelId}`.length > CHOICE_TEXT_LIMIT) continue;
       const { key, label } = modelGroup(menu, harnessId, modelId);
       const group = groups.get(key) ?? { label, models: [] };
       group.models.push({ harnessId, modelId });
       groups.set(key, group);
     }
+  const labels = [...groups.values()].map((g) => g.label);
+  for (const [key, group] of groups)
+    if (labels.filter((label) => label === group.label).length > 1)
+      group.label = `${group.label} (${key.split("~")[0]})`;
   return groups;
 }
+
+const NO_MODELS = "You don't have any models to choose from here.";
 
 function plainLabel(menu: ModelMenu, modelId: string): string {
   const meta = menu.modelCatalog[modelId];
@@ -78,6 +85,7 @@ async function modelPicker(
   const groups = modelGroups(menu);
   const currentGroup = modelGroup(menu, current.harnessId, current.modelId);
   const header = `⚙️ **Model for this conversation**\nCurrent: **${plainLabel(menu, current.modelId)}** · ${currentGroup.label}${session.runtime ? "" : " (default)"}`;
+  if (!groups.size) return NO_MODELS;
   const group = groupKey ? groups.get(groupKey) : undefined;
   if (!group)
     return {
@@ -99,7 +107,7 @@ async function modelPicker(
         CANCEL_BUTTON,
       ],
     };
-  const shown = group.models.filter((m) => `${m.harnessId}:${m.modelId}`.length <= CHOICE_TEXT_LIMIT);
+  const shown = group.models;
   const more = shown.length > CHOICE_LIMIT ? "\nShowing the first 25; use `/qm model name:` for the others." : "";
   return {
     content: `${header}\n\nChoose a ${group.label} model:${more}`,
@@ -158,19 +166,14 @@ async function modelAnswer(
   api: DiscordApi,
   principal: string,
   channelId: string,
-  query: string | undefined,
+  query: string,
 ): Promise<string> {
   const threadRef = await modelThread(api, channelId);
   if (!threadRef) return NO_MODEL_HERE;
   const found = await core.modelMenu(principal, threadRef);
   if (found === undefined) return "Model selection isn't available on this QM.";
   if (!found) return MODEL_AFTER_FIRST_MESSAGE;
-  const { menu, session, current } = found;
-  if (!query)
-    return [
-      `This conversation uses **${modelLabel(menu, current.harnessId, current.modelId)}**${session.runtime ? "" : " (the default)"}.`,
-      "Change it with `/qm model name:` (start typing to search your models), or `default` to go back to the default.",
-    ].join("\n");
+  const { menu } = found;
   const result = await core.setModel(principal, threadRef, query.trim());
   if (result.ok)
     return result.choice

@@ -6,6 +6,7 @@ import type { APIInteraction } from "@discordjs/core";
 import { startDiscordPlugin, assertOneChatPlatform, discordConfigFromEnv } from "../src/discord/index.ts";
 import { createDiscordCoreClient, type DiscordCoreClient } from "../src/discord/core.ts";
 import {
+  components,
   createDiscordGateway,
   type DiscordApi,
   type DiscordButton,
@@ -1231,4 +1232,58 @@ test("/qm model with no name walks provider and model dropdowns and saves the pi
   } finally {
     await plugin.stop();
   }
+});
+
+test("Discord components put a select in its own row above the buttons, and an empty list clears them", () => {
+  assert.deepEqual(components(undefined), {});
+  assert.deepEqual(components([]), { components: [] });
+  assert.deepEqual(
+    components([{ id: "qm:model:cancel", label: "Cancel", style: "danger" }], {
+      id: "qm:model:pick",
+      placeholder: "Choose…",
+      options: [
+        { label: "Sol", value: "pi:codex/gpt-5.6-sol", selected: true },
+        { label: "Terra", value: "pi:codex/gpt-6.1-terra", description: "current" },
+      ],
+    }),
+    {
+      components: [
+        {
+          type: 1,
+          components: [
+            {
+              type: 3,
+              custom_id: "qm:model:pick",
+              placeholder: "Choose…",
+              options: [
+                { label: "Sol", value: "pi:codex/gpt-5.6-sol", default: true },
+                { label: "Terra", value: "pi:codex/gpt-6.1-terra", description: "current" },
+              ],
+            },
+          ],
+        },
+        { type: 1, components: [{ type: 2, custom_id: "qm:model:cancel", label: "Cancel", style: 4 }] },
+      ],
+    },
+  );
+});
+
+test("/qm model with no models available answers in words instead of sending an empty dropdown", async () => {
+  const h = harness({});
+  h.core = {
+    ...h.core,
+    modelMenu: async () => ({
+      session: { id: "s1" } as never,
+      menu: { approvedHarnesses: ["pi"], modelsByHarness: { pi: [] }, modelCatalog: {} } as never,
+      current: { harnessId: "pi", modelId: "none" },
+    }),
+  };
+  const api = new FakeDiscord();
+  api.channels.set(DM, { id: DM, type: 1 });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onInteraction(modelCommand(ALICE, DM));
+  await until(() => api.replies.length === 1, "reply");
+  await plugin.stop();
+  assert.equal(api.replies[0]!.content, "You don't have any models to choose from here.");
+  assert.equal(api.replies[0]!.select, undefined);
 });

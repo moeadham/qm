@@ -140,7 +140,7 @@ const BUTTON_STYLES = {
   danger: ButtonStyle.Danger,
 } as const;
 
-function components(
+export function components(
   buttons: DiscordButton[] | undefined,
   select?: DiscordSelect,
 ): {
