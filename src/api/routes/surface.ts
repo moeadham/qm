@@ -4,6 +4,8 @@ import { suggestedActivityRoutes } from "./suggested-activities.ts";
 import { runtimeFallback, runtimeConfigBody, userRuntimeConfigBody, webuiModelEnabled } from "../runtime-config.ts";
 import { canReadNotebook, searchAcrossScopes } from "../../memory/cross-scope.ts";
 import { sessionSharingRoutes } from "./session-sharing.ts";
+import { setSessionRuntime } from "../session-runtime.ts";
+import type { RuntimeChoice } from "../../harness/harness.ts";
 import type { Grant, PendingApproval, ScopeId, Session } from "../../types.ts";
 import { parseScopeId, scopeId as makeScopeId } from "../../types.ts";
 import type { Skill, SkillResolution } from "../../skills/skill-store.ts";
@@ -85,6 +87,39 @@ async function detachSession(ctx: ApiCtx): Promise<void> {
   const out = await app.detachSession(id, principalId);
   if (!out) return sendJson(res, 404, { error: "not_found" });
   return sendJson(res, 200, out);
+}
+
+async function putSessionRuntime(ctx: ApiCtx): Promise<void> {
+  const { res, deps, body } = ctx;
+  if (!deps.sessions || !deps.config || !isObj(body)) return sendJson(res, 400, { error: "bad_request" });
+  const { principalId, harnessId, modelId, effortLevel, fastMode } = body;
+  if (typeof principalId !== "string" || !principalId)
+    return sendJson(res, 400, { error: "bad_request", message: "principalId required" });
+  let choice: RuntimeChoice | null = null;
+  if (body.inherit !== true) {
+    if (
+      !isHarnessId(harnessId) ||
+      typeof modelId !== "string" ||
+      (effortLevel !== undefined && typeof effortLevel !== "string") ||
+      (fastMode !== undefined && typeof fastMode !== "boolean")
+    )
+      return sendJson(res, 400, { error: "bad_request" });
+    choice = {
+      harnessId,
+      modelId,
+      ...(typeof effortLevel === "string" ? { effortLevel } : {}),
+      ...(typeof fastMode === "boolean" ? { fastMode } : {}),
+    };
+  }
+  await deps.refreshModels?.();
+  const out = await setSessionRuntime(
+    { sessions: deps.sessions, runtime: deps, ...(deps.auditLog ? { auditLog: deps.auditLog } : {}) },
+    ctx.params.id!,
+    principalId,
+    choice,
+  );
+  if (!out.ok) return sendJson(res, out.error === "not_found" ? 404 : 400, { error: out.error });
+  return sendJson(res, 200, { runtime: out.session.runtime ?? null });
 }
 
 async function cancelSessionGoal(ctx: ApiCtx): Promise<void> {
@@ -1361,6 +1396,7 @@ export const surfaceRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "POST", path: "/v1/sessions/:id/title", auth: "source", handle: regenerateSessionTitle },
   { method: "POST", path: "/v1/sessions/:id/fork", auth: "source", handle: forkSession },
   { method: "POST", path: "/v1/sessions/:id/detach", auth: "source", handle: detachSession },
+  { method: "PUT", path: "/v1/sessions/:id/runtime", auth: "source", handle: putSessionRuntime },
   { method: "POST", path: "/v1/sessions/:id/goal/cancel", auth: "source", handle: cancelSessionGoal },
   { method: "GET", path: "/v1/sessions/:id/approvals", auth: "source", handle: listSessionApprovals },
   { method: "GET", path: "/v1/sessions/:id/background", auth: "source", handle: getSessionBackground },

@@ -2434,6 +2434,7 @@ export function buildApp(
     ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
     ...(config.publicWebUrl ? { portalUrl: config.publicWebUrl } : {}),
     runtime: runtimeDeps,
+    sessions,
   });
   runs.onTerminal((run) => {
     void runs

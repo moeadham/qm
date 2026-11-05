@@ -99,6 +99,7 @@ export function rowToSession(r: Record<string, unknown>): Session {
     threadRef: r.thread_ref as string,
     ...(r.surface != null ? { surface: r.surface as string } : {}),
     ...(r.client_tools ? { clientTools: r.client_tools as Session["clientTools"] } : {}),
+    ...(r.runtime ? { runtime: r.runtime as Session["runtime"] } : {}),
     createdAt: Number(r.created_at),
     ...(r.title != null ? { title: r.title as string } : {}),
     ...(r.channel_name != null ? { channelName: r.channel_name as string } : {}),
@@ -880,6 +881,10 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         id: "sessions/store/0033-client-tools",
         statements: [`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client_tools JSONB`],
       },
+      {
+        id: "sessions/store/0034-runtime",
+        statements: [`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS runtime JSONB`],
+      },
     ],
     [
       {
@@ -1102,6 +1107,13 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
 
     async setSpawnMeta(sessionId, meta): Promise<void> {
       await q("UPDATE sessions SET spawn_meta = $2 WHERE id = $1", [sessionId, JSON.stringify(meta)]);
+    },
+
+    async setRuntime(sessionId, runtime): Promise<void> {
+      await q("UPDATE sessions SET runtime = $2::jsonb WHERE id = $1", [
+        sessionId,
+        runtime ? JSON.stringify(runtime) : null,
+      ]);
     },
 
     async childrenOf(parentSessionId): Promise<Session[]> {

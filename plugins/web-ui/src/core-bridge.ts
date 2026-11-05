@@ -126,8 +126,16 @@ export interface DeliveredFile {
   artifactId?: string;
 }
 
+export interface SessionRuntime {
+  harnessId: string;
+  modelId: string;
+  effortLevel?: string;
+  fastMode?: boolean;
+}
+
 export interface CoreSession {
   id: string;
+  runtime?: SessionRuntime;
   type: "dm" | "channel" | "group";
   scopeId: string;
   threadRef: string;
@@ -531,6 +539,7 @@ export interface RunPoll {
   finishedAt?: number | null;
 }
 export interface TurnOptions {
+  pinRuntime?: boolean;
   effortLevel?: string;
   fastMode?: boolean;
   harness?: string;
@@ -1019,6 +1028,13 @@ export function makeCoreStreamFn(
   return fn as unknown as StreamFn;
 }
 
+export async function saveSessionRuntime(sessionId: string, runtime: SessionRuntime | null): Promise<void> {
+  await api(`/api/sessions/${encodeURIComponent(sessionId)}/runtime`, {
+    method: "PUT",
+    body: JSON.stringify(runtime ?? { inherit: true }),
+  });
+}
+
 export async function activeRunForThread(threadRef: string): Promise<ActiveRun> {
   const q = new URLSearchParams({ threadRef });
   const r = await api<{ runId?: string | null; run?: RunPoll | null; queued?: QueuedRun[] }>(
@@ -1222,6 +1238,7 @@ function turnRequestBody(
     ...(turnOptions.harness ? { harness: turnOptions.harness, model: model.id } : {}),
     ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(typeof turnOptions.fastMode === "boolean" ? { fastMode: turnOptions.fastMode } : {}),
+    ...(typeof turnOptions.pinRuntime === "boolean" ? { pinRuntime: turnOptions.pinRuntime } : {}),
     ...(timezone ? { timezone } : {}),
     ...(turnOptions.scopeId ? { scopeId: turnOptions.scopeId } : {}),
     ...(turnOptions.channelName ? { channelName: turnOptions.channelName } : {}),

@@ -24,6 +24,8 @@ import type { RunHooks, StoredApprovalView } from "../src/surfaces/surface-core-
 import type { KeychainApprovalView } from "../src/credentials/keychain-approval.ts";
 import type { RuntimeDeps } from "../src/api/runtime-config.ts";
 import { buildApp } from "../src/wiring.ts";
+import { createMemorySessionStore } from "../src/sessions/memory-session-store.ts";
+import type { SessionStore } from "../src/sessions/session-store.ts";
 import { testConfig } from "./support/test-config.ts";
 
 const BOT = "900000000000000001";
@@ -173,6 +175,7 @@ function harness(opts: {
   keychain?: KeychainApprovalView;
   deployRequests?: Record<string, { deploymentId: string; requesterId: string }>;
   runtime?: RuntimeDeps;
+  sessions?: SessionStore;
 }): Harness {
   const linked = opts.linked ?? { [ALICE]: "alice@example.com" };
   const h: Harness = {
@@ -208,6 +211,7 @@ function harness(opts: {
     signingSecret: SECRET,
     portalUrl: "https://qm.example.com/",
     ...(opts.runtime ? { runtime: opts.runtime } : {}),
+    sessions: opts.sessions ?? createMemorySessionStore(),
   });
   h.core = {
     ...real,
@@ -1009,15 +1013,25 @@ async function subscribedApp(provider: "openai" | "anthropic") {
   return { built, runtime };
 }
 
-test("/qm model in a DM lists and sets the user's ChatGPT subscription models for their personal scope", async () => {
+test("/qm model in a DM sets only this conversation's session, from the user's ChatGPT subscription models", async () => {
   const { built, runtime } = await subscribedApp("openai");
-  const h = harness({ runtime });
+  const threadRef = `discord:dm:${DM}`;
+  const session = await built.sessions.getOrCreateByThread(
+    threadRef,
+    "dm",
+    "personal:alice@example.com" as never,
+    undefined,
+    "discord",
+  );
+  await built.sessions.addParticipant(session.id, "alice@example.com");
+  const h = harness({ runtime, sessions: built.sessions });
   const api = new FakeDiscord();
   api.channels.set(DM, { id: DM, type: 1 });
+  api.channels.set("500000000000000009", { id: "500000000000000009", type: 1 });
   const { handlers, plugin } = await boot(h, api);
-  const answer = async (name?: string) => {
+  const answer = async (name?: string, channelId = DM) => {
     const before = api.ephemeral.length;
-    handlers.onInteraction(modelCommand(ALICE, DM, name));
+    handlers.onInteraction(modelCommand(ALICE, channelId, name));
     await until(() => api.ephemeral.length > before, `/qm model ${name ?? ""}`);
     return api.ephemeral.at(-1)!;
   };
@@ -1027,34 +1041,42 @@ test("/qm model in a DM lists and sets the user's ChatGPT subscription models fo
     assert.ok(api.suggestions[0]!.some((c) => c.value === "pi:codex/gpt-5.6-sol"));
     assert.ok(api.suggestions[0]!.every((c) => c.value === "default" || c.value.startsWith("pi:codex/")));
 
-    const other = api.suggestions[0]!.find(
-      (c) => c.value.startsWith("pi:codex/") && c.value !== "pi:codex/gpt-5.6-sol",
-    );
-    await built.config.setRuntimeSelectionLatest("personal:alice@example.com" as never, {
+    assert.match(await answer(), /^This conversation uses \*\*.+\*\* \(the default\)\./);
+    await built.sessions.setRuntime(session.id, {
       harnessId: "pi",
-      modelId: other!.value.slice("pi:".length),
+      modelId: "codex/gpt-5.5",
       effortLevel: "max",
       fastMode: false,
     });
-    assert.match(
-      await answer("pi:codex/gpt-5.6-sol"),
-      /^Done\. New turns in your DMs with me and your personal QM chats use \*\*/,
-    );
-    const saved = await built.config.getRuntimeSelectionDurable("personal:alice@example.com" as never);
+    assert.match(await answer("pi:codex/gpt-5.6-sol"), /^Done\. This conversation now uses \*\*/);
+    const saved = (await built.sessions.getByThread(threadRef))?.runtime;
     assert.equal(saved?.modelId, "codex/gpt-5.6-sol");
     assert.equal(saved?.effortLevel, "max");
-    assert.match(await answer(), /use \*\*.+\*\*\.\n/);
-    assert.match(await answer("claude-sonnet-5"), /I don't have a model called "claude-sonnet-5" for you here/);
-    assert.match(await answer("default"), /use the default model again/);
     assert.equal(await built.config.getRuntimeSelectionDurable("personal:alice@example.com" as never), null);
+    assert.match(await answer("claude-sonnet-5"), /I don't have a model called "claude-sonnet-5" for you here/);
+    assert.match(await answer("default"), /uses the default model again/);
+    assert.equal((await built.sessions.getByThread(threadRef))?.runtime, undefined);
+    assert.equal(
+      await answer("pi:codex/gpt-5.6-sol", "500000000000000009"),
+      "Send me a message here first, then run `/qm model`.",
+    );
   } finally {
     await plugin.stop();
   }
 });
 
-test("/qm model in a server thread sets the channel's model, including Claude subscription models", async () => {
+test("/qm model in a server thread sets that thread's session, including Claude subscription models", async () => {
   const { built, runtime } = await subscribedApp("anthropic");
-  const h = harness({ runtime });
+  const threadRef = `discord:ch:${CHANNEL}:thread-7`;
+  const session = await built.sessions.getOrCreateByThread(
+    threadRef,
+    "channel",
+    `channel:${CHANNEL}` as never,
+    "general",
+    "discord",
+  );
+  await built.sessions.addParticipant(session.id, "alice@example.com");
+  const h = harness({ runtime, sessions: built.sessions });
   const api = new FakeDiscord();
   api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
   api.channels.set("thread-7", { id: "thread-7", type: 11, parentId: CHANNEL, guildId: GUILD });
@@ -1064,15 +1086,19 @@ test("/qm model in a server thread sets the channel's model, including Claude su
       ...(modelCommand(ALICE, "thread-7", "claude:claude-sonnet-5") as object),
       guild_id: GUILD,
     } as APIInteraction);
-    await until(() => api.ephemeral.length === 1, "model set");
+    handlers.onInteraction({
+      ...(modelCommand(ALICE, CHANNEL, "claude:claude-sonnet-5") as object),
+      id: "model-in-channel",
+      guild_id: GUILD,
+    } as APIInteraction);
+    await until(() => api.ephemeral.length === 2, "model replies");
   } finally {
     await plugin.stop();
   }
-  assert.match(api.ephemeral[0]!, /^Done\. New turns in #general and its threads use \*\*/);
-  assert.deepEqual(
-    (await built.config.getRuntimeSelectionDurable(`channel:${CHANNEL}` as never))?.modelId,
-    "claude-sonnet-5",
-  );
+  assert.ok(api.ephemeral.some((m) => /^Done\. This conversation now uses \*\*/.test(m)));
+  assert.ok(api.ephemeral.includes("Run `/qm model` in my DM or in a thread I'm working in."));
+  assert.equal((await built.sessions.getByThread(threadRef))?.runtime?.modelId, "claude-sonnet-5");
+  assert.equal(await built.config.getRuntimeSelectionDurable(`channel:${CHANNEL}` as never), null);
 });
 
 test("an approval core accepted but whose wait then fails stays decided instead of offering a second run", async () => {

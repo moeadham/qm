@@ -411,6 +411,7 @@ export function createTurnMethods(
         ...(preserveRuntime && requestedHarness ? { harness: requestedHarness } : {}),
         ...(preserveRuntime && requestedModel ? { model: requestedModel } : {}),
         ...turnModelOptions(req),
+        ...(req.surface === "web" && typeof req.pinRuntime === "boolean" ? { pinRuntime: req.pinRuntime } : {}),
         ...(req.readOnly ? { readOnly: true } : {}),
         ...(privateRequest
           ? {

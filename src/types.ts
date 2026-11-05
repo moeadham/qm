@@ -98,8 +98,16 @@ export interface SpawnMeta {
   fastMode?: boolean;
 }
 
+export interface SessionRuntime {
+  harnessId: string;
+  modelId: string;
+  effortLevel?: string;
+  fastMode?: boolean;
+}
+
 export interface Session {
   clientTools?: ClientToolDeclaration[];
+  runtime?: SessionRuntime;
   id: string;
   type: SessionType;
   scopeId: ScopeId;
@@ -713,6 +721,7 @@ export interface TurnRequest {
   harness?: string;
   thinkingLevel?: string;
   fastMode?: boolean;
+  pinRuntime?: boolean;
   readOnly?: boolean;
   skipMemory?: boolean;
   surfaceTools?: boolean;

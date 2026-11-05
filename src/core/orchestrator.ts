@@ -1282,6 +1282,31 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       );
       screenSession.id = session.id;
       leaseMs += Date.now() - sessionStart;
+      const sessionRuntime = input.model || input.harness ? undefined : session.runtime;
+      const turnModel = input.model ?? sessionRuntime?.modelId;
+      const turnHarness = input.harness ?? sessionRuntime?.harnessId;
+      const turnEffort = input.thinkingLevel ?? sessionRuntime?.effortLevel;
+      const turnFastMode = input.fastMode ?? sessionRuntime?.fastMode;
+      if (input.surface === "web" && input.pinRuntime !== undefined && !automatedTurn) {
+        const pinned =
+          input.pinRuntime && input.model && input.harness
+            ? {
+                harnessId: input.harness,
+                modelId: input.model,
+                ...(input.thinkingLevel ? { effortLevel: input.thinkingLevel } : {}),
+                ...(typeof input.fastMode === "boolean" ? { fastMode: input.fastMode } : {}),
+              }
+            : null;
+        const stored = session.runtime;
+        const same =
+          pinned && stored
+            ? pinned.harnessId === stored.harnessId &&
+              pinned.modelId === stored.modelId &&
+              pinned.effortLevel === stored.effortLevel &&
+              pinned.fastMode === stored.fastMode
+            : !pinned && !stored;
+        if (!same) await deps.sessions.setRuntime(session.id, pinned);
+      }
       if (!input.sessionParticipantIds?.length && !automatedTurn)
         await deps.sessions.addParticipant(session.id, actor.id);
 
@@ -2902,7 +2927,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             scopeId,
             orgScopeId: resolution.orgScopeId,
             actorId: actor.id,
-            ...(input.model ? { model: input.model } : {}),
+            ...(turnModel ? { model: turnModel } : {}),
           }),
         );
         contextRecovered =
@@ -3104,11 +3129,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         );
         const purposeDefault = runtimePurpose ? await deps.config?.getPurposeRuntimeDurable(runtimePurpose) : undefined;
         const wantsOrgFastMode =
-          typeof input.fastMode !== "boolean" &&
+          typeof turnFastMode !== "boolean" &&
           !purposeDefault &&
           humanInput &&
           (await deps.config?.getInteractiveFastModeDurable());
-        const effectiveFastMode = resolveTurnFastMode(input.fastMode, humanInput, wantsOrgFastMode === true);
+        const effectiveFastMode = resolveTurnFastMode(turnFastMode, humanInput, wantsOrgFastMode === true);
         const ownerModelAuth = input.origin.kind === "automation" && input.origin.useOwnerModelAuth === true;
         const loadRuntimeAuth = async (runtime: Partial<RuntimeChoice>) => {
           let userProviderKeys: ProviderKeys | undefined;
@@ -3131,9 +3156,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             const routing = resolveIndividualAuthRouting(
               anthCred ?? null,
               oaiCred ?? null,
-              account === "personal" || input.surface === "web"
-                ? (runtime.modelId ?? input.model ?? purposeDefault?.modelId)
-                : (runtime.modelId ?? purposeDefault?.modelId),
+              runtime.modelId ??
+                (account === "personal" || input.surface === "web" ? turnModel : sessionRuntime?.modelId) ??
+                purposeDefault?.modelId,
             );
             if (routing?.kind === "apikey") {
               userHarnessOverride = "pi";
@@ -3182,20 +3207,20 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         };
         const servesModel = (requested: string, routed: string | undefined, keys: ProviderKeys | undefined) =>
           (keys?.[CODEX_SUBSCRIPTION_PROVIDER] ? codexSubscriptionModelId(requested) : requested) === routed;
-        if (input.harness && !isHarnessId(input.harness))
-          throw new NonRetryableTurnError(`runtime ${input.harness} is not approved`);
-        const inputHarness = input.harness && isHarnessId(input.harness) ? input.harness : undefined;
-        const requestedModel = input.model ?? purposeDefault?.modelId;
+        if (turnHarness && !isHarnessId(turnHarness))
+          throw new NonRetryableTurnError(`runtime ${turnHarness} is not approved`);
+        const inputHarness = turnHarness && isHarnessId(turnHarness) ? turnHarness : undefined;
+        const requestedModel = turnModel ?? purposeDefault?.modelId;
         let { userProviderKeys, userModelOverride, userHarnessOverride, claudeOauthToken } = await loadRuntimeAuth({});
         if (
-          (input.surface === "web" || purposeDefault) &&
+          (input.surface === "web" || purposeDefault || sessionRuntime) &&
           userHarnessOverride &&
           ((requestedModel && !servesModel(requestedModel, userModelOverride, userProviderKeys)) ||
             ((inputHarness ?? purposeDefault?.harnessId) &&
               (inputHarness ?? purposeDefault?.harnessId) !== userHarnessOverride))
         )
           throw new NonRetryableTurnError("Your connected AI account cannot serve this model on that harness.");
-        const effectiveModel = userModelOverride ?? input.model;
+        const effectiveModel = userModelOverride ?? turnModel;
         const effectiveHarness = userHarnessOverride ?? inputHarness;
         if (userHarnessOverride) {
           let authLabel = "api-key";
@@ -3208,7 +3233,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         let requestedRuntime: Partial<RuntimeChoice> = {
           ...(effectiveHarness && isHarnessId(effectiveHarness) ? { harnessId: effectiveHarness } : {}),
           ...(effectiveModel ? { modelId: effectiveModel } : {}),
-          ...(input.thinkingLevel ? { effortLevel: input.thinkingLevel } : {}),
+          ...(turnEffort ? { effortLevel: turnEffort } : {}),
           ...(typeof effectiveFastMode === "boolean" ? { fastMode: effectiveFastMode } : {}),
         };
         const runtimeDefaults = requestedRuntime;
@@ -4220,7 +4245,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             scopeId,
             orgScopeId: resolution.orgScopeId,
             actorId: actor.id,
-            ...(input.model ? { model: input.model } : {}),
+            ...(turnModel ? { model: turnModel } : {}),
           });
       }
     },

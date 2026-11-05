@@ -7,9 +7,8 @@ import {
 } from "@discordjs/core";
 import { errMessage } from "../util/errors.ts";
 import type { DiscordApi } from "./api.ts";
-import { homeChannelId, threadRefForChannel } from "./bot.ts";
+import { threadRefForChannel } from "./bot.ts";
 import type { DiscordCoreClient, ModelMenu } from "./core.ts";
-import { scopeId, type ScopeId } from "../types.ts";
 import { safeClip } from "../surfaces/safe-cut.ts";
 import { sleep } from "../util/async.ts";
 
@@ -17,17 +16,11 @@ const CHOICE_LIMIT = 25;
 const AUTOCOMPLETE_BUDGET_MS = 2_500;
 const CHOICE_TEXT_LIMIT = 100;
 
-async function modelTarget(
-  api: DiscordApi,
-  channelId: string,
-  principal: string,
-): Promise<{ scope: ScopeId; where: string }> {
-  const channel = await api.channel(channelId);
-  if (!channel.guildId)
-    return { scope: scopeId("personal", principal), where: "your DMs with me and your personal QM chats" };
-  const home = homeChannelId(channel);
-  const name = home === channel.id ? channel.name : (await api.channel(home).catch(() => undefined))?.name;
-  return { scope: scopeId("channel", home), where: name ? `#${name} and its threads` : "this channel and its threads" };
+const NO_MODEL_HERE = "Run `/qm model` in my DM or in a thread I'm working in.";
+const MODEL_AFTER_FIRST_MESSAGE = "Send me a message here first, then run `/qm model`.";
+
+async function modelThread(api: DiscordApi, channelId: string): Promise<string | undefined> {
+  return threadRefForChannel(await api.channel(channelId));
 }
 
 function modelLabel(menu: ModelMenu, harnessId: string, modelId: string): string {
@@ -43,28 +36,28 @@ async function modelAnswer(
   channelId: string,
   query: string | undefined,
 ): Promise<string> {
-  const { scope, where } = await modelTarget(api, channelId, principal);
-  const menu = await core.modelMenu(principal, scope);
-  if (!menu) return "Model selection isn't available on this QM.";
-  if (!query) {
-    const { harnessId, modelId } = menu.effective;
+  const threadRef = await modelThread(api, channelId);
+  if (!threadRef) return NO_MODEL_HERE;
+  const found = await core.modelMenu(principal, threadRef);
+  if (!found) return MODEL_AFTER_FIRST_MESSAGE;
+  const { menu, session, current } = found;
+  if (!query)
     return [
-      `New turns in ${where} use **${modelLabel(menu, harnessId, modelId)}**${menu.scopeOverride ? "" : " (the default)"}.`,
+      `This conversation uses **${modelLabel(menu, current.harnessId, current.modelId)}**${session.runtime ? "" : " (the default)"}.`,
       "Change it with `/qm model name:` (start typing to search your models), or `default` to go back to the default.",
     ].join("\n");
-  }
-  const result = await core.setModel(principal, scope, query.trim());
+  const result = await core.setModel(principal, threadRef, query.trim());
   if (result.ok)
     return result.choice
-      ? `Done. New turns in ${where} use **${modelLabel(menu, result.choice.harnessId, result.choice.modelId)}**.`
-      : `Done. New turns in ${where} use the default model again.`;
+      ? `Done. This conversation now uses **${modelLabel(menu, result.choice.harnessId, result.choice.modelId)}**.`
+      : "Done. This conversation uses the default model again.";
   if (result.error === "model_unavailable")
     return `I don't have a model called "${safeClip(query, 80)}" for you here. Start typing in \`/qm model name:\` to see your options.`;
   if (result.error === "model_ambiguous")
     return `"${safeClip(query, 80)}" matches more than one model: ${(result.candidates ?? [])
       .map((c) => `\`${c.harnessId}:${c.modelId}\``)
       .join(", ")}. Pick one of those.`;
-  if (result.error === "runtime_unavailable") return "Model selection isn't available on this QM.";
+  if (result.error === "no_session" || result.error === "not_found") return MODEL_AFTER_FIRST_MESSAGE;
   return `That model can't be used here: ${result.error}.`;
 }
 
@@ -77,9 +70,10 @@ async function modelSuggestions(
 ): Promise<Array<{ name: string; value: string }>> {
   const principal = await core.linkedPrincipal(userId);
   if (!principal || !channelId) return [];
-  const { scope } = await modelTarget(api, channelId, principal);
-  const menu = await core.modelMenu(principal, scope, { refresh: false });
-  if (!menu) return [];
+  const threadRef = await modelThread(api, channelId);
+  const found = threadRef ? await core.modelMenu(principal, threadRef, { refresh: false }) : undefined;
+  if (!found) return [];
+  const { menu } = found;
   const wanted = typed.trim().toLowerCase();
   const options = [
     { name: "Default (inherit the usual model)", value: "default" },
@@ -118,7 +112,7 @@ export const QM_COMMANDS: RESTPutAPIApplicationCommandsJSONBody = [
       {
         type: ApplicationCommandOptionType.Subcommand,
         name: "model",
-        description: "Show or change the model QM uses here",
+        description: "Show or change the model this conversation uses",
         options: [
           {
             type: ApplicationCommandOptionType.String,

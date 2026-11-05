@@ -17,6 +17,7 @@ async function setup() {
   const server = createInsecureTestServer(built.app, {
     config: built.config,
     userModelCredentials: built.userModelCredentials,
+    sessions: built.sessions,
     harnessId: "pi",
     providerKeys: { anthropic: false, openai: false, openrouter: false },
   });
@@ -33,7 +34,7 @@ async function setup() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ principalId: "U1", scopeId: "personal:U1", ...choice }),
     });
-  return { built, get, put, close: () => new Promise<void>((r) => server.close(() => r())) };
+  return { built, base, get, put, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
 test("personal API-key picker works without company keys and saves model, effort and Fast", async () => {
@@ -120,6 +121,39 @@ test("personal picker keeps org restrictions and shared-scope caller isolation",
     s.built.config.setWebuiModels("org:default-org", []);
     await s.built.config.flushScope("org:default-org");
     assert.ok((await s.get()).modelsByHarness.pi!.includes("gpt-5.6-terra"));
+  } finally {
+    await s.close();
+  }
+});
+
+test("a session's model is saved for its participants only, validated against their account, and cleared with inherit", async () => {
+  const s = await setup();
+  try {
+    await s.built.userModelCredentials.setOAuth("U1", "openai", {
+      accessToken: "synthetic-access",
+      refreshToken: "synthetic-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    });
+    await s.built.config.setPersonalModelAuth("U1", true, "openai");
+    const session = await s.built.sessions.getOrCreateByThread("web:U1:chat", "dm", "personal:U1" as never);
+    await s.built.sessions.addParticipant(session.id, "U1");
+    const put = (principalId: string, body: object) =>
+      fetch(`${s.base}/v1/sessions/${session.id}/runtime`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ principalId, ...body }),
+      });
+    const astra = { harnessId: "pi", modelId: "codex/gpt-5.6-sol" };
+
+    assert.equal((await put("U2", astra)).status, 404);
+    assert.equal((await put("U1", { harnessId: "claude", modelId: "claude-sonnet-5" })).status, 400);
+    const saved = await put("U1", astra);
+    assert.equal(saved.status, 200);
+    assert.deepEqual(await saved.json(), { runtime: astra });
+    assert.deepEqual((await s.built.sessions.getByThread("web:U1:chat"))?.runtime, astra);
+    assert.equal(await s.built.config.getRuntimeSelectionDurable("personal:U1" as never), null);
+    assert.equal((await put("U1", { inherit: true })).status, 200);
+    assert.equal((await s.built.sessions.getByThread("web:U1:chat"))?.runtime, undefined);
   } finally {
     await s.close();
   }

@@ -47,6 +47,7 @@ test("the personal-account picker preserves composer choices and saves context d
     this.dispatchEvent(new dom.window.Event("close"));
   };
   const updates: Record<string, unknown>[] = [];
+  const sessionSaves: Array<[string, unknown]> = [];
   let failNextGet = true;
   let runtimeReads = 0;
   let failNextPut = false;
@@ -85,6 +86,10 @@ test("the personal-account picker preserves composer choices and saves context d
           return Response.json({ error: "initial load failed" }, { status: 500 });
         }
         return Response.json(config);
+      }
+      if (String(input).startsWith("/api/sessions/") && init?.method === "PUT") {
+        sessionSaves.push([String(input), JSON.parse(String(init.body))]);
+        return Response.json({});
       }
       if (String(input) !== "/api/runtime-config" || init?.method !== "PUT")
         throw new Error(`Unexpected request: ${String(input)}`);
@@ -734,6 +739,32 @@ test("the personal-account picker preserves composer choices and saves context d
     await mount();
     assert.equal(composer!.followsDefault(), false, "an explicit pick is sent with each message");
     assert.match(button(".loadout-button").getAttribute("aria-label")!, /^Model: Beta, /);
+    (ctx.chat as unknown as { turnRuntime: () => unknown }).turnRuntime = () => null;
+    const { sessionsState } = await vite.ssrLoadModule("/src/sessions.ts");
+    sessionsState.list = [
+      {
+        id: "s-picked",
+        type: "dm",
+        scopeId: "personal:tester",
+        threadRef: "web:tester:picked",
+        createdAt: 1,
+        runtime: { harnessId: "pi", modelId: "gamma" },
+      },
+    ];
+    await mount();
+    assert.match(
+      button(".loadout-button").getAttribute("aria-label")!,
+      /^Model: Gamma, /,
+      "the session's saved model wins over this browser's cached pick",
+    );
+    pick("Alpha").click();
+    await tick();
+    assert.equal(sessionSaves.length, 1);
+    const [savedPath, savedRuntime] = sessionSaves[0]!;
+    assert.equal(savedPath, "/api/sessions/s-picked/runtime");
+    assert.equal((savedRuntime as { modelId: string }).modelId, "alpha");
+    assert.deepEqual(sessionsState.list[0].runtime, savedRuntime);
+    sessionsState.list = [];
     ctx.chat.state.threadRef = "web:tester:server-default";
     await mount();
     (ctx.chat as unknown as { turnRuntime: () => unknown }).turnRuntime = () => ({

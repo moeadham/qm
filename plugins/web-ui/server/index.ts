@@ -1317,6 +1317,20 @@ const apiRoutes: readonly WebRoute[] = [
   })),
   { method: "GET", path: "/api/composio/slack", handle: (c) => relayCore(c.res, "GET", "/v1/composio/slack") },
   { method: "GET", path: "/api/discord-link", handle: (c) => relayCore(c.res, "GET", "/v1/discord-link") },
+  {
+    method: "PUT",
+    path: "/api/sessions/:id/runtime",
+    handle: async (c) => {
+      const body = await readJson(c.req, c.res, false);
+      if (!body) return;
+      return relayCore(
+        c.res,
+        "PUT",
+        `/v1/sessions/${encodeURIComponent(c.params.id!)}/runtime`,
+        JSON.stringify({ ...body, principalId: c.user }),
+      );
+    },
+  },
   { method: "DELETE", path: "/api/discord-link", handle: (c) => relayCore(c.res, "DELETE", "/v1/discord-link") },
   {
     method: "POST",
@@ -2518,6 +2532,7 @@ const apiRoutes: readonly WebRoute[] = [
       let harness: string | undefined;
       let thinkingLevel: string | undefined;
       let fastMode: boolean | undefined;
+      let pinRuntime: boolean | undefined;
       let timezone: string | undefined;
       let scope: string | undefined;
       let channelName: string | undefined;
@@ -2559,6 +2574,7 @@ const apiRoutes: readonly WebRoute[] = [
         if (typeof p.harness === "string") harness = p.harness;
         if (typeof p.thinkingLevel === "string") thinkingLevel = p.thinkingLevel;
         if (typeof p.fastMode === "boolean") fastMode = p.fastMode;
+        if (typeof p.pinRuntime === "boolean") pinRuntime = p.pinRuntime;
         if (typeof p.timezone === "string" && p.timezone.trim()) timezone = p.timezone.trim().slice(0, 64);
         if (Array.isArray(p.attachments)) {
           for (const raw of p.attachments as unknown[]) {
@@ -2588,6 +2604,7 @@ const apiRoutes: readonly WebRoute[] = [
         ...(model ? { model } : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
         ...(typeof fastMode === "boolean" ? { fastMode } : {}),
+        ...(typeof pinRuntime === "boolean" ? { pinRuntime } : {}),
         ...(timezone ? { timezone } : {}),
         ...(attachments.length ? { attachments } : {}),
         ...(approval ? { approval } : {}),

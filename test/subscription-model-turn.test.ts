@@ -533,3 +533,54 @@ test("a Claude cron in a Codex project never refreshes the unrelated OpenAI logi
     await built.runtime.stop();
   }
 });
+
+test("a session's saved model reaches a ChatGPT-subscription user's non-web turns, and a web pin saves and clears it", async () => {
+  const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+  const start = seen.length;
+  try {
+    await built.config.setPersonalModelAuth("internal:alice", true, "openai");
+    built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
+    await built.config.flushScope("org:default-org");
+    await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+      accessToken: "test-access",
+      idToken: "test-id",
+      accountId: "test-account",
+      expiresAt: Date.now() + 3600000,
+    });
+    const chat = {
+      surface: "discord",
+      liveActor: true,
+      actor: { externalId: "internal:alice" },
+      conversation: { kind: "dm" as const, threadRef: "discord:dm:500000000000000001" },
+      text: "hello",
+      skipMemory: true,
+    };
+    assert.equal((await built.app.turn(chat)).status, "ok");
+    assert.notEqual(seen.at(-1)?.runtime?.modelId, "codex/gpt-6-astra");
+    const session = (await built.sessions.getByThread(chat.conversation.threadRef))!;
+    await built.sessions.setRuntime(session.id, { harnessId: "pi", modelId: "codex/gpt-6-astra" });
+    assert.equal((await built.app.turn({ ...chat, text: "again" })).status, "ok");
+    assert.equal(seen.at(-1)?.runtime?.modelId, "codex/gpt-6-astra");
+    assert.equal(seen.length - start, 2);
+
+    const web = {
+      surface: "web",
+      liveActor: true,
+      actor: { externalId: "internal:alice" },
+      conversation: { kind: "dm" as const, threadRef: "web:internal:alice:pinned" },
+      text: "pick astra",
+      skipMemory: true,
+    };
+    const picked = await built.app.turn({ ...web, harness: "pi", model: "codex/gpt-6-astra", pinRuntime: true });
+    assert.equal(picked.status, "ok", JSON.stringify(picked));
+    const webSession = (await built.sessions.getByThread(web.conversation.threadRef))!;
+    assert.deepEqual(
+      { harnessId: webSession.runtime?.harnessId, modelId: webSession.runtime?.modelId },
+      { harnessId: "pi", modelId: "codex/gpt-6-astra" },
+    );
+    assert.equal((await built.app.turn({ ...web, text: "back to default", pinRuntime: false })).status, "ok");
+    assert.equal((await built.sessions.getByThread(web.conversation.threadRef))?.runtime, undefined);
+  } finally {
+    await built.runtime.stop();
+  }
+});
