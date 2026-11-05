@@ -10,6 +10,7 @@ import {
   harnessIdOrPi,
   isHarnessId,
   modelProviderAvailabilityFor,
+  modelServiceable,
   modelSupportedByHarness,
   serviceableModelIds,
   ALL_PROVIDERS_AVAILABLE,
@@ -312,10 +313,16 @@ export async function availableRuntimeError(
     ? await userRuntimeConfigBody(ctx, scope, actorId, purpose, choice)
     : await runtimeConfigBody(ctx, scope, undefined, purpose, choice);
   const listed = choices.modelsByHarness[choice.harnessId] ?? [];
+  const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
+  const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
+  const subscriptionServiceable = modelServiceable(
+    choice.modelId,
+    modelProviderAvailabilityFor(choice.harnessId, configuredKeys, managedKeys),
+  );
   const availableModel = [
     choice.modelId,
     codexSubscriptionModelId(choice.modelId),
-    codexProviderModelId(choice.modelId),
+    ...(subscriptionServiceable ? [codexProviderModelId(choice.modelId)] : []),
   ].find((id) => listed.includes(id));
   if (!availableModel || !(await webuiModelEnabled(ctx, choice.modelId, purpose)))
     return "runtime is no longer available or enabled on this deployment";

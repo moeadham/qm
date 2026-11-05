@@ -3861,7 +3861,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               reportFailure("orchestrator: direct reply delivery", e, `session=${session.id}`);
             }
           }
-          if (spine.surfaceOutboundCount === 0 && !silentPollNarration) {
+          if (input.addressed && spine.surfaceOutboundCount === 0 && !silentPollNarration) {
             const nudgeHistory = filterHistory(
               forModelContext((await deps.sessions.getContextWindow(session.id)).entries),
             );

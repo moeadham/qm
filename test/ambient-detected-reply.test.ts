@@ -33,6 +33,14 @@ test("an overheard thread message QM chose to answer delivers its plain-text rep
     const posted = await built.deliveries.pending("discord");
     assert.equal(posted.length, 1, JSON.stringify(posted));
     assert.ok(JSON.stringify(posted[0]).includes("what model are you"), JSON.stringify(posted[0]));
+
+    const declined = await built.app.turn({ ...thread, origin: { kind: "ambient", live: true }, text: "!silent" });
+    assert.equal(declined.status, "silent", JSON.stringify(declined));
+    assert.equal(
+      (await built.deliveries.pending("discord")).length,
+      1,
+      "an overheard turn that ends quiet is not pushed to post",
+    );
   } finally {
     await built.runtime.stop();
   }
