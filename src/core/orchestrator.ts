@@ -3160,7 +3160,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           const userCredStore = external ? undefined : deps.userModelCredentials;
           const account = external
             ? "company"
-            : (input.modelAccount ?? (await deps.config?.getModelAccountDurable(actor.id)) ?? "company");
+            : ((await deps.config?.getModelAccountDurable(actor.id, input.modelAccount)) ??
+              input.modelAccount ??
+              "company");
           if (
             userCredStore &&
             ((isLiveSpeaker(input.origin) && !sessionTurn) || delegatedModelOrigin !== undefined || ownerModelAuth) &&

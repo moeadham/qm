@@ -10,7 +10,7 @@ import { createUserModelCredentialStore } from "../src/model/user-model-credenti
 async function setup() {
   const config = createMemoryConfigStore("default-org");
   config.setApprovedHarnesses(["claude", "pi"]);
-  config.setIndividualModelAuth(true);
+  config.setIndividualModelAuthMode("required");
   await config.flushScope("org:default-org");
   const userModelCredentials = createUserModelCredentialStore({
     keychain: createKeychain({
@@ -69,7 +69,7 @@ test("disconnecting ChatGPT removes its models even when deployment keys are ava
 
 test("provider-specific personal access filters the picker even with company access as the default", async () => {
   const { config, ctx, userModelCredentials } = await setup();
-  config.setIndividualModelAuth(false);
+  config.setIndividualModelAuthMode("optional");
   await config.flushScope("org:default-org");
   await config.setPersonalModelAuth("alice", true, "openai");
   await userModelCredentials.setOAuth("alice", "anthropic", { accessToken: "test-claude" });

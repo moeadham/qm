@@ -468,7 +468,8 @@ async function chooseAiAccount(account: "company" | "personal"): Promise<void> {
   drawSettings();
 }
 
-function aiAccountsRow(): TemplateResult {
+function aiAccountsRow(): TemplateResult | typeof nothing {
+  if (aiStatus?.mode === "org-only") return nothing;
   return html`
     <div class="settings-row">
       <div class="settings-row-copy">

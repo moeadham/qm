@@ -56,7 +56,7 @@ const { buildApp } = await import("../src/wiring.ts");
 test("web Astra selection reaches Pi with personal OAuth through app and orchestrator", async () => {
   const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
   try {
-    built.config.setIndividualModelAuth(true);
+    built.config.setIndividualModelAuthMode("required");
     built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
     await built.config.flushScope("org:default-org");
     await built.config.setRuntimeSelectionLatest("org:default-org", {
@@ -623,6 +623,17 @@ test("a session's saved model reaches a ChatGPT-subscription user's non-web turn
     assert.equal(overheard.status, "ok", JSON.stringify(overheard));
     assert.equal(seen.at(-1)?.runtime?.modelId, "codex/gpt-6-astra");
     assert.deepEqual(seen.at(-1)?.providerKeys, { "openai-codex": "test-access" });
+
+    built.config.setIndividualModelAuthMode("org-only");
+    await built.config.flushScope("org:default-org");
+    const beforeOrgOnly = seen.length;
+    const orgTurn = await built.app.turn({ ...thread, actor: { externalId: "internal:alice" }, text: "org only" });
+    assert.equal(orgTurn.status, "ok", JSON.stringify(orgTurn));
+    assert.deepEqual(
+      seen.slice(beforeOrgOnly).map((t) => t.providerKeys),
+      [],
+      "org-only never routes alice to her ChatGPT login",
+    );
   } finally {
     await built.runtime.stop();
   }

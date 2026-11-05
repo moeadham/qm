@@ -26,6 +26,7 @@ import {
 } from "../../model/pi-models.ts";
 import { resolveRuntimeChoiceDurable } from "../../harness/harness-router.ts";
 import { sanitizeBranding } from "../../resolution/branding.ts";
+import { INDIVIDUAL_MODEL_AUTH_MODES, type IndividualModelAuthMode } from "../../resolution/config-store.ts";
 import {
   credentialInjectionError,
   isValidCredentialSlug,
@@ -500,19 +501,23 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
   },
   {
     id: "individual-model-auth",
-    kind: "boolean",
+    kind: "enum",
     target: "org",
     label:
-      "Individual authorization for AI usage org-wide: on means each user must connect their own Claude or Codex account (API key or subscription login) before using the assistant; the org's shared model credentials are not used for their turns.",
+      "Personal AI accounts org-wide: org-only runs every turn on the org's shared model credentials and hides personal accounts; optional lets each user connect their own Claude or Codex account; required makes every user connect one and never uses the org's credentials for their turns.",
     readKey: "individualModelAuth",
-    get: (deps, scope) => (parseScopeId(scope).kind === "org" ? deps.config!.getIndividualModelAuth() : undefined),
-    apply: generic<boolean>(
+    enumValues: INDIVIDUAL_MODEL_AUTH_MODES,
+    get: (deps, scope) => (parseScopeId(scope).kind === "org" ? deps.config!.getIndividualModelAuthMode() : undefined),
+    apply: generic<IndividualModelAuthMode>(
       (body, { scope }) => {
-        const bad = orgOnly(scope, "the individual-authorization switch is org-wide");
+        const bad = orgOnly(scope, "the individual-authorization mode is org-wide");
         if (bad) return bad;
-        return boolBody(body);
+        const mode = (body as { mode?: unknown }).mode;
+        return INDIVIDUAL_MODEL_AUTH_MODES.find((m) => m === mode)
+          ? { value: mode as IndividualModelAuthMode }
+          : { error: `individual-model-auth requires { mode: ${INDIVIDUAL_MODEL_AUTH_MODES.join(" | ")} }` };
       },
-      (deps, _scope, on) => deps.config!.setIndividualModelAuth(on),
+      (deps, _scope, mode) => deps.config!.setIndividualModelAuthMode(mode),
     ),
   },
   {
