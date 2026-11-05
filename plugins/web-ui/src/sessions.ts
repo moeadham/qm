@@ -50,6 +50,7 @@ import {
   type PendingApproval,
   type CoreProject,
   type CoreSession,
+  type SessionRuntime,
 } from "./core-bridge";
 import { deepLinkPath, isPlainLeftClick, sessionLink, UI_BASE } from "./deep-link";
 import {
@@ -118,6 +119,7 @@ export const sessionsState = {
 
 let selection: SessionSelection = emptySelection();
 type SessionPatch = {
+  runtime?: SessionRuntime | null;
   title?: string | null;
   archived?: boolean;
   pinned?: boolean;
@@ -1578,6 +1580,7 @@ function applyResolvedSession(updated: CoreSession): void {
       ? {
           ...s,
           ...updated,
+          runtime: updated.runtime ?? null,
           title: updated.title ?? null,
           archived: Boolean(updated.archived),
           pinned: Boolean(updated.pinned),
@@ -1611,6 +1614,10 @@ async function refreshSessionTitle(s: CoreSession): Promise<void> {
     refreshingTitleIds.delete(s.id);
     renderList();
   }
+}
+
+export function saveSessionModel(id: string, runtime: SessionRuntime | null): void {
+  void persistSessionPatch(id, { runtime });
 }
 
 async function persistSessionPatch(id: string, patch: SessionPatch): Promise<void> {

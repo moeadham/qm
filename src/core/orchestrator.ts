@@ -1282,11 +1282,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       );
       screenSession.id = session.id;
       leaseMs += Date.now() - sessionStart;
-      const sessionRuntime = input.model || input.harness ? undefined : session.runtime;
-      const turnModel = input.model ?? sessionRuntime?.modelId;
-      const turnHarness = input.harness ?? sessionRuntime?.harnessId;
-      const turnEffort = input.thinkingLevel ?? sessionRuntime?.effortLevel;
-      const turnFastMode = input.fastMode ?? sessionRuntime?.fastMode;
+      let savedRuntime = session.runtime;
       if (input.surface === "web" && input.pinRuntime !== undefined && !automatedTurn) {
         const pinned =
           input.pinRuntime && input.model && input.harness
@@ -1296,17 +1292,32 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 ...(input.thinkingLevel ? { effortLevel: input.thinkingLevel } : {}),
                 ...(typeof input.fastMode === "boolean" ? { fastMode: input.fastMode } : {}),
               }
-            : null;
-        const stored = session.runtime;
+            : undefined;
         const same =
-          pinned && stored
-            ? pinned.harnessId === stored.harnessId &&
-              pinned.modelId === stored.modelId &&
-              pinned.effortLevel === stored.effortLevel &&
-              pinned.fastMode === stored.fastMode
-            : !pinned && !stored;
-        if (!same) await deps.sessions.setRuntime(session.id, pinned);
+          pinned && savedRuntime
+            ? pinned.harnessId === savedRuntime.harnessId &&
+              pinned.modelId === savedRuntime.modelId &&
+              pinned.effortLevel === savedRuntime.effortLevel &&
+              pinned.fastMode === savedRuntime.fastMode
+            : !pinned && !savedRuntime;
+        if (!same) await deps.sessions.setRuntime(session.id, pinned ?? null);
+        savedRuntime = pinned;
       }
+      const servable = async (runtime: typeof savedRuntime): Promise<boolean> =>
+        !!runtime &&
+        isHarnessId(runtime.harnessId) &&
+        !(await deps.validateScheduledRuntime?.(
+          scopeId,
+          { ...runtime, harnessId: runtime.harnessId },
+          undefined,
+          actor.id,
+        ));
+      const sessionRuntime =
+        !input.model && !input.harness && (await servable(savedRuntime)) ? savedRuntime : undefined;
+      const turnModel = input.model ?? sessionRuntime?.modelId;
+      const turnHarness = input.harness ?? sessionRuntime?.harnessId;
+      const turnEffort = input.thinkingLevel ?? sessionRuntime?.effortLevel;
+      const turnFastMode = input.fastMode ?? sessionRuntime?.fastMode;
       if (!input.sessionParticipantIds?.length && !automatedTurn)
         await deps.sessions.addParticipant(session.id, actor.id);
 

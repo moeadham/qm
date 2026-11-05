@@ -580,6 +580,39 @@ test("a session's saved model reaches a ChatGPT-subscription user's non-web turn
     );
     assert.equal((await built.app.turn({ ...web, text: "back to default", pinRuntime: false })).status, "ok");
     assert.equal((await built.sessions.getByThread(web.conversation.threadRef))?.runtime, undefined);
+    assert.notEqual(
+      seen.at(-1)?.runtime?.modelId,
+      "codex/gpt-6-astra",
+      "the turn that clears the pin already uses the default",
+    );
+
+    await built.config.setPersonalModelAuth("internal:bob", true, "anthropic");
+    await built.userModelCredentials.setOAuth("internal:bob", "anthropic", {
+      accessToken: "bob-access",
+      refreshToken: "bob-refresh",
+      expiresAt: Date.now() + 3600000,
+    });
+    const thread = {
+      surface: "discord",
+      liveActor: true,
+      conversation: {
+        kind: "channel" as const,
+        threadRef: "discord:ch:600000000000000001:800000000000000001",
+        channelRef: "600000000000000001",
+        audience: [{ externalId: "internal:alice" }, { externalId: "internal:bob" }],
+      },
+      skipMemory: true,
+    };
+    assert.equal(
+      (await built.app.turn({ ...thread, actor: { externalId: "internal:alice" }, text: "hi" })).status,
+      "ok",
+    );
+    const shared = (await built.sessions.getByThread(thread.conversation.threadRef))!;
+    await built.sessions.setRuntime(shared.id, { harnessId: "pi", modelId: "codex/gpt-6-astra" });
+    const claudeBefore = claudeSeen.length;
+    const bob = await built.app.turn({ ...thread, actor: { externalId: "internal:bob" }, text: "my turn" });
+    assert.equal(bob.status, "ok", JSON.stringify(bob));
+    assert.equal(claudeSeen.length, claudeBefore + 1, "bob's turn runs on his own Claude subscription");
   } finally {
     await built.runtime.stop();
   }

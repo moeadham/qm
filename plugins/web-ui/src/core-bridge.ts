@@ -135,7 +135,7 @@ export interface SessionRuntime {
 
 export interface CoreSession {
   id: string;
-  runtime?: SessionRuntime;
+  runtime?: SessionRuntime | null;
   type: "dm" | "channel" | "group";
   scopeId: string;
   threadRef: string;
@@ -295,7 +295,14 @@ function browserTimezone(): string {
 
 export async function updateSession(
   id: string,
-  patch: { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null; unread?: boolean },
+  patch: {
+    runtime?: SessionRuntime | null;
+    title?: string | null;
+    archived?: boolean;
+    pinned?: boolean;
+    color?: string | null;
+    unread?: boolean;
+  },
 ): Promise<{ session: CoreSession }> {
   return api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(id)}`, {
     method: "POST",
@@ -1026,13 +1033,6 @@ export function makeCoreStreamFn(
     return stream;
   };
   return fn as unknown as StreamFn;
-}
-
-export async function saveSessionRuntime(sessionId: string, runtime: SessionRuntime | null): Promise<void> {
-  await api(`/api/sessions/${encodeURIComponent(sessionId)}/runtime`, {
-    method: "PUT",
-    body: JSON.stringify(runtime ?? { inherit: true }),
-  });
 }
 
 export async function activeRunForThread(threadRef: string): Promise<ActiveRun> {

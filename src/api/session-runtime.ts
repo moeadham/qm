@@ -6,16 +6,14 @@ import { availableRuntimeError, validateRuntimeChoice, type RuntimeDeps } from "
 
 export async function setSessionRuntime(
   deps: {
-    sessions: Pick<SessionStore, "getForParticipant" | "setRuntime">;
+    sessions: Pick<SessionStore, "setRuntime">;
     runtime: RuntimeDeps;
     auditLog?: Pick<AuditLog, "record">;
   },
-  sessionId: string,
+  session: Session,
   principalId: string,
   choice: RuntimeChoice | null,
 ): Promise<{ ok: true; session: Session } | { ok: false; error: string }> {
-  const session = await deps.sessions.getForParticipant(sessionId, principalId);
-  if (!session) return { ok: false, error: "not_found" };
   if (choice) {
     const error =
       validateRuntimeChoice(choice) ??

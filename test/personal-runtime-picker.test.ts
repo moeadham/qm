@@ -126,7 +126,7 @@ test("personal picker keeps org restrictions and shared-scope caller isolation",
   }
 });
 
-test("a session's model is saved for its participants only, validated against their account, and cleared with inherit", async () => {
+test("a session's model is saved for its participants only, validated against their account, and cleared with null", async () => {
   const s = await setup();
   try {
     await s.built.userModelCredentials.setOAuth("U1", "openai", {
@@ -137,11 +137,11 @@ test("a session's model is saved for its participants only, validated against th
     await s.built.config.setPersonalModelAuth("U1", true, "openai");
     const session = await s.built.sessions.getOrCreateByThread("web:U1:chat", "dm", "personal:U1" as never);
     await s.built.sessions.addParticipant(session.id, "U1");
-    const put = (principalId: string, body: object) =>
-      fetch(`${s.base}/v1/sessions/${session.id}/runtime`, {
-        method: "PUT",
+    const put = (principalId: string, runtime: object | null) =>
+      fetch(`${s.base}/v1/sessions/${session.id}`, {
+        method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ principalId, ...body }),
+        body: JSON.stringify({ principalId, runtime }),
       });
     const astra = { harnessId: "pi", modelId: "codex/gpt-5.6-sol" };
 
@@ -149,10 +149,11 @@ test("a session's model is saved for its participants only, validated against th
     assert.equal((await put("U1", { harnessId: "claude", modelId: "claude-sonnet-5" })).status, 400);
     const saved = await put("U1", astra);
     assert.equal(saved.status, 200);
-    assert.deepEqual(await saved.json(), { runtime: astra });
+    assert.deepEqual(((await saved.json()) as { session: { runtime?: unknown } }).session.runtime, astra);
     assert.deepEqual((await s.built.sessions.getByThread("web:U1:chat"))?.runtime, astra);
     assert.equal(await s.built.config.getRuntimeSelectionDurable("personal:U1" as never), null);
-    assert.equal((await put("U1", { inherit: true })).status, 200);
+    assert.equal((await put("U1", { harnessId: "pi" })).status, 400);
+    assert.equal((await put("U1", null)).status, 200);
     assert.equal((await s.built.sessions.getByThread("web:U1:chat"))?.runtime, undefined);
   } finally {
     await s.close();

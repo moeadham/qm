@@ -89,37 +89,23 @@ async function detachSession(ctx: ApiCtx): Promise<void> {
   return sendJson(res, 200, out);
 }
 
-async function putSessionRuntime(ctx: ApiCtx): Promise<void> {
-  const { res, deps, body } = ctx;
-  if (!deps.sessions || !deps.config || !isObj(body)) return sendJson(res, 400, { error: "bad_request" });
-  const { principalId, harnessId, modelId, effortLevel, fastMode } = body;
-  if (typeof principalId !== "string" || !principalId)
-    return sendJson(res, 400, { error: "bad_request", message: "principalId required" });
-  let choice: RuntimeChoice | null = null;
-  if (body.inherit !== true) {
-    if (
-      !isHarnessId(harnessId) ||
-      typeof modelId !== "string" ||
-      (effortLevel !== undefined && typeof effortLevel !== "string") ||
-      (fastMode !== undefined && typeof fastMode !== "boolean")
-    )
-      return sendJson(res, 400, { error: "bad_request" });
-    choice = {
-      harnessId,
-      modelId,
-      ...(typeof effortLevel === "string" ? { effortLevel } : {}),
-      ...(typeof fastMode === "boolean" ? { fastMode } : {}),
-    };
-  }
-  await deps.refreshModels?.();
-  const out = await setSessionRuntime(
-    { sessions: deps.sessions, runtime: deps, ...(deps.auditLog ? { auditLog: deps.auditLog } : {}) },
-    ctx.params.id!,
-    principalId,
-    choice,
-  );
-  if (!out.ok) return sendJson(res, out.error === "not_found" ? 404 : 400, { error: out.error });
-  return sendJson(res, 200, { runtime: out.session.runtime ?? null });
+function parseSessionRuntime(value: unknown): RuntimeChoice | null | undefined {
+  if (value === null) return null;
+  if (!isObj(value)) return undefined;
+  const { harnessId, modelId, effortLevel, fastMode } = value;
+  if (
+    !isHarnessId(harnessId) ||
+    typeof modelId !== "string" ||
+    (effortLevel !== undefined && typeof effortLevel !== "string") ||
+    (fastMode !== undefined && typeof fastMode !== "boolean")
+  )
+    return undefined;
+  return {
+    harnessId,
+    modelId,
+    ...(typeof effortLevel === "string" ? { effortLevel } : {}),
+    ...(typeof fastMode === "boolean" ? { fastMode } : {}),
+  };
 }
 
 async function cancelSessionGoal(ctx: ApiCtx): Promise<void> {
@@ -377,7 +363,7 @@ async function uploadFile(ctx: ApiCtx): Promise<void> {
 }
 
 async function patchSession(ctx: ApiCtx): Promise<void> {
-  const { res, app, body } = ctx;
+  const { res, app, body, deps } = ctx;
   const id = ctx.params.id!;
   const b = body as {
     principalId?: unknown;
@@ -386,6 +372,7 @@ async function patchSession(ctx: ApiCtx): Promise<void> {
     pinned?: unknown;
     color?: unknown;
     unread?: unknown;
+    runtime?: unknown;
   };
   const principalId = typeof b.principalId === "string" ? b.principalId : null;
   if (!principalId) return sendJson(res, 400, { error: "bad_request", message: "principalId required" });
@@ -427,17 +414,33 @@ async function patchSession(ctx: ApiCtx): Promise<void> {
     }
     patch.color = typeof b.color === "string" ? b.color.toLowerCase() : null;
   }
-  if (
-    patch.title === undefined &&
-    patch.archived === undefined &&
-    patch.pinned === undefined &&
-    patch.color === undefined &&
-    patch.readAt === undefined
-  ) {
+  const runtime = "runtime" in b ? parseSessionRuntime(b.runtime) : undefined;
+  if ("runtime" in b && (runtime === undefined || !deps.sessions))
+    return sendJson(res, 400, { error: "bad_request", message: "runtime must be a model choice or null" });
+  const viewChanged =
+    patch.title !== undefined ||
+    patch.archived !== undefined ||
+    patch.pinned !== undefined ||
+    patch.color !== undefined ||
+    patch.readAt !== undefined;
+  if (!viewChanged && runtime === undefined) {
     return sendJson(res, 400, {
       error: "bad_request",
-      message: "title, archived, pinned, color, or unread required",
+      message: "title, archived, pinned, color, unread, or runtime required",
     });
+  }
+  if (runtime !== undefined) {
+    const writable = await app.writableSession(id, principalId);
+    if (!writable) return sendJson(res, 404, { error: "not_found" });
+    await deps.refreshModels?.();
+    const saved = await setSessionRuntime(
+      { sessions: deps.sessions!, runtime: deps, ...(deps.auditLog ? { auditLog: deps.auditLog } : {}) },
+      writable,
+      principalId,
+      runtime,
+    );
+    if (!saved.ok) return sendJson(res, 400, { error: saved.error });
+    if (!viewChanged) return sendJson(res, 200, { session: saved.session });
   }
   const session = await app.updateSession(id, principalId, patch);
   if (!session) return sendJson(res, 404, { error: "not_found" });
@@ -1396,7 +1399,6 @@ export const surfaceRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "POST", path: "/v1/sessions/:id/title", auth: "source", handle: regenerateSessionTitle },
   { method: "POST", path: "/v1/sessions/:id/fork", auth: "source", handle: forkSession },
   { method: "POST", path: "/v1/sessions/:id/detach", auth: "source", handle: detachSession },
-  { method: "PUT", path: "/v1/sessions/:id/runtime", auth: "source", handle: putSessionRuntime },
   { method: "POST", path: "/v1/sessions/:id/goal/cancel", auth: "source", handle: cancelSessionGoal },
   { method: "GET", path: "/v1/sessions/:id/approvals", auth: "source", handle: listSessionApprovals },
   { method: "GET", path: "/v1/sessions/:id/background", auth: "source", handle: getSessionBackground },

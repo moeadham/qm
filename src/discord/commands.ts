@@ -39,6 +39,7 @@ async function modelAnswer(
   const threadRef = await modelThread(api, channelId);
   if (!threadRef) return NO_MODEL_HERE;
   const found = await core.modelMenu(principal, threadRef);
+  if (found === undefined) return "Model selection isn't available on this QM.";
   if (!found) return MODEL_AFTER_FIRST_MESSAGE;
   const { menu, session, current } = found;
   if (!query)
@@ -57,7 +58,8 @@ async function modelAnswer(
     return `"${safeClip(query, 80)}" matches more than one model: ${(result.candidates ?? [])
       .map((c) => `\`${c.harnessId}:${c.modelId}\``)
       .join(", ")}. Pick one of those.`;
-  if (result.error === "no_session" || result.error === "not_found") return MODEL_AFTER_FIRST_MESSAGE;
+  if (result.error === "no_session") return MODEL_AFTER_FIRST_MESSAGE;
+  if (result.error === "runtime_unavailable") return "Model selection isn't available on this QM.";
   return `That model can't be used here: ${result.error}.`;
 }
 

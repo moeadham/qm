@@ -37,7 +37,6 @@ import {
   type PendingApproval,
   type QueuedRun,
   alwaysSteer,
-  saveSessionRuntime,
   switchedDefault,
 } from "./core-bridge";
 import { errMessage } from "../../chassis/src/errors";
@@ -47,6 +46,7 @@ import {
   defaultEffortForModel,
   defaultModelValue,
   getModelOptions,
+  harnessSupportsEffort,
   harnessSupportsFastMode,
   harnessSupportsSteer,
   type EffortLevel,
@@ -55,7 +55,7 @@ import {
 } from "./model-options";
 import { modelSupportsFastMode } from "./pi-models";
 import type { ComposerSurface, ConvCtx } from "./conv-types";
-import { bumpSessionActivity, dropPendingSession, renderList, sessionsState } from "./sessions";
+import { bumpSessionActivity, dropPendingSession, renderList, saveSessionModel, sessionsState } from "./sessions";
 import { appState } from "./shell";
 import { base64ToText, bytesToBase64, insertIntoDraft, pasteChipLabel } from "./paste-text";
 import { clearDraft, newChatDraftKey, saveDraft } from "./drafts";
@@ -115,26 +115,18 @@ function savedSession(threadRef: string): CoreSession | undefined {
   return sessionsState.list.find((s) => s.id && s.threadRef === threadRef);
 }
 
-function runtimeValue(runtime: SessionRuntime | undefined): ModelOptionValue | undefined {
+function runtimeValue(runtime: SessionRuntime | null | undefined): ModelOptionValue | undefined {
   return runtime ? `${runtime.harnessId}:${runtime.modelId}` : undefined;
 }
 
 function threadPick(threadRef: string): ModelOptionValue | undefined {
-  return runtimeValue(savedSession(threadRef)?.runtime) ?? threadModelPicks.get(threadRef);
+  const session = savedSession(threadRef);
+  return session ? runtimeValue(session.runtime) : threadModelPicks.get(threadRef);
 }
 
-function saveSessionPick(threadRef: string, value: ModelOptionValue | null): void {
+function saveSessionPick(threadRef: string, runtime: SessionRuntime | null): void {
   const session = savedSession(threadRef);
-  if (!session || runtimeValue(session.runtime) === (value ?? undefined)) return;
-  const previous = session.runtime;
-  const split = value ? value.indexOf(":") : -1;
-  const runtime = value && split > 0 ? { harnessId: value.slice(0, split), modelId: value.slice(split + 1) } : null;
-  if (runtime) session.runtime = runtime;
-  else delete session.runtime;
-  void saveSessionRuntime(session.id, runtime).catch(() => {
-    if (previous) session.runtime = previous;
-    else delete session.runtime;
-  });
+  if (session) saveSessionModel(session.id, runtime);
 }
 
 function rememberThreadPick(threadRef: string, value: ModelOptionValue): void {
@@ -145,14 +137,12 @@ function rememberThreadPick(threadRef: string, value: ModelOptionValue): void {
   while (merged.size > THREAD_PICKS_CAP) merged.delete(merged.keys().next().value as string);
   threadModelPicks = merged;
   persistPreference(THREAD_PICKS_STORAGE_KEY, JSON.stringify([...merged]));
-  saveSessionPick(threadRef, value);
 }
 
 function forgetThreadPick(threadRef: string): void {
   threadModelPicks = loadThreadPicks();
   threadModelPicks.delete(threadRef);
   persistPreference(THREAD_PICKS_STORAGE_KEY, JSON.stringify([...threadModelPicks]));
-  saveSessionPick(threadRef, null);
 }
 
 function carryModelPick(fromThreadRef: string | null, toThreadRef: string): void {
@@ -543,6 +533,9 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     loadout = loadLoadout(loadoutKey);
     let selected = currentModelOption();
     const threadRef = ctx.chat.state.threadRef;
+    const savedRuntime = threadRef ? savedSession(threadRef)?.runtime : undefined;
+    if (savedRuntime?.effortLevel) effortOverride ??= savedRuntime.effortLevel as EffortLevel;
+    if (typeof savedRuntime?.fastMode === "boolean") fastModeOverride ??= savedRuntime.fastMode;
     if (selected && threadRef && threadPick(threadRef) === undefined) {
       const preferred = modelLoadoutOptions(getModelOptions(scopeKey()), loadout, selected.harnessId).find(
         (option) => presetModelId(option.value) === presetModelId(selected!.value),
@@ -2201,7 +2194,10 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
   }
 
   function clearChatSelection(): void {
-    if (ctx.chat.state.threadRef) forgetThreadPick(ctx.chat.state.threadRef);
+    if (ctx.chat.state.threadRef) {
+      forgetThreadPick(ctx.chat.state.threadRef);
+      if (!options.prepareSubmit) saveSessionPick(ctx.chat.state.threadRef, null);
+    }
     effortOverride = undefined;
     fastModeOverride = undefined;
     restoredLoadout = undefined;
@@ -2222,6 +2218,17 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     if (composerState.effortLevel === previousDefaultEffort) {
       composerState.effortLevel = defaultEffortForModel(option.model);
     }
+    if (ctx.chat.state.threadRef && !options.prepareSubmit)
+      saveSessionPick(ctx.chat.state.threadRef, {
+        harnessId: option.harnessId,
+        modelId: option.model.id,
+        ...(harnessSupportsEffort(option.harnessId) && composerState.effortLevel
+          ? { effortLevel: composerState.effortLevel }
+          : {}),
+        ...(harnessSupportsFastMode(option.harnessId)
+          ? { fastMode: modelSupportsFastMode(scopeKey(), option.model.id) && effectiveFastMode() }
+          : {}),
+      });
     composerState.openMenu = null;
     ctx.chat.drawActiveChat(agent);
   }

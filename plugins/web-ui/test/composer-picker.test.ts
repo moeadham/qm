@@ -48,6 +48,7 @@ test("the personal-account picker preserves composer choices and saves context d
   };
   const updates: Record<string, unknown>[] = [];
   const sessionSaves: Array<[string, unknown]> = [];
+  const sessionRows: Array<Record<string, unknown>> = [];
   let failNextGet = true;
   let runtimeReads = 0;
   let failNextPut = false;
@@ -87,9 +88,11 @@ test("the personal-account picker preserves composer choices and saves context d
         }
         return Response.json(config);
       }
-      if (String(input).startsWith("/api/sessions/") && init?.method === "PUT") {
-        sessionSaves.push([String(input), JSON.parse(String(init.body))]);
-        return Response.json({});
+      if (String(input).startsWith("/api/sessions/") && init?.method === "POST") {
+        const patch = JSON.parse(String(init.body));
+        sessionSaves.push([String(input), patch]);
+        const { runtime: _runtime, ...row } = sessionRows[0]!;
+        return Response.json({ session: patch.runtime ? { ...row, runtime: patch.runtime } : row });
       }
       if (String(input) !== "/api/runtime-config" || init?.method !== "PUT")
         throw new Error(`Unexpected request: ${String(input)}`);
@@ -741,29 +744,42 @@ test("the personal-account picker preserves composer choices and saves context d
     assert.match(button(".loadout-button").getAttribute("aria-label")!, /^Model: Beta, /);
     (ctx.chat as unknown as { turnRuntime: () => unknown }).turnRuntime = () => null;
     const { sessionsState } = await vite.ssrLoadModule("/src/sessions.ts");
-    sessionsState.list = [
-      {
-        id: "s-picked",
-        type: "dm",
-        scopeId: "personal:tester",
-        threadRef: "web:tester:picked",
-        createdAt: 1,
-        runtime: { harnessId: "pi", modelId: "gamma" },
-      },
-    ];
+    const row = {
+      id: "s-picked",
+      type: "dm",
+      scopeId: "personal:tester",
+      threadRef: "web:tester:picked",
+      createdAt: 1,
+    };
+    sessionRows.splice(0, sessionRows.length, row);
+    sessionsState.list = [{ ...row }];
+    await mount();
+    assert.equal(
+      composer!.followsDefault(),
+      true,
+      "once the session exists, this browser's old pick no longer applies",
+    );
+    assert.equal(sessionSaves.length, 0, "opening a chat saves nothing");
+    sessionsState.list = [{ ...row, runtime: { harnessId: "pi", modelId: "gamma", effortLevel: "high" } }];
     await mount();
     assert.match(
       button(".loadout-button").getAttribute("aria-label")!,
       /^Model: Gamma, /,
       "the session's saved model wins over this browser's cached pick",
     );
+    assert.equal(composer!.state.effortLevel, "high", "the session's saved effort is restored");
+    assert.equal(sessionSaves.length, 0);
     pick("Alpha").click();
-    await tick();
+    for (let i = 0; i < 20 && sessionSaves.length === 0; i++) await tick();
     assert.equal(sessionSaves.length, 1);
-    const [savedPath, savedRuntime] = sessionSaves[0]!;
-    assert.equal(savedPath, "/api/sessions/s-picked/runtime");
-    assert.equal((savedRuntime as { modelId: string }).modelId, "alpha");
-    assert.deepEqual(sessionsState.list[0].runtime, savedRuntime);
+    const [savedPath, savedPatch] = sessionSaves[0]! as [string, { runtime: { modelId: string } }];
+    assert.equal(savedPath, "/api/sessions/s-picked");
+    assert.equal(savedPatch.runtime.modelId, "alpha");
+    assert.equal(sessionsState.list[0].runtime.modelId, "alpha");
+    sessionSaves.length = 0;
+    await composer!.followScopeDefault(agent);
+    for (let i = 0; i < 20 && sessionSaves.length === 0; i++) await tick();
+    assert.deepEqual(sessionSaves, [["/api/sessions/s-picked", { runtime: null }]]);
     sessionsState.list = [];
     ctx.chat.state.threadRef = "web:tester:server-default";
     await mount();

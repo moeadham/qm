@@ -25,7 +25,11 @@ export interface DiscordCoreClient extends SurfaceCoreClient {
   allowLinkPrompt(discordId: string): Promise<boolean>;
   unlink(discordId: string): Promise<boolean>;
   deploymentAccessRequest(deliveryId: string): Promise<DeploymentAccessRequest | undefined>;
-  modelMenu(principalId: string, threadRef: string, opts?: { refresh?: boolean }): Promise<SessionModels | undefined>;
+  modelMenu(
+    principalId: string,
+    threadRef: string,
+    opts?: { refresh?: boolean },
+  ): Promise<SessionModels | null | undefined>;
   setModel(principalId: string, threadRef: string, query: string): Promise<SetModelResult>;
 }
 
@@ -62,10 +66,11 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     principalId: string,
     threadRef: string,
     opts: { refresh?: boolean } = {},
-  ): Promise<SessionModels | undefined> => {
+  ): Promise<SessionModels | null | undefined> => {
+    if (!deps.runtime?.config) return undefined;
     const thread = await deps.sessions.getByThread(threadRef);
     const session = thread && (await deps.sessions.getForParticipant(thread.id, principalId));
-    if (!session || !deps.runtime?.config) return undefined;
+    if (!session) return null;
     if (opts.refresh !== false) await deps.runtime.refreshModels?.();
     const menu = await userRuntimeConfigBody({ deps: deps.runtime }, session.scopeId, principalId);
     return { session, menu, current: session.runtime ?? menu.effective };
@@ -78,7 +83,8 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     async setModel(principalId, threadRef, query) {
       const runtime = deps.runtime;
       const found = await modelMenu(principalId, threadRef);
-      if (!runtime || !found) return { ok: false, error: "no_session" };
+      if (!runtime || found === undefined) return { ok: false, error: "runtime_unavailable" };
+      if (!found) return { ok: false, error: "no_session" };
       const { session, menu, current } = found;
       let choice: RuntimeChoice | null = null;
       if (query.toLowerCase() !== "default") {
@@ -94,7 +100,7 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
       }
       const out = await setSessionRuntime(
         { sessions: deps.sessions, runtime, ...(deps.auditLog ? { auditLog: deps.auditLog } : {}) },
-        session.id,
+        session,
         principalId,
         choice,
       );

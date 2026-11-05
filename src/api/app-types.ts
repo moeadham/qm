@@ -391,6 +391,7 @@ export interface App {
   removeProjectMember(id: string, principalId: string, memberId: string): Promise<ProjectViewMutation>;
   setProjectSlackChannel(id: string, principalId: string, channel: string | null): Promise<ProjectViewMutation>;
   renameProject(id: string, principalId: string, name: string): Promise<ProjectViewMutation>;
+  writableSession(sessionId: string, principalId: string): Promise<Session | null>;
   updateSession(
     sessionId: string,
     principalId: string,

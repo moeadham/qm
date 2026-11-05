@@ -1317,20 +1317,6 @@ const apiRoutes: readonly WebRoute[] = [
   })),
   { method: "GET", path: "/api/composio/slack", handle: (c) => relayCore(c.res, "GET", "/v1/composio/slack") },
   { method: "GET", path: "/api/discord-link", handle: (c) => relayCore(c.res, "GET", "/v1/discord-link") },
-  {
-    method: "PUT",
-    path: "/api/sessions/:id/runtime",
-    handle: async (c) => {
-      const body = await readJson(c.req, c.res, false);
-      if (!body) return;
-      return relayCore(
-        c.res,
-        "PUT",
-        `/v1/sessions/${encodeURIComponent(c.params.id!)}/runtime`,
-        JSON.stringify({ ...body, principalId: c.user }),
-      );
-    },
-  },
   { method: "DELETE", path: "/api/discord-link", handle: (c) => relayCore(c.res, "DELETE", "/v1/discord-link") },
   {
     method: "POST",
@@ -2169,6 +2155,7 @@ const apiRoutes: readonly WebRoute[] = [
         pinned?: unknown;
         color?: unknown;
         unread?: unknown;
+        runtime?: unknown;
       }>(req, res, false);
       if (!p) return;
       const patch: {
@@ -2177,20 +2164,26 @@ const apiRoutes: readonly WebRoute[] = [
         pinned?: boolean;
         color?: string | null;
         unread?: boolean;
+        runtime?: unknown;
       } = {};
       if (p.title === null || typeof p.title === "string") patch.title = p.title as string | null;
       if (typeof p.archived === "boolean") patch.archived = p.archived;
       if (typeof p.pinned === "boolean") patch.pinned = p.pinned;
       if (p.color === null || typeof p.color === "string") patch.color = p.color as string | null;
       if (typeof p.unread === "boolean") patch.unread = p.unread;
+      if (p.runtime === null || (typeof p.runtime === "object" && p.runtime !== undefined)) patch.runtime = p.runtime;
       if (
         patch.title === undefined &&
         patch.archived === undefined &&
         patch.pinned === undefined &&
         patch.color === undefined &&
-        patch.unread === undefined
+        patch.unread === undefined &&
+        patch.runtime === undefined
       ) {
-        return json(res, 400, { error: "bad_request", message: "title, archived, pinned, color, or unread required" });
+        return json(res, 400, {
+          error: "bad_request",
+          message: "title, archived, pinned, color, unread, or runtime required",
+        });
       }
       return relayCore(
         res,
