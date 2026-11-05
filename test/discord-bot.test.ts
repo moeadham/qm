@@ -170,6 +170,7 @@ interface Harness {
   deliveriesAcked: Array<{ id: string; body?: unknown }>;
   queue: Delivery[];
   decisions: unknown[][];
+  channels: Array<[string, string]>;
 }
 
 function harness(opts: {
@@ -194,6 +195,7 @@ function harness(opts: {
     deliveriesAcked: [],
     queue: [],
     decisions: [],
+    channels: [],
     core: undefined as unknown as DiscordCoreClient,
   };
   const real = createDiscordCoreClient({
@@ -220,6 +222,7 @@ function harness(opts: {
     portalUrl: "https://qm.example.com/",
     ...(opts.runtime ? { runtime: opts.runtime } : {}),
     sessions: opts.sessions ?? createMemorySessionStore(),
+    discordChannels: { remember: async (channelId, guildId) => void h.channels.push([channelId, guildId]) },
   });
   h.core = {
     ...real,
@@ -472,6 +475,21 @@ test("an unmentioned thread message QM stayed quiet on posts nothing when it fai
   await plugin.stop();
 
   assert.equal(api.sent.length, 0);
+});
+
+test("a message in a server thread records its channel so the agent can work in it", async () => {
+  const h = harness({});
+  const api = new FakeDiscord();
+  const thread = "800000000000000025";
+  api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({ ...dm(ALICE, "hello"), channel_id: thread, guild_id: GUILD, id: "800000000000000026" });
+  await until(() => h.turns.length === 1, "turn");
+  handlers.onMessage(dm(ALICE, "a direct message"));
+  await until(() => h.turns.length === 2, "dm turn");
+  await plugin.stop();
+
+  assert.deepEqual(h.channels, [[CHANNEL, GUILD]]);
 });
 
 test("a streamed reply posts one placeholder, edits it as text grows, records it as the run's edit ref, and finishes in place", async () => {
