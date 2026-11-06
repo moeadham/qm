@@ -361,7 +361,9 @@ export function createDiscordBot(deps: {
             key: runId ? `run:${runId}` : key,
           });
           if (problems.length)
-            await postMessage(api, channelId, `⚠️ ${problems.join("; ")}.`, { key: `${runId ?? key}:file-notes` });
+            await postMessage(api, channelId, `⚠️ ${problems.join("; ")}.`, {
+              key: `${runId ? `run:${runId}` : key}:file-notes`,
+            });
         }
       } catch (error) {
         if (runId) flow.inFlightRuns.delete(runId);

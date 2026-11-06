@@ -49,6 +49,7 @@ export function receiveDiscordFiles(
     (f) => downloadDiscordFile(f, fetchImpl),
     stage,
     () => author,
+    "",
   );
 }
 
@@ -70,9 +71,21 @@ export async function sendDiscordFiles(
     if (data.length > DISCORD_UPLOAD_LIMIT_BYTES) problems.push(`"${a.name}" is too large for Discord (10 MB limit)`);
     else if (data.length > 0) ready.push({ name: a.name, data });
   }
-  for (let i = 0; i < ready.length; i += FILES_PER_MESSAGE)
-    await api.sendFiles(channelId, ready.slice(i, i + FILES_PER_MESSAGE), {
-      nonce: messageNonce(`${opts.key}:files`, i / FILES_PER_MESSAGE),
+  const batches: Array<Array<{ name: string; data: Buffer }>> = [];
+  let bytes = 0;
+  for (const file of ready) {
+    const current = batches.at(-1);
+    if (!current || current.length >= FILES_PER_MESSAGE || bytes + file.data.length > DISCORD_UPLOAD_LIMIT_BYTES) {
+      batches.push([file]);
+      bytes = file.data.length;
+    } else {
+      current.push(file);
+      bytes += file.data.length;
+    }
+  }
+  for (const [i, batch] of batches.entries())
+    await api.sendFiles(channelId, batch, {
+      nonce: messageNonce(`${opts.key}:files`, i),
       ...(i === 0 && opts.replyTo ? { replyTo: opts.replyTo } : {}),
     });
   return problems;

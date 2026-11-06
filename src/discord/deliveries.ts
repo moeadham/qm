@@ -74,6 +74,22 @@ export function createDiscordDeliveryPoller(deps: {
     });
   }
 
+  async function postTextAndFiles(channelId: string, d: Delivery, replyTo?: string): Promise<void> {
+    const key = d.idempotencyKey ?? d.id;
+    if (d.text.trim())
+      await postMessage(api, channelId, d.text.trim(), {
+        key,
+        ...(replyTo ? { replyTo } : {}),
+        ...(d.destination.editRef ? { editRef: d.destination.editRef } : {}),
+      });
+    if (!d.attachments?.length) return;
+    const problems = await sendDiscordFiles(api, core, channelId, d.attachments, {
+      key,
+      ...(replyTo && !d.text.trim() ? { replyTo } : {}),
+    });
+    if (problems.length) await postMessage(api, channelId, `⚠️ ${problems.join("; ")}.`, { key: `${key}:file-notes` });
+  }
+
   async function deliverConversation(d: Delivery): Promise<void> {
     const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
     if (runId && flow.inFlightRuns.has(runId)) return;
@@ -91,20 +107,7 @@ export function createDiscordDeliveryPoller(deps: {
       if (card) return postCard(channelId, d, card);
       if (d.destination.react || d.destination.pin)
         console.log(`[discord] delivery ${d.id}: reactions and pins are not delivered on Discord yet`);
-      const key = d.idempotencyKey ?? d.id;
-      if (d.text.trim())
-        await postMessage(api, channelId, d.text.trim(), {
-          key,
-          ...(replyTo ? { replyTo } : {}),
-          ...(d.destination.editRef ? { editRef: d.destination.editRef } : {}),
-        });
-      if (!d.attachments?.length) return;
-      const problems = await sendDiscordFiles(api, core, channelId, d.attachments, {
-        key,
-        ...(replyTo && !d.text.trim() ? { replyTo } : {}),
-      });
-      if (problems.length)
-        await postMessage(api, channelId, `⚠️ ${problems.join("; ")}.`, { key: `${key}:file-notes` });
+      await postTextAndFiles(channelId, d, replyTo);
     });
   }
 
@@ -119,9 +122,9 @@ export function createDiscordDeliveryPoller(deps: {
         await postCard(dm, d, card);
         return { recipientThreadRef: discordDmThreadRef(dm) };
       }
-      if (!d.text.trim()) return;
+      if (!d.text.trim() && !d.attachments?.length) return;
       const dm = await api.openDm(discordId);
-      await postMessage(api, dm, d.text.trim(), { key: d.idempotencyKey ?? d.id });
+      await postTextAndFiles(dm, d);
       return { recipientThreadRef: discordDmThreadRef(dm) };
     });
   }

@@ -597,6 +597,33 @@ test("a file the agent posts to a thread is uploaded there", async () => {
   assert.equal(api.sent.length, 0);
 });
 
+test("a file sent to a person by DM is uploaded to their DM", async () => {
+  const h = harness({});
+  installPrincipalLinks({
+    canonical: (key) => (key === `discord:${ALICE}` ? "alice@example.com" : undefined),
+    aliases: (key) => (key === "alice@example.com" ? [`discord:${ALICE}`] : []),
+  });
+  h.blobs.set("out-4", Buffer.from("NOTES"));
+  h.queue.push({
+    id: "d-dm-file",
+    destination: { type: "principal", target: "alice@example.com" },
+    text: "",
+    attachments: [{ name: "notes.txt", mimetype: "text/plain", sizeBytes: 5, blobId: "out-4" }],
+    idempotencyKey: "dm:file",
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  const api = new FakeDiscord();
+  try {
+    const { plugin } = await boot(h, api);
+    await until(() => h.deliveriesAcked.length === 1, "delivery acked");
+    await plugin.stop();
+  } finally {
+    installPrincipalLinks(null);
+  }
+  assert.deepEqual(api.files, [{ channelId: `dm-${ALICE}`, names: ["notes.txt"], bytes: ["NOTES"] }]);
+});
+
 test("a streamed reply posts one placeholder, edits it as text grows, records it as the run's edit ref, and finishes in place", async () => {
   const h = harness({ snapshots: ["Thinking", "Thinking about it"], result: () => ({ status: "ok", reply: "Done." }) });
   const { api, handlers, plugin } = await boot(h);

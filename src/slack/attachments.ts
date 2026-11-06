@@ -125,6 +125,7 @@ export async function processInboundFiles(
   download: (file: SlackFile) => Promise<Uint8Array>,
   stage: (bytes: Uint8Array) => Promise<{ blobId: string }>,
   resolveAuthor?: (userId: string | undefined) => Promise<string | undefined> | string | undefined,
+  accessHint = "check my file-access permission (files:read)",
 ): Promise<ProcessedInbound> {
   const attachments: IncomingAttachment[] = [];
   const issues: string[] = [];
@@ -152,7 +153,7 @@ export async function processInboundFiles(
         err instanceof BlobTooLargeError
           ? "that request was too large — try fewer or smaller files"
           : (err as Error).message;
-      issues.push(`I couldn't read "${label}" — check my file-access permission (files:read) (${detail})`);
+      issues.push(`I couldn't read "${label}"${accessHint ? ` — ${accessHint}` : ""} (${detail})`);
     }
   }
   return { attachments, issues };
