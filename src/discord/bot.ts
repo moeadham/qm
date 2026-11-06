@@ -95,13 +95,16 @@ export function createDiscordBot(deps: {
     return m.mentions.some((u) => u.id === self.id) || m.content.includes(selfMention);
   }
 
-  async function relevantPlace(m: DiscordMessage): Promise<{ channel?: DiscordChannel } | undefined> {
+  async function relevantPlace(
+    m: DiscordMessage,
+  ): Promise<{ channel?: DiscordChannel; addressed: boolean } | undefined> {
     if (m.author.bot || m.webhook_id || m.author.id === self.id) return undefined;
-    if (!m.guild_id) return {};
+    if (!m.guild_id) return { addressed: true };
     if (!deps.guildIds.has(m.guild_id)) return undefined;
+    const addressed = mentionsSelf(m);
     const channel = await channelOf(m.channel_id);
-    if (mentionsSelf(m)) return { channel };
-    if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.ownerId === self.id) return { channel };
+    if (addressed) return { channel, addressed };
+    if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.ownerId === self.id) return { channel, addressed };
     return undefined;
   }
 
@@ -216,10 +219,11 @@ export function createDiscordBot(deps: {
     };
   }
 
-  function replyText(result: TurnResult, dm: boolean): string {
+  function replyText(result: TurnResult, addressed: boolean, dm: boolean): string {
     if (result.status === "ok") return result.reply?.trim() || (result.stopped ? "Stopped." : "");
-    if (result.status === "refused" || result.status === "failed") return `⚠️ ${userFacingFailureClause(result)}`;
-    if (result.status !== "pending_approval") return "";
+    if (result.status === "refused" || result.status === "failed")
+      return addressed ? `⚠️ ${userFacingFailureClause(result)}` : "";
+    if (result.status !== "pending_approval" || !addressed) return "";
     if (!result.pendingApprovals?.length) return result.reason ?? "This conversation is waiting on a pending approval.";
     return dm ? "" : "I sent you a DM to approve before I continue.";
   }
@@ -269,7 +273,7 @@ export function createDiscordBot(deps: {
       },
       deliveryTarget: place.channelId,
       text,
-      origin: { kind: "human" },
+      origin: relevant.addressed ? { kind: "human" } : { kind: "ambient", live: true },
       gatewayContext: {
         location: place.kind === "dm" ? "a Discord direct message with the user" : "a Discord thread",
         details: { channel: place.channelId },
@@ -278,15 +282,19 @@ export function createDiscordBot(deps: {
       redeliveryKey: messageKey,
       ...(place.kind === "channel" ? await threadContext(place, m) : {}),
     };
-    await converse(place.channelId, body, { key: messageKey, ...(gate ? { gate } : {}) });
+    await converse(place.channelId, body, {
+      addressed: relevant.addressed,
+      key: messageKey,
+      ...(gate ? { gate } : {}),
+    });
   }
 
   async function converse(
     channelId: string,
     body: CoreTurnBody,
-    opts: { key: string; gate?: AcceptGate; quiet?: boolean },
+    opts: { addressed: boolean; key: string; gate?: AcceptGate; quiet?: boolean },
   ): Promise<TurnOutcome> {
-    const { key, gate, quiet } = opts;
+    const { addressed, key, gate, quiet } = opts;
     const writer = createReplyWriter(channelId);
     let queuedRunId: string | undefined;
     let accepted = false;
@@ -294,7 +302,14 @@ export function createDiscordBot(deps: {
       accepted = true;
       gate?.persisted();
     };
-    const stopTyping = startTyping(channelId);
+    let finished = false;
+    let typing = addressed;
+    let stopTyping = addressed ? startTyping(channelId) : () => {};
+    const typeOnceReplying = (): void => {
+      if (finished || typing) return;
+      typing = true;
+      stopTyping = startTyping(channelId);
+    };
     try {
       let result: TurnResult;
       try {
@@ -305,6 +320,7 @@ export function createDiscordBot(deps: {
             accept();
           },
           onSteered: accept,
+          onReplying: typeOnceReplying,
           onSnapshot: (snapshot) =>
             writer.stream(snapshot, async (messageId) => {
               if (queuedRunId) await core.reportRunEditRef(queuedRunId, messageId);
@@ -313,7 +329,7 @@ export function createDiscordBot(deps: {
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));
         console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
-        if (!quiet)
+        if (typing && !quiet)
           await writer
             .finish(`⚠️ ${turnFailureText(error)}`, `failure:${key}`)
             .catch(swallowAs("discord: failure note", undefined));
@@ -321,7 +337,7 @@ export function createDiscordBot(deps: {
       }
       if (!accepted) accept();
       if (result.steered) return { result, accepted };
-      const reply = quiet && result.status !== "ok" ? "" : replyText(result, body.conversation.kind === "dm");
+      const reply = quiet && result.status !== "ok" ? "" : replyText(result, typing, body.conversation.kind === "dm");
       const runId = queuedRunId;
       try {
         await writer.finish(reply, runId ? `run:${runId}` : key);
@@ -336,6 +352,7 @@ export function createDiscordBot(deps: {
       if (runId && hasRunDelivery(result)) flow.ackRunDelivery(runId);
       return { result, accepted };
     } finally {
+      finished = true;
       stopTyping();
     }
   }
@@ -359,7 +376,7 @@ export function createDiscordBot(deps: {
         });
     }
     if (!body.deliveryTarget) return { accepted: false };
-    return converse(body.deliveryTarget, body, { key, quiet: true });
+    return converse(body.deliveryTarget, body, { addressed: true, key, quiet: true });
   }
 
   return { handleMessage, resumeTurn };
