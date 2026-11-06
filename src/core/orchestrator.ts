@@ -2407,6 +2407,28 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const volatileContext = systemPrompt.slice(stableSystemBytes).trim();
         systemPrompt = systemPrompt.slice(0, stableSystemBytes);
 
+        const wakeComputerEarly = async (entries: SessionEntry[]): Promise<void> => {
+          const sessionUsedTools = entries.some(
+            (e) =>
+              e.type === "tool_call" &&
+              !(
+                e.payload !== null &&
+                typeof e.payload === "object" &&
+                "tool" in e.payload &&
+                (e.payload.tool === "skill" ||
+                  (e.payload.tool === "skills" && "action" in e.payload && e.payload.action === "read"))
+              ),
+          );
+          if (
+            !strictReadOnly &&
+            deps.eagerProvision &&
+            sessionUsedTools &&
+            !(automatedTurn && !!input.surface && isPollSurface(input.surface)) &&
+            (swarmBinding?.sandboxId || (await deps.sandboxResources?.resolve(memoryScopeId)) !== null)
+          ) {
+            void provision(true).catch(swallowAs("orchestrator: eager provision", undefined));
+          }
+        };
         let detectedReply = false;
         if (
           ambientTurn &&
@@ -2419,8 +2441,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 findTrailingPartialTurn((await transcripts.forRender(session.id)).entries, input.text)))
           )
         ) {
+          const contextWindow = (await deps.sessions.getContextWindow(session.id)).entries;
+          const earlyWake = wakeComputerEarly(filterHistory(forModelContext(contextWindow))).catch(
+            swallowAs("orchestrator: wake computer during detection", undefined),
+          );
           const detectHistory = filterHistory(
-            memoryBoundedEntries((await deps.sessions.getContextWindow(session.id)).entries)
+            memoryBoundedEntries(contextWindow)
               .slice(-DETECT_HISTORY_TAIL)
               .filter((e) => e.type !== "soul"),
           );
@@ -2442,6 +2468,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           });
           detectMs = Date.now() - detectStart;
           if (!decision.respond) {
+            await earlyWake;
             const reactions = decision.reactions?.length ? decision.reactions : undefined;
             const declineStatus = reactions ? "react" : "silent";
             deps.auditLog.record({
@@ -2469,6 +2496,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               ? { status: "react", sessionId: session.id, reactions }
               : { status: "silent", sessionId: session.id };
           }
+          await earlyWake;
           detectedReply = true;
         }
         if (ambientTurn) assignSessionTitle();
@@ -3102,26 +3130,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           turnInput = `The human released quarantined tool output recorded in the conversation. Continue the original task using that output. The tool action already ran; do not repeat it. Original task: ${baseText}`;
         }
         const isPollFire = automatedTurn && !!input.surface && isPollSurface(input.surface);
-        const sessionUsedTools = visibleHistory.some(
-          (e) =>
-            e.type === "tool_call" &&
-            !(
-              e.payload !== null &&
-              typeof e.payload === "object" &&
-              "tool" in e.payload &&
-              (e.payload.tool === "skill" ||
-                (e.payload.tool === "skills" && "action" in e.payload && e.payload.action === "read"))
-            ),
-        );
-        if (
-          !strictReadOnly &&
-          deps.eagerProvision &&
-          sessionUsedTools &&
-          !isPollFire &&
-          (swarmBinding?.sandboxId || (await deps.sandboxResources?.resolve(memoryScopeId)) !== null)
-        ) {
-          void provision(true).catch(swallowAs("orchestrator: eager provision", undefined));
-        }
+        await wakeComputerEarly(visibleHistory);
         const turnStart = Date.now();
         let firstChunkAt: number | undefined;
         let lastChunkAt: number | undefined;
