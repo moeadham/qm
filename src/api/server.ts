@@ -53,7 +53,7 @@ async function capabilityAdminDenied(
   if (method === "GET" && pathname === "/v1/admin/whoami") return null;
   if (claims.aud !== CONTROL_PLANE_AUD) return "admin routes require the per-turn agent token";
   if (!livePersonCapability(claims) && !unattendedAdminReadAllowed(method, pathname, claims)) {
-    return "admin actions through the agent require a turn the admin started themselves — autonomous turns (crons, webhooks) cannot act as an admin";
+    return "admin actions through the agent need the admin to ask live in a private conversation: send QM a direct message, or use the web chat. Shared rooms QM can't confirm hold only company members, and autonomous turns (crons, webhooks), cannot act as an admin";
   }
   if (pathname.startsWith("/v1/admin/grants")) {
     return "admin grant changes (promote/revoke) are portal-only — the agent cannot manage who governs the org";
