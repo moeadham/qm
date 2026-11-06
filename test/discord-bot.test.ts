@@ -76,6 +76,16 @@ class FakeDiscord implements DiscordApi {
   async me() {
     return { id: BOT, username: "qm" };
   }
+  files: Array<{ channelId: string; names: string[]; bytes: string[]; replyTo?: string }> = [];
+  async sendFiles(channelId: string, files: Array<{ name: string; data: Buffer }>, opts: { replyTo?: string } = {}) {
+    this.files.push({
+      channelId,
+      names: files.map((f) => f.name),
+      bytes: files.map((f) => f.data.toString()),
+      ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+    });
+    return `msg-${this.next++}`;
+  }
   async send(channelId: string, content: string, opts: { nonce?: string; buttons?: DiscordButton[] } = {}) {
     const id = `msg-${this.next++}`;
     this.sent.push({
@@ -171,6 +181,7 @@ interface Harness {
   queue: Delivery[];
   decisions: unknown[][];
   channels: Array<[string, string]>;
+  blobs: Map<string, Buffer>;
 }
 
 function harness(opts: {
@@ -196,6 +207,7 @@ function harness(opts: {
     queue: [],
     decisions: [],
     channels: [],
+    blobs: new Map(),
     core: undefined as unknown as DiscordCoreClient,
   };
   const real = createDiscordCoreClient({
@@ -248,6 +260,16 @@ function harness(opts: {
     async stopConversation(threadRef) {
       h.stopped.push(threadRef);
       return true;
+    },
+    async stageBlob(bytes) {
+      const blobId = `blob-${h.blobs.size + 1}`;
+      h.blobs.set(blobId, Buffer.from(bytes));
+      return { blobId, sizeBytes: bytes.length };
+    },
+    async readBlob(blobId) {
+      const blob = h.blobs.get(blobId);
+      if (!blob) throw new Error(`blob ${blobId} not found`);
+      return blob;
     },
     async claimDeliveries(type) {
       const rows = h.queue.filter((d) => d.destination.type === type && d.deliveredAt === null);
@@ -490,6 +512,89 @@ test("a message in a server thread records its channel so the agent can work in 
   await plugin.stop();
 
   assert.deepEqual(h.channels, [[CHANNEL, GUILD]]);
+});
+
+test("an image sent to QM reaches the turn as a file, and a non-Discord link is refused", async () => {
+  const h = harness({});
+  const realFetch = globalThis.fetch;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    fetched.push(String(url));
+    return new Response("PNGDATA", { headers: { "content-type": "image/png" } });
+  }) as typeof fetch;
+  try {
+    const { handlers, plugin } = await boot(h);
+    handlers.onMessage({
+      ...dm(ALICE, ""),
+      attachments: [
+        {
+          id: "a1",
+          filename: "screen.png",
+          size: 7,
+          url: "https://cdn.discordapp.com/attachments/1/2/screen.png",
+          content_type: "image/png",
+        },
+        { id: "a2", filename: "evil.png", size: 7, url: "https://example.com/evil.png", content_type: "image/png" },
+      ],
+    });
+    await until(() => h.turns.length === 1, "turn");
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  const turn = h.turns[0]!;
+  assert.deepEqual(fetched, ["https://cdn.discordapp.com/attachments/1/2/screen.png"]);
+  assert.deepEqual(
+    turn.attachments?.map((a) => [a.name, a.mimetype, a.sizeBytes]),
+    [["screen.png", "image/png", 7]],
+  );
+  assert.equal(h.blobs.get(turn.attachments![0]!.blobId)?.toString(), "PNGDATA");
+  assert.match(turn.inboundNotes?.join(" ") ?? "", /evil\.png/);
+});
+
+test("files QM returns are uploaded after its reply, and oversized ones are explained", async () => {
+  const h = harness({
+    result: () => ({
+      status: "ok",
+      reply: "here you go",
+      attachments: [
+        { name: "chart.png", mimetype: "image/png", sizeBytes: 5, blobId: "out-1" },
+        { name: "huge.zip", mimetype: "application/zip", sizeBytes: 50 * 1024 * 1024, blobId: "out-2" },
+      ],
+    }),
+  });
+  h.blobs.set("out-1", Buffer.from("CHART"));
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "make me a chart"));
+  await until(() => api.files.length === 1 && api.sent.length === 2, "files and note");
+  await plugin.stop();
+
+  assert.equal(api.sent[0]!.content, "here you go");
+  assert.deepEqual(api.files[0]!.names, ["chart.png"]);
+  assert.deepEqual(api.files[0]!.bytes, ["CHART"]);
+  assert.match(api.sent[1]!.content, /huge\.zip.*too large/);
+});
+
+test("a file the agent posts to a thread is uploaded there", async () => {
+  const h = harness({});
+  h.blobs.set("out-3", Buffer.from("REPORT"));
+  h.queue.push({
+    id: "d-file",
+    destination: { type: "discord", target: "thread-2" },
+    text: "",
+    attachments: [{ name: "report.pdf", mimetype: "application/pdf", sizeBytes: 6, blobId: "out-3" }],
+    idempotencyKey: "post:file",
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  const api = new FakeDiscord();
+  const { plugin } = await boot(h, api);
+  await until(() => h.deliveriesAcked.length === 1, "delivery acked");
+  await plugin.stop();
+
+  assert.deepEqual(api.files, [{ channelId: "thread-2", names: ["report.pdf"], bytes: ["REPORT"] }]);
+  assert.equal(api.sent.length, 0);
 });
 
 test("a streamed reply posts one placeholder, edits it as text grows, records it as the run's edit ref, and finishes in place", async () => {

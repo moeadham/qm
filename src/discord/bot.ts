@@ -15,6 +15,7 @@ import {
   type DiscordMessage,
 } from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
+import { receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
 
 const THREAD_CHANNEL_TYPES = new Set([10, 11, 12]);
 const TYPING_REFRESH_MS = 8_000;
@@ -235,6 +236,19 @@ export function createDiscordBot(deps: {
     return () => clearInterval(timer);
   }
 
+  async function inboundFiles(m: DiscordMessage): Promise<Pick<CoreTurnBody, "attachments" | "inboundNotes">> {
+    if (!m.attachments?.length) return {};
+    const { attachments, issues } = await receiveDiscordFiles(
+      m.attachments,
+      (bytes) => core.stageBlob(bytes),
+      displayName(m.author),
+    );
+    return {
+      ...(attachments.length ? { attachments } : {}),
+      ...(issues.length ? { inboundNotes: issues } : {}),
+    };
+  }
+
   async function handleMessage(m: DiscordMessage, stage?: () => Promise<AcceptGate>): Promise<void> {
     const relevant = await relevantPlace(m);
     if (!relevant) return;
@@ -244,7 +258,7 @@ export function createDiscordBot(deps: {
       return gate?.persisted();
     }
     const text = m.content.replaceAll(selfMention, `@${self.username}`).trim();
-    if (!text) return gate?.persisted();
+    if (!text && !m.attachments?.length) return gate?.persisted();
     const messageKey = discordMessageKey(m.channel_id, m.id);
     let place: Place;
     try {
@@ -280,6 +294,7 @@ export function createDiscordBot(deps: {
         botHandle: self.username,
       },
       redeliveryKey: messageKey,
+      ...(await inboundFiles(m)),
       ...(place.kind === "channel" ? await threadContext(place, m) : {}),
     };
     await converse(place.channelId, body, {
@@ -341,6 +356,13 @@ export function createDiscordBot(deps: {
       const runId = queuedRunId;
       try {
         await writer.finish(reply, runId ? `run:${runId}` : key);
+        if (result.attachments?.length) {
+          const problems = await sendDiscordFiles(api, core, channelId, result.attachments, {
+            key: runId ? `run:${runId}` : key,
+          });
+          if (problems.length)
+            await postMessage(api, channelId, `⚠️ ${problems.join("; ")}.`, { key: `${runId ?? key}:file-notes` });
+        }
       } catch (error) {
         if (runId) flow.inFlightRuns.delete(runId);
         console.error(

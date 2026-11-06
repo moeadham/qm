@@ -177,9 +177,18 @@ async function waitForShareCommit(client: UploadClient, channel: string, fileId:
   return undefined;
 }
 
-interface BlobSource {
+export interface BlobSource {
   readBlob(blobId: string): Promise<Buffer>;
   readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
+}
+
+export async function readOutgoingAttachment(a: OutgoingAttachment, blobs: BlobSource): Promise<Buffer> {
+  try {
+    return await blobs.readBlob(a.blobId);
+  } catch (err) {
+    if (!a.artifactId || !a.artifactViewerId) throw err;
+    return blobs.readFileArtifact(a.artifactId, a.artifactViewerId);
+  }
 }
 
 export async function uploadAttachments(
@@ -192,13 +201,7 @@ export async function uploadAttachments(
 ): Promise<{ uploaded: boolean; messageTs?: string }> {
   const fileUploads: Array<{ filename: string; file: Buffer }> = [];
   for (const a of attachments) {
-    let file: Buffer;
-    try {
-      file = await blobs.readBlob(a.blobId);
-    } catch (err) {
-      if (!a.artifactId || !a.artifactViewerId) throw err;
-      file = await blobs.readFileArtifact(a.artifactId, a.artifactViewerId);
-    }
+    const file = await readOutgoingAttachment(a, blobs);
     if (file.length > 0) fileUploads.push({ filename: a.name, file });
   }
   if (!fileUploads.length) return { uploaded: false };

@@ -36,6 +36,7 @@ export interface RunHooks {
 export interface SurfaceCoreClient {
   stageBlob(bytes: Uint8Array): Promise<{ blobId: string; sizeBytes: number }>;
   readBlob(blobId: string): Promise<Buffer>;
+  readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
   submitTurn(body: Omit<TurnRequest, "surface">): Promise<TurnResult>;
   waitRun(runId: string, hooks?: RunHooks): Promise<TurnResult | null>;
   activeRunForThread(threadRef: string): Promise<string | undefined>;
@@ -117,6 +118,12 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
       const blob = await deps.blobTransfer.open(blobId);
       if (!blob) throw new Error(`blob ${blobId} not found`);
       return buffer(blob.stream);
+    },
+
+    async readFileArtifact(artifactId, viewerId) {
+      const opened = await deps.app.openFileForViewer(artifactId, viewerId);
+      if (!opened) throw new Error(`file artifact ${artifactId} not found (or not visible to ${viewerId})`);
+      return buffer(opened.stream);
     },
 
     submitTurn(body) {

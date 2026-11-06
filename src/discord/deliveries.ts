@@ -9,6 +9,7 @@ import { DISCORD_UNKNOWN_MESSAGE, discordErrorCode, messageNonce, postMessage, t
 import { commandApprovalCard, deployAccessCard, keychainCard, type DiscordCard } from "./approval-cards.ts";
 import { discordDmThreadRef } from "./bot.ts";
 import type { DiscordCoreClient } from "./core.ts";
+import { sendDiscordFiles } from "./files.ts";
 
 const CLAIM_MS = 15_000;
 const RUN_RECOVERY_GRACE_MS = 15_000;
@@ -88,14 +89,22 @@ export function createDiscordDeliveryPoller(deps: {
       const card = await approvalCard(d);
       if (card === "skip") return;
       if (card) return postCard(channelId, d, card);
-      if (d.destination.react || d.destination.pin || d.attachments?.length)
-        console.log(`[discord] delivery ${d.id}: reactions, pins and files are not delivered on Discord yet`);
-      if (!d.text.trim()) return;
-      await postMessage(api, channelId, d.text.trim(), {
-        key: d.idempotencyKey ?? d.id,
-        ...(replyTo ? { replyTo } : {}),
-        ...(d.destination.editRef ? { editRef: d.destination.editRef } : {}),
+      if (d.destination.react || d.destination.pin)
+        console.log(`[discord] delivery ${d.id}: reactions and pins are not delivered on Discord yet`);
+      const key = d.idempotencyKey ?? d.id;
+      if (d.text.trim())
+        await postMessage(api, channelId, d.text.trim(), {
+          key,
+          ...(replyTo ? { replyTo } : {}),
+          ...(d.destination.editRef ? { editRef: d.destination.editRef } : {}),
+        });
+      if (!d.attachments?.length) return;
+      const problems = await sendDiscordFiles(api, core, channelId, d.attachments, {
+        key,
+        ...(replyTo && !d.text.trim() ? { replyTo } : {}),
       });
+      if (problems.length)
+        await postMessage(api, channelId, `⚠️ ${problems.join("; ")}.`, { key: `${key}:file-notes` });
     });
   }
 

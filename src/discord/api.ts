@@ -11,6 +11,7 @@ import {
   type APIComponentInMessageActionRow,
   type APIChannel,
   type APIInteraction,
+  type APIAttachment,
   type APIMessage,
   type RESTPutAPIApplicationCommandsJSONBody,
 } from "@discordjs/core";
@@ -29,7 +30,10 @@ import {
   type SessionInfo,
 } from "@discordjs/ws";
 
+export type DiscordAttachment = Pick<APIAttachment, "id" | "filename" | "size" | "url"> & { content_type?: string };
+
 export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | "timestamp" | "mentions" | "type"> & {
+  attachments?: DiscordAttachment[];
   guild_id?: string;
   webhook_id?: string;
   author: Pick<APIMessage["author"], "id" | "username" | "global_name" | "bot">;
@@ -62,6 +66,11 @@ export interface DiscordApi {
     channelId: string,
     content: string,
     opts?: { replyTo?: string; nonce?: string; buttons?: DiscordButton[] },
+  ): Promise<string>;
+  sendFiles(
+    channelId: string,
+    files: Array<{ name: string; data: Buffer }>,
+    opts?: { replyTo?: string; nonce?: string },
   ): Promise<string>;
   edit(channelId: string, messageId: string, content: string, opts?: { buttons?: DiscordButton[] }): Promise<void>;
   remove(channelId: string, messageId: string): Promise<void>;
@@ -213,6 +222,15 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
         ...(opts.replyTo ? { message_reference: { message_id: opts.replyTo, fail_if_not_exists: false } } : {}),
         ...(opts.nonce ? { nonce: opts.nonce, enforce_nonce: true } : {}),
         ...components(opts.buttons),
+      });
+      return message.id;
+    },
+    async sendFiles(channelId, files, opts = {}) {
+      const message = await api.channels.createMessage(channelId, {
+        files: files.map((f) => ({ name: f.name, data: f.data })),
+        allowed_mentions: NO_PINGS_EXCEPT_USERS,
+        ...(opts.replyTo ? { message_reference: { message_id: opts.replyTo, fail_if_not_exists: false } } : {}),
+        ...(opts.nonce ? { nonce: opts.nonce, enforce_nonce: true } : {}),
       });
       return message.id;
     },

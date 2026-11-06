@@ -17,7 +17,6 @@ import {
   type SurfaceCoreClientDeps,
 } from "../surfaces/surface-core-client.ts";
 import type { ScopeId, SurfaceContextRequest, SurfaceContextResult, TurnRequest } from "../types.ts";
-import { buffer } from "node:stream/consumers";
 import { scopeId } from "../types.ts";
 import type { MemoryService } from "../memory/memory-service.ts";
 import type { CachedMessage, ReadMessagesOpts, SurfaceCache, IngestEvent } from "../surface-cache/surface-cache.ts";
@@ -59,7 +58,6 @@ export interface SlackCoreClient extends SurfaceCoreClient {
   channelHeaderPinEnabled(scope: ScopeId): Promise<boolean>;
   onScopeModelChanged(listener: (scope: ScopeId) => void): void;
   onChannelHeaderPinChanged(listener: (scope: ScopeId) => void): void;
-  readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
   rememberSurfaceHistory?(events: IngestEvent[]): Promise<void>;
   noteSurfaceHistoryGap?(container: string, note: string): Promise<void>;
   readSurfaceMessages?(container: string, opts?: ReadMessagesOpts): Promise<CachedMessage[]>;
@@ -172,12 +170,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
 
     onChannelHeaderPinChanged(listener) {
       deps.config.onChannelHeaderPinChanged((scope) => listener(scope));
-    },
-
-    async readFileArtifact(artifactId, viewerId) {
-      const opened = await deps.app.openFileForViewer(artifactId, viewerId);
-      if (!opened) throw new Error(`file artifact ${artifactId} not found (or not visible to ${viewerId})`);
-      return buffer(opened.stream);
     },
 
     async rememberSurfaceHistory(events) {
