@@ -2454,8 +2454,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   swallowAs("orchestrator: wake computer during detection", undefined),
                 )
               : undefined;
-          const decision = await deps.harness.models
-            .shouldRespond({
+          let decision: Awaited<ReturnType<NonNullable<typeof deps.harness.models.shouldRespond>>>;
+          try {
+            decision = await deps.harness.models.shouldRespond({
               session,
               message: input.text,
               recentContext: memoryHistoryReset ? "" : (input.detectContext ?? ""),
@@ -2469,8 +2470,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 deps.modelGateway.recordCall({ at: Date.now(), scopeLabel: scopeId, ...rec });
                 void deps.budget?.record(actor.id, estimateCostUsd(rec.inputTokens));
               },
-            })
-            .finally(() => earlyWake);
+            });
+          } finally {
+            await earlyWake;
+          }
           detectMs = Date.now() - detectStart;
           if (!decision.respond) {
             const reactions = decision.reactions?.length ? decision.reactions : undefined;

@@ -3877,6 +3877,8 @@ test("EAGER_PROVISION_DURING_CHECK wakes the computer alongside the reply check,
   await off.app.turn(channel("the weather is fine today", { unprompted: true }));
   assert.equal(offBoxes.provisioned, 1);
   assert.equal(boxes.live, 0, "a computer woken for a message QM stays quiet on is handed back");
+  await built.app.turn(channel("the weather is fine today", { unprompted: true }));
+  assert.equal(boxes.provisioned, 2, "a message not vouched for as a live person never wakes the computer");
 });
 
 test("EAGER_PROVISION never grows a computer for a chat-only session", async () => {
