@@ -113,11 +113,11 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, a live message in an allowed server's t
         seen.push({ env: handle.env?.SAFE, companyOnly: "BROWSE_LAB_MODEL" in (handle.env ?? {}) });
         return run(handle, command, opts);
       };
-      const turn = async (channelRef: string, credentials: string[] = []) => {
+      const turn = async (channelRef: string, credentials: string[] = [], automated = false) => {
         const before = seen.length;
         await built.app.turn({
           surface: "discord",
-          liveActor: true,
+          ...(automated ? { triggered: true } : { liveActor: true }),
           async: true,
           actor: { externalId: "alice@default-org" },
           conversation: {
@@ -143,6 +143,9 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, a live message in an allowed server's t
 
       const outside = await turn("600000000000000010");
       assert.equal(outside?.companyOnly, false, "a channel outside the allowed servers never counts");
+
+      const scheduled = await turn("600000000000000009", ["safe"], true);
+      assert.equal(scheduled?.env, undefined, "a scheduled job in the room never gets the env credential");
     } finally {
       await built.runtime.stop();
     }
