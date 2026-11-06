@@ -1573,6 +1573,14 @@ export function buildApp(
   if (config.securityScreen === "off" || config.securityScreenClassifier !== "model") {
     delete harness.models.screenSecurity;
   }
+  const fastDetect =
+    config.detectModelId && fallbackHarness !== "pi" ? adapters.get("pi")?.models.shouldRespond : undefined;
+  const harnessDetect = harness.models.shouldRespond;
+  if (fastDetect && harnessDetect)
+    harness.models.shouldRespond = async (input) => {
+      const verdict = await fastDetect(input);
+      return verdict.undecided ? harnessDetect(input) : verdict;
+    };
 
   const leaseTtlMs = config.leaseTtlMs;
   const maxAttempts = config.maxAttempts;

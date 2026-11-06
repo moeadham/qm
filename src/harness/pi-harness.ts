@@ -2400,7 +2400,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           const modelId = detectModelId();
           const model = requiredModel(modelId);
           const providerKeys = await resolveProviderKeys();
-          if (!keyForModel(providerKeys, model)) return { respond: true };
+          if (!keyForModel(providerKeys, model)) return { respond: true, undecided: true };
           const detectSystemPrompt = buildDetectionPrompt(detect.reactionGuidance);
           const prompt = renderDetectPrompt(detect);
           detect.recordModelCall({
@@ -2413,7 +2413,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           ).trim();
           return parseDetectVerdict(out, Boolean(detect.reactionGuidance?.trim()));
         } catch {
-          return { respond: false };
+          return { respond: false, undecided: true };
         }
       },
 
