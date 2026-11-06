@@ -209,6 +209,7 @@ export interface OrchestratorDeps {
   managedGroups?: Pick<ManagedGroupDirectory, "recognizes" | "members" | "version" | "withVersion" | "slackChannel">;
   reachExec?: boolean;
   eagerProvision?: boolean;
+  eagerProvisionDuringCheck?: boolean;
   environments?: EnvironmentStore;
   layerBrokerFor?: (tool: BrokeredLayerTool) => AwsRoleBroker | undefined;
   brokeredTools?: readonly BrokeredLayerTool[];

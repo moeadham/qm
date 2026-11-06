@@ -3859,8 +3859,8 @@ test("EAGER_PROVISION warms the box on a tool-using session's next turn and stil
   assert.equal(boxes.live, 0, "an eagerly provisioned box is still reclaimed at turn end");
 });
 
-test("EAGER_PROVISION wakes the computer alongside the reply check, and hands it back when QM stays quiet", async () => {
-  const built = freshApp({ eagerProvisionEnabled: true });
+test("EAGER_PROVISION_DURING_CHECK wakes the computer alongside the reply check, and hands it back when QM stays quiet", async () => {
+  const built = freshApp({ eagerProvisionEnabled: true, eagerProvisionDuringCheck: true });
   const boxes = spyProvisioning(built.sandbox);
   const warm = await built.app.turn(channel("!run echo warm"));
   assert.equal(warm.status, "ok");
@@ -3868,6 +3868,14 @@ test("EAGER_PROVISION wakes the computer alongside the reply check, and hands it
   const quiet = await built.app.turn(channel("the weather is fine today", { unprompted: true, liveActor: true }));
   assert.equal(quiet.status, "silent");
   assert.equal(boxes.provisioned, 2, "the computer woke during the check even though QM stayed quiet");
+
+  const off = freshApp({ eagerProvisionEnabled: true });
+  const offBoxes = spyProvisioning(off.sandbox);
+  await off.app.turn(channel("!run echo warm"));
+  await off.app.turn(channel("the weather is fine today", { unprompted: true, liveActor: true }));
+  assert.equal(offBoxes.provisioned, 1, "off by default: a quiet message wakes nothing");
+  await off.app.turn(channel("the weather is fine today", { unprompted: true }));
+  assert.equal(offBoxes.provisioned, 1);
   assert.equal(boxes.live, 0, "a computer woken for a message QM stays quiet on is handed back");
 });
 

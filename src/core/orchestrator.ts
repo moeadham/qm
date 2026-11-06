@@ -2442,33 +2442,37 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           )
         ) {
           const contextWindow = (await deps.sessions.getContextWindow(session.id)).entries;
-          const earlyWake = wakeComputerEarly(filterHistory(forModelContext(contextWindow))).catch(
-            swallowAs("orchestrator: wake computer during detection", undefined),
-          );
           const detectHistory = filterHistory(
             memoryBoundedEntries(contextWindow)
               .slice(-DETECT_HISTORY_TAIL)
               .filter((e) => e.type !== "soul"),
           );
           const detectStart = Date.now();
-          const decision = await deps.harness.models.shouldRespond({
-            session,
-            message: input.text,
-            recentContext: memoryHistoryReset ? "" : (input.detectContext ?? ""),
-            ...(!memoryHistoryReset && input.detectOpener ? { threadOpener: input.detectOpener } : {}),
-            systemPrompt: resolution.systemPrompt,
-            ...(input.gatewayContext?.reactionGuidance
-              ? { reactionGuidance: input.gatewayContext.reactionGuidance }
-              : {}),
-            history: detectHistory,
-            recordModelCall: (rec) => {
-              deps.modelGateway.recordCall({ at: Date.now(), scopeLabel: scopeId, ...rec });
-              void deps.budget?.record(actor.id, estimateCostUsd(rec.inputTokens));
-            },
-          });
+          const earlyWake =
+            deps.eagerProvisionDuringCheck && input.origin.kind === "ambient" && input.origin.live === true
+              ? wakeComputerEarly(filterHistory(forModelContext(contextWindow))).catch(
+                  swallowAs("orchestrator: wake computer during detection", undefined),
+                )
+              : undefined;
+          const decision = await deps.harness.models
+            .shouldRespond({
+              session,
+              message: input.text,
+              recentContext: memoryHistoryReset ? "" : (input.detectContext ?? ""),
+              ...(!memoryHistoryReset && input.detectOpener ? { threadOpener: input.detectOpener } : {}),
+              systemPrompt: resolution.systemPrompt,
+              ...(input.gatewayContext?.reactionGuidance
+                ? { reactionGuidance: input.gatewayContext.reactionGuidance }
+                : {}),
+              history: detectHistory,
+              recordModelCall: (rec) => {
+                deps.modelGateway.recordCall({ at: Date.now(), scopeLabel: scopeId, ...rec });
+                void deps.budget?.record(actor.id, estimateCostUsd(rec.inputTokens));
+              },
+            })
+            .finally(() => earlyWake);
           detectMs = Date.now() - detectStart;
           if (!decision.respond) {
-            await earlyWake;
             const reactions = decision.reactions?.length ? decision.reactions : undefined;
             const declineStatus = reactions ? "react" : "silent";
             deps.auditLog.record({
@@ -2496,7 +2500,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               ? { status: "react", sessionId: session.id, reactions }
               : { status: "silent", sessionId: session.id };
           }
-          await earlyWake;
           detectedReply = true;
         }
         if (ambientTurn) assignSessionTitle();
