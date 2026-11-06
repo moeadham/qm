@@ -542,7 +542,7 @@ export function createTurnMethods(
             if (decision === "unscreened") injectedText = `${unscreenedNotice("mid-turn message")}\n${steerText}`;
           }
           const fileNames = (req.attachments ?? []).map((a) =>
-            a.sourceId
+            a.sourceId && req.surface === "slack"
               ? `${a.name} (fetch via surface-file, ts ${origin.kind === "human" ? (origin.messageTs ?? origin.entryTs) : origin.entryTs})`
               : a.name,
           );
