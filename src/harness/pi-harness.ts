@@ -2397,20 +2397,20 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
 
       async shouldRespond(detect: HarnessDetectInput): Promise<HarnessDetectResult> {
         try {
+          const providerKeys = await resolveProviderKeys();
           const modelId = detectModelId();
           const model = requiredModel(modelId);
-          const providerKeys = await resolveProviderKeys();
           if (!keyForModel(providerKeys, model)) return { respond: true, undecided: true };
           const detectSystemPrompt = buildDetectionPrompt(detect.reactionGuidance);
           const prompt = renderDetectPrompt(detect);
+          const out = (
+            (await oneShot("pi-detect", model, providerKeys, detectSystemPrompt, prompt, { modelGateway })) ?? ""
+          ).trim();
           detect.recordModelCall({
             model: modelId,
             inputTokens: countTokens(detectSystemPrompt) + countTokens(prompt),
             entryCount: detect.history.length,
           });
-          const out = (
-            (await oneShot("pi-detect", model, providerKeys, detectSystemPrompt, prompt, { modelGateway })) ?? ""
-          ).trim();
           return parseDetectVerdict(out, Boolean(detect.reactionGuidance?.trim()));
         } catch {
           return { respond: false, undecided: true };
