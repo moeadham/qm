@@ -65,3 +65,54 @@ test("the Slack directory's answer wins over a Discord record, and deactivated p
   assert.equal(await unknownToSlack.channelMember("600000000000000007", "alice@default-org"), true);
   assert.equal(await unknownToSlack.channelMember("600000000000000007", "former@default-org"), false);
 });
+
+test("with DISCORD_TRUST_SERVER_MEMBERS, a thread in an allowed server counts as company-only", async () => {
+  for (const trusted of [false, true]) {
+    const built = buildApp(
+      testConfig({
+        harness: "mock",
+        seedSkills: false,
+        discordGuildIds: ["700000000000000001"],
+        ...(trusted ? { discordTrustServerMembers: true } : {}),
+      }),
+    );
+    try {
+      built.config.setInternalMemberOverrides(["alice@default-org"]);
+      await built.config.flushScope("org:default-org");
+      await built.discordCore.rememberChannel("600000000000000009", "700000000000000001");
+      const turn = (channelRef: string) =>
+        built.app.turn({
+          surface: "discord",
+          liveActor: true,
+          async: true,
+          actor: { externalId: "alice@default-org" },
+          conversation: {
+            kind: "channel",
+            threadRef: `discord:ch:${channelRef}:800000000000000009`,
+            channelRef,
+            audience: [{ externalId: "alice@default-org" }],
+          },
+          deliveryTarget: "800000000000000009",
+          text: "hello",
+          skipMemory: true,
+        });
+      const members = async (channelRef: string) => {
+        const queued = await turn(channelRef);
+        const run = await built.runs.get(queued.runId!);
+        return run?.request.conversation.publishMembers?.map((p) => p.id);
+      };
+      assert.deepEqual(
+        await members("600000000000000009"),
+        trusted ? ["alice@default-org"] : undefined,
+        trusted ? "the linked speaker is the verified room" : "off by default",
+      );
+      assert.equal(
+        await members("600000000000000010"),
+        undefined,
+        "a channel outside the allowed servers never counts",
+      );
+    } finally {
+      await built.runtime.stop();
+    }
+  }
+});

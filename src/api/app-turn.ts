@@ -366,8 +366,16 @@ export function createTurnMethods(
         });
       if (!audience.some((p) => p.id === actor.id)) audience.push(actor);
 
+      const trustedRoom =
+        !projectAudience &&
+        !req.conversation.publishMembers &&
+        req.conversation.kind !== "dm" &&
+        !!req.conversation.channelRef &&
+        !!req.surface &&
+        (await deps.trustedChatRoom?.(req.surface, req.conversation.channelRef)) === true;
       const publishMembers =
         projectAudience ??
+        (trustedRoom ? audience : undefined) ??
         req.conversation.publishMembers?.map((a) => deps.identity.classify(a.externalId, a.isExternalGuest));
 
       const conversation: Conversation = {

@@ -92,6 +92,7 @@ export interface Config {
   /** Keychain credential id holding the Codex ChatGPT OAuth auth.json (production path). */
   codexAuthCredential?: string;
   discordGuildIds?: string[];
+  discordTrustServerMembers?: boolean;
   /** Keychain credential id holding a Claude Code subscription token (production path). */
   claudeAuthCredential?: string;
   claudeModel?: string;
@@ -1521,6 +1522,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(codexAuthFile ? { codexAuthFile } : {}),
     ...(codexAuthCredential ? { codexAuthCredential } : {}),
     ...(discordGuildIds.length ? { discordGuildIds } : {}),
+    ...(boolEnvStrict("DISCORD_TRUST_SERVER_MEMBERS", env.DISCORD_TRUST_SERVER_MEMBERS)
+      ? { discordTrustServerMembers: true }
+      : {}),
     ...(claudeAuthCredential ? { claudeAuthCredential } : {}),
     ...(env.CLAUDE_MODEL ? { claudeModel: env.CLAUDE_MODEL } : {}),
     ...(env.CLAUDE_BIN ? { claudeBinPath: env.CLAUDE_BIN } : {}),

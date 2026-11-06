@@ -2298,6 +2298,12 @@ export function buildApp(
         })
     : undefined;
   const app = createApp({
+    ...(config.discordTrustServerMembers
+      ? {
+          trustedChatRoom: async (surface: string, channelRef: string) =>
+            surface === "discord" && (await discordChannels.has(channelRef)),
+        }
+      : {}),
     teams,
     externalSlackPolicies: config.externalSlackPolicies,
     admittedWork,
