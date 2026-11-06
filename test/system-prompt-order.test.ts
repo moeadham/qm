@@ -1314,3 +1314,44 @@ for (const mode of ["safe", "blocked", "unavailable", "ordinary", "observe"] as 
     else assert.ok(refreshedScreens > 0);
   });
 }
+
+test("a scheduled run that delivers to a Discord conversation gets the Discord surface tool, not Slack's", async () => {
+  const base = createMockHarness();
+  const seen: HarnessTurnInput[] = [];
+  const harness: Harness = {
+    ...base,
+    turns: {
+      ...base.turns,
+      runTurn: async (turn) => {
+        seen.push(turn);
+        return { reply: "ok" };
+      },
+    },
+  };
+  const { orchestrator } = buildOrchestrator({ harness });
+  const fire = (thread: string, type: string) =>
+    orchestrator.handleTurn(
+      dm(thread, "daily summary", {
+        surface: "cron",
+        origin: { kind: "automation", destination: { type, target: "thread-1" } },
+      }),
+    );
+  assert.equal((await fire("cron:c1:fire:a", "discord")).status, "ok");
+  assert.equal((await fire("cron:c2:fire:a", "slack")).status, "ok");
+  assert.equal((await fire("cron:c3:fire:a", "principal")).status, "ok");
+  assert.deepEqual(
+    seen.map((turn) => turn.surfaceName),
+    ["discord", "slack", "slack"],
+  );
+
+  const monitor = await orchestrator.handleTurn(
+    dm("monitor:m1:exit", "the build finished", {
+      surface: "monitor",
+      surfaceTools: true,
+      origin: { kind: "automation", destination: { type: "discord", target: "thread-1" } },
+    }),
+  );
+  assert.equal(monitor.status, "ok");
+  assert.equal(seen.at(-1)!.surfaceName, "discord");
+  assert.match(seen.at(-1)!.systemPrompt, /Your words reach people ONLY through the `discord` tool/);
+});

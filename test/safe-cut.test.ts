@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { safeChunks, safeClip, safeCutIndex } from "../src/slack/safe-cut.ts";
+import { safeChunks, safeClip, safeCutIndex } from "../src/surfaces/safe-cut.ts";
 import { slackSectionBlocks } from "../src/slack/mrkdwn.ts";
 
 const wellFormed = (s: string) => Buffer.from(s, "utf8").toString("utf8") === s;

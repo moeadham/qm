@@ -47,6 +47,8 @@ test("the personal-account picker preserves composer choices and saves context d
     this.dispatchEvent(new dom.window.Event("close"));
   };
   const updates: Record<string, unknown>[] = [];
+  const sessionSaves: Array<[string, unknown]> = [];
+  const sessionRows: Array<Record<string, unknown>> = [];
   let failNextGet = true;
   let runtimeReads = 0;
   let failNextPut = false;
@@ -85,6 +87,12 @@ test("the personal-account picker preserves composer choices and saves context d
           return Response.json({ error: "initial load failed" }, { status: 500 });
         }
         return Response.json(config);
+      }
+      if (String(input).startsWith("/api/sessions/") && init?.method === "POST") {
+        const patch = JSON.parse(String(init.body));
+        sessionSaves.push([String(input), patch]);
+        const { runtime: _runtime, ...row } = sessionRows.find((r) => String(input).endsWith(`/${r.id}`))!;
+        return Response.json({ session: patch.runtime ? { ...row, runtime: patch.runtime } : row });
       }
       if (String(input) !== "/api/runtime-config" || init?.method !== "PUT")
         throw new Error(`Unexpected request: ${String(input)}`);
@@ -734,6 +742,66 @@ test("the personal-account picker preserves composer choices and saves context d
     await mount();
     assert.equal(composer!.followsDefault(), false, "an explicit pick is sent with each message");
     assert.match(button(".loadout-button").getAttribute("aria-label")!, /^Model: Beta, /);
+    (ctx.chat as unknown as { turnRuntime: () => unknown }).turnRuntime = () => null;
+    const { sessionsState } = await vite.ssrLoadModule("/src/sessions.ts");
+    const row = {
+      id: "s-picked",
+      type: "dm",
+      scopeId: "personal:tester",
+      threadRef: "web:tester:picked",
+      createdAt: 1,
+    };
+    sessionRows.splice(0, sessionRows.length, row);
+    sessionsState.list = [{ ...row }];
+    await mount();
+    assert.equal(
+      composer!.followsDefault(),
+      true,
+      "once the session exists, this browser's old pick no longer applies",
+    );
+    assert.equal(sessionSaves.length, 0, "opening a chat saves nothing");
+    sessionsState.list = [{ ...row, runtime: { harnessId: "pi", modelId: "gamma", effortLevel: "high" } }];
+    await mount();
+    assert.match(
+      button(".loadout-button").getAttribute("aria-label")!,
+      /^Model: Gamma, /,
+      "the session's saved model wins over this browser's cached pick",
+    );
+    assert.equal(composer!.state.effortLevel, "high", "the session's saved effort is restored");
+    assert.equal(sessionSaves.length, 0);
+    pick("Alpha").click();
+    for (let i = 0; i < 20 && sessionSaves.length === 0; i++) await tick();
+    assert.equal(sessionSaves.length, 1);
+    const [savedPath, savedPatch] = sessionSaves[0]! as [string, { runtime: { modelId: string } }];
+    assert.equal(savedPath, "/api/sessions/s-picked");
+    assert.equal(savedPatch.runtime.modelId, "alpha");
+    assert.equal(sessionsState.list[0].runtime.modelId, "alpha");
+    sessionSaves.length = 0;
+    await composer!.followScopeDefault(agent);
+    for (let i = 0; i < 20 && sessionSaves.length === 0; i++) await tick();
+    assert.deepEqual(sessionSaves, [["/api/sessions/s-picked", { runtime: null }]]);
+
+    sessionSaves.length = 0;
+    await mount();
+    button('[aria-label="Make Alpha default"]').click();
+    for (let i = 0; i < 40 && !sessionSaves.length; i++) await tick();
+    assert.equal(sessionSaves.length, 1, "making another model the default keeps this chat on its model");
+    assert.equal((sessionSaves[0]![1] as { runtime: { modelId: string } }).runtime.modelId, "gamma");
+
+    const fork = { id: "s-fork", type: "dm", scopeId: "personal:tester", threadRef: "web:tester:fork", createdAt: 2 };
+    sessionRows.push(fork);
+    const sourceRuntime = { harnessId: "pi", modelId: "beta", effortLevel: "high" };
+    sessionsState.list = [{ ...row, runtime: sourceRuntime }, { ...fork }];
+    sessionSaves.length = 0;
+    composer!.carryModelPick("web:tester:picked", "web:tester:fork");
+    for (let i = 0; i < 20 && !sessionSaves.length; i++) await tick();
+    assert.deepEqual(
+      sessionSaves,
+      [["/api/sessions/s-fork", { runtime: sourceRuntime }]],
+      "a fork keeps its source's model",
+    );
+    sessionsState.list = [];
+    await composer!.refreshRuntimeSelection(null, agent, true);
     ctx.chat.state.threadRef = "web:tester:server-default";
     await mount();
     (ctx.chat as unknown as { turnRuntime: () => unknown }).turnRuntime = () => ({

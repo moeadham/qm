@@ -1,6 +1,6 @@
 import { parseExternalSlackAccess, type ExternalSlackAccess } from "./external-access.ts";
 import type { Receiver } from "@slack/bolt";
-import type { EnvelopeStaging } from "./envelope-staging.ts";
+import type { EnvelopeStaging } from "../surfaces/envelope-staging.ts";
 import { botIdentityFromEnv } from "./delivery.ts";
 import { normalizeAllowFrom, parseAllowFrom } from "./allow-from.ts";
 

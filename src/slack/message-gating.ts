@@ -207,21 +207,6 @@ export function isBareStop(text: string, botHandle = ""): boolean {
   return /^stop[.!]?$/i.test(rest.trim());
 }
 
-export function createInFlightThreadMap(): {
-  set(threadRef: string, runId: string): void;
-  get(threadRef: string): string | undefined;
-  clear(threadRef: string, runId: string): void;
-} {
-  const byThread = new Map<string, string>();
-  return {
-    set: (threadRef, runId) => byThread.set(threadRef, runId),
-    get: (threadRef) => byThread.get(threadRef),
-    clear: (threadRef, runId) => {
-      if (byThread.get(threadRef) === runId) byThread.delete(threadRef);
-    },
-  };
-}
-
 export async function maybeInterceptStop(opts: {
   text: string;
   botHandle?: string;

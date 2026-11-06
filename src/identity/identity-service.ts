@@ -1,6 +1,6 @@
 import type { ActorAssertion, Principal } from "../types.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
-import { canonicalPerson, foldPrincipalId, personIds, personKey } from "../directory/person.ts";
+import { canonicalPerson, foldPrincipalId, personIds, personKey, requiresPrincipalLink } from "../directory/person.ts";
 import { externalMemberActive, type ExternalMember } from "./external-members.ts";
 
 interface IdentityProvider {
@@ -86,6 +86,7 @@ export function createIdentityService(
 
   function classify(externalId: string, isExternalGuest?: boolean): Principal {
     const id = canonicalPerson(externalId);
+    if (requiresPrincipalLink(id)) return { id, type: "guest" };
     if (opts.isOverridden?.(externalId)) return { id, type: "internal" };
     const key = personKey(externalId);
     const record = deactivated.get(key);

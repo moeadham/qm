@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { createTurnFlow } from "../src/slack/turn-flow.ts";
+import { createTurnFlow } from "../src/surfaces/turn-flow.ts";
 import { createDeliveryTracker, deliverWithRetry } from "../src/slack/delivery.ts";
 
 function fakeCore(pending: Map<string, { text: string }>, events: string[]) {

@@ -21,6 +21,7 @@ import type { Run, RunStore } from "../runs/run-store.ts";
 import type { RunSignalStore } from "../runs/run-signal-store.ts";
 import type { SessionStore } from "./session-store.ts";
 import { xmlAttrEscape, xmlEscape } from "../util/message-tag.ts";
+import { isChatSurface } from "../surfaces/chat-surface.ts";
 
 const SUBAGENT_THREAD_PREFIX = "agent:main:subagent:";
 
@@ -36,7 +37,7 @@ export function requiresDelegation(
     enabled &&
     !request.swarm &&
     !isSubagentThreadRef(request.conversation.threadRef) &&
-    (request.surface === "slack" || request.surfaceTools === true)
+    (isChatSurface(request.surface) || request.surfaceTools === true)
   );
 }
 

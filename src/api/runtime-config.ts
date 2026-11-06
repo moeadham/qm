@@ -10,6 +10,7 @@ import {
   harnessIdOrPi,
   isHarnessId,
   modelProviderAvailabilityFor,
+  modelServiceable,
   modelSupportedByHarness,
   serviceableModelIds,
   ALL_PROVIDERS_AVAILABLE,
@@ -233,6 +234,43 @@ export async function runtimeConfigBody(
   };
 }
 
+interface RuntimeModelMenu {
+  modelsByHarness: Partial<Record<string, readonly string[]>>;
+  modelCatalog: Record<string, { name?: string; label?: string; buttonLabel?: string } | undefined>;
+}
+
+export type RuntimeModelMatch =
+  | { ok: true; harnessId: HarnessId; modelId: string }
+  | {
+      ok: false;
+      error: "model_ambiguous" | "model_unavailable";
+      candidates: Array<{ harnessId: HarnessId; modelId: string }>;
+    };
+
+export function matchRuntimeModel(
+  menu: RuntimeModelMenu,
+  query: string,
+  harnesses: readonly HarnessId[],
+): RuntimeModelMatch {
+  const offered = harnesses.flatMap((harnessId) =>
+    (menu.modelsByHarness[harnessId] ?? []).map((modelId) => ({ harnessId, modelId })),
+  );
+  const exact = offered.filter((m) => m.modelId === query || `${m.harnessId}:${m.modelId}` === query);
+  const wanted = query.toLowerCase();
+  const matches = exact.length
+    ? exact
+    : offered.filter(({ modelId }) => {
+        const meta = menu.modelCatalog[modelId];
+        return [modelId, meta?.name, meta?.label, meta?.buttonLabel].some((label) => label?.toLowerCase() === wanted);
+      });
+  if (matches.length === 1) return { ok: true, ...matches[0]! };
+  return {
+    ok: false,
+    error: matches.length ? "model_ambiguous" : "model_unavailable",
+    candidates: matches.length ? matches : offered,
+  };
+}
+
 export function validateRuntimeChoice(choice: RuntimeChoice): string | null {
   if (!modelSupportedByHarness(choice.modelId, choice.harnessId)) return "model_not_supported";
   if (
@@ -274,13 +312,19 @@ export async function availableRuntimeError(
   const choices = actorId
     ? await userRuntimeConfigBody(ctx, scope, actorId, purpose, choice)
     : await runtimeConfigBody(ctx, scope, undefined, purpose, choice);
-  const availableModel = choices.modelsByHarness[choice.harnessId]?.includes(choice.modelId)
-    ? choice.modelId
-    : codexSubscriptionModelId(choice.modelId);
-  if (
-    !choices.modelsByHarness[choice.harnessId]?.includes(availableModel) ||
-    !(await webuiModelEnabled(ctx, choice.modelId, purpose))
-  )
+  const listed = choices.modelsByHarness[choice.harnessId] ?? [];
+  const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
+  const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
+  const subscriptionServiceable = modelServiceable(
+    choice.modelId,
+    modelProviderAvailabilityFor(choice.harnessId, configuredKeys, managedKeys),
+  );
+  const availableModel = [
+    choice.modelId,
+    codexSubscriptionModelId(choice.modelId),
+    ...(subscriptionServiceable ? [codexProviderModelId(choice.modelId)] : []),
+  ].find((id) => listed.includes(id));
+  if (!availableModel || !(await webuiModelEnabled(ctx, choice.modelId, purpose)))
     return "runtime is no longer available or enabled on this deployment";
   return validateRuntimeChoice({
     ...choice,

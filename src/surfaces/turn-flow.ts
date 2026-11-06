@@ -1,17 +1,37 @@
 import { swallow } from "../util/errors.ts";
-import { sleep, createInFlightThreadMap, type GoalNoticeView } from "./lib.ts";
-import type { SlackCoreClient } from "../api/slack-core-client.ts";
+import { sleep } from "../util/async.ts";
+import type { SurfaceCoreClient } from "./surface-core-client.ts";
+import type { GoalView } from "../runs/turn-stream.ts";
 import type { TurnRequest, TurnResult } from "../types.ts";
 import { GENERIC_FAILURE_TEXT } from "../../plugins/chassis/src/failure-copy.ts";
 
-class SlackTurnFailure extends Error {
+class SurfaceTurnFailure extends Error {
   constructor(message: string, cause: unknown) {
     super(message, { cause });
   }
 }
 
-export function slackFailureText(err: unknown): string {
-  return err instanceof SlackTurnFailure ? err.message : GENERIC_FAILURE_TEXT;
+export function turnFailureText(err: unknown): string {
+  return err instanceof SurfaceTurnFailure ? err.message : GENERIC_FAILURE_TEXT;
+}
+
+export function createInFlightThreadMap(): {
+  set(threadRef: string, runId: string): void;
+  get(threadRef: string): string | undefined;
+  clear(threadRef: string, runId: string): void;
+} {
+  const byThread = new Map<string, string>();
+  return {
+    set: (threadRef, runId) => byThread.set(threadRef, runId),
+    get: (threadRef) => byThread.get(threadRef),
+    clear: (threadRef, runId) => {
+      if (byThread.get(threadRef) === runId) byThread.delete(threadRef);
+    },
+  };
+}
+
+export function hasRunDelivery(result: TurnResult): boolean {
+  return result.status === "ok" || result.status === "refused" || result.status === "failed";
 }
 
 export type CoreTurnBody = Omit<TurnRequest, "surface">;
@@ -23,7 +43,8 @@ interface TurnHooks {
   onReplying?: () => void;
   onFirstBlock?: (text: string) => void;
   onSurfacePosted?: () => void;
-  onGoal?: (goal: GoalNoticeView) => void;
+  onGoal?: (goal: GoalView) => void;
+  onSnapshot?: (text: string) => void;
 }
 
 export interface TurnFlow {
@@ -35,7 +56,10 @@ export interface TurnFlow {
 
 const ACK_RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
 
-export function createTurnFlow(core: SlackCoreClient): TurnFlow {
+export function createTurnFlow(
+  core: Pick<SurfaceCoreClient, "submitTurn" | "waitRun" | "ackRunDelivery">,
+  label = "surface",
+): TurnFlow {
   const inFlightRunPins = new Map<string, number>();
   const inFlightRuns = {
     add: (runId: string): void => void inFlightRunPins.set(runId, (inFlightRunPins.get(runId) ?? 0) + 1),
@@ -58,7 +82,7 @@ export function createTurnFlow(core: SlackCoreClient): TurnFlow {
         } catch (err) {
           if (attempt >= ACK_RETRY_DELAYS_MS.length) {
             console.error(
-              `[slack-plugin] delivery ack failed for run ${runId} (giving up — the poller re-delivers unacked runs):`,
+              `[${label}] delivery ack failed for run ${runId} (giving up — the poller re-delivers unacked runs):`,
               (err as Error).message,
             );
             return;
@@ -70,14 +94,14 @@ export function createTurnFlow(core: SlackCoreClient): TurnFlow {
   }
 
   function coreFailure(err: unknown): Error {
-    swallow("slack: core call", err);
+    swallow(`${label}: core call`, err);
     if ((err as { code?: string })?.code === "run_stalled") {
-      return new SlackTurnFailure(
+      return new SurfaceTurnFailure(
         "this request is taking unusually long — I'm still on it and will post the result here as soon as it finishes",
         err,
       );
     }
-    return new SlackTurnFailure(GENERIC_FAILURE_TEXT, err);
+    return new SurfaceTurnFailure(GENERIC_FAILURE_TEXT, err);
   }
 
   async function callCore(body: CoreTurnBody, hooks: TurnHooks = {}): Promise<TurnResult> {
@@ -110,6 +134,7 @@ export function createTurnFlow(core: SlackCoreClient): TurnFlow {
         ...(hooks.onFirstBlock ? { onFirstBlock: hooks.onFirstBlock } : {}),
         ...(hooks.onSurfacePosted ? { onSurfacePosted: hooks.onSurfacePosted } : {}),
         ...(hooks.onGoal ? { onGoal: hooks.onGoal } : {}),
+        ...(hooks.onSnapshot ? { onSnapshot: hooks.onSnapshot } : {}),
       });
     } catch (err) {
       inFlightRuns.delete(runId);
@@ -118,13 +143,13 @@ export function createTurnFlow(core: SlackCoreClient): TurnFlow {
     if (result?.status === "refused" && result.refusalKind === "security_quarantine") {
       return result;
     }
-    if (result && (result.status === "ok" || result.status === "refused" || result.status === "failed")) {
+    if (result && hasRunDelivery(result)) {
       if (!hooks.deferDeliveryAck) ackRunDelivery(runId);
     } else {
       inFlightRuns.delete(runId);
     }
     if (result) return result;
-    throw new SlackTurnFailure("the agent finished without producing a reply", undefined);
+    throw new SurfaceTurnFailure("the agent finished without producing a reply", undefined);
   }
 
   return { callCore, inFlightRuns, inFlightRunByThread, ackRunDelivery };

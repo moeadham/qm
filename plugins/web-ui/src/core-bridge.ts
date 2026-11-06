@@ -126,8 +126,16 @@ export interface DeliveredFile {
   artifactId?: string;
 }
 
+export interface SessionRuntime {
+  harnessId: string;
+  modelId: string;
+  effortLevel?: string;
+  fastMode?: boolean;
+}
+
 export interface CoreSession {
   id: string;
+  runtime?: SessionRuntime | null;
   type: "dm" | "channel" | "group";
   scopeId: string;
   threadRef: string;
@@ -287,7 +295,14 @@ function browserTimezone(): string {
 
 export async function updateSession(
   id: string,
-  patch: { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null; unread?: boolean },
+  patch: {
+    runtime?: SessionRuntime | null;
+    title?: string | null;
+    archived?: boolean;
+    pinned?: boolean;
+    color?: string | null;
+    unread?: boolean;
+  },
 ): Promise<{ session: CoreSession }> {
   return api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(id)}`, {
     method: "POST",
@@ -531,6 +546,7 @@ export interface RunPoll {
   finishedAt?: number | null;
 }
 export interface TurnOptions {
+  pinRuntime?: boolean;
   effortLevel?: string;
   fastMode?: boolean;
   harness?: string;
@@ -1222,6 +1238,7 @@ function turnRequestBody(
     ...(turnOptions.harness ? { harness: turnOptions.harness, model: model.id } : {}),
     ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(typeof turnOptions.fastMode === "boolean" ? { fastMode: turnOptions.fastMode } : {}),
+    ...(typeof turnOptions.pinRuntime === "boolean" ? { pinRuntime: turnOptions.pinRuntime } : {}),
     ...(timezone ? { timezone } : {}),
     ...(turnOptions.scopeId ? { scopeId: turnOptions.scopeId } : {}),
     ...(turnOptions.channelName ? { channelName: turnOptions.channelName } : {}),

@@ -8,7 +8,7 @@ import { createDecisionHooks, routeTurnRuntime, turnStartState } from "./decisio
 import { createDecisionBackend } from "./decisions/providers.ts";
 import { createPostgresDecisionStore, type DecisionStore } from "./decisions/store.ts";
 import type { SlackSessionStatusState } from "./slack/session-status.ts";
-import { availableRuntimeError } from "./api/runtime-config.ts";
+import { availableRuntimeError, type RuntimeDeps } from "./api/runtime-config.ts";
 import { createApprovalStore } from "./core/approval-store.ts";
 import { createKeychainApprovals, type KeychainApprovals } from "./credentials/keychain-approval.ts";
 import { flushErrorReporting, startTiming } from "../plugins/chassis/src/error-reporting.ts";
@@ -63,7 +63,7 @@ import { createAwsRoleBroker, type AwsRoleBroker } from "./auth/aws-role-broker.
 import type { SessionShare, SessionShareStore } from "./sessions/session-share.ts";
 import { createModelOverlayStore, type ModelOverlayStore } from "./model/model-overlay-store.ts";
 import { mkdirSync } from "node:fs";
-import type { StagedEnvelope } from "./slack/envelope-staging.ts";
+import type { StagedEnvelope } from "./surfaces/envelope-staging.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
@@ -100,6 +100,7 @@ import {
   type PersistedSharingPosture,
   type PersistedApprovalGrantModes,
   type PersistedEgressPolicy,
+  type PersistedModelAccount,
   type PersistedScopedFlag,
   type PersistedBaseModel,
   type PersistedApprovedHarnesses,
@@ -382,6 +383,8 @@ import { startSession } from "./api/start-session.ts";
 import { createSwarmStore, type SwarmStorage } from "./swarms/swarm-store.ts";
 import { createSwarmService } from "./swarms/swarm-service.ts";
 import { createSlackCoreClient, type SlackCoreClient } from "./api/slack-core-client.ts";
+import { createDiscordCoreClient, type DiscordCoreClient } from "./discord/core.ts";
+import { createDiscordChannels, withDiscordChannels, type DiscordChannelRecord } from "./discord/channel-directory.ts";
 import { createSurfaceContextPuller } from "./api/surface-context-puller.ts";
 import { createEngagedRegistry } from "./wake/engaged-registry.ts";
 import { createWakeSweep, type WakeSweep } from "./wake/sweep.ts";
@@ -579,6 +582,7 @@ export interface BuiltApp {
   sessionShareBytes: DurableByteStore;
   skillSyncEngine: SkillSyncEngine;
   slackCore: SlackCoreClient;
+  discordCore: DiscordCoreClient;
 }
 
 const MEMORY_CAPTURE_ENTRY_WINDOW = 2_000;
@@ -702,7 +706,7 @@ export function buildApp(
     internalMemberOverrides: artifactMap<PersistedInternalMemberOverrides>("internal_member_overrides"),
     orgAmbient: artifactMap<PersistedScopedFlag>("org_ambient_flag"),
     interactiveFastMode: artifactMap<PersistedScopedFlag>("interactive_fast_mode_flag"),
-    individualModelAuth: artifactMap<PersistedScopedFlag>("individual_model_auth_flag"),
+    individualModelAuth: artifactMap<PersistedModelAccount>("individual_model_auth_flag"),
     webuiModels: artifactMap<PersistedWebuiModels>("webui_model_configs"),
     peopleDirectoryUrls: artifactMap<PersistedPeopleDirectoryUrl>("people_directory_urls"),
     ackEmoji: artifactMap<PersistedAckEmoji>("ack_emoji"),
@@ -1569,6 +1573,14 @@ export function buildApp(
   if (config.securityScreen === "off" || config.securityScreenClassifier !== "model") {
     delete harness.models.screenSecurity;
   }
+  const fastDetect =
+    config.detectModelId && fallbackHarness !== "pi" ? adapters.get("pi")?.models.shouldRespond : undefined;
+  const harnessDetect = harness.models.shouldRespond;
+  if (fastDetect && harnessDetect)
+    harness.models.shouldRespond = async (input) => {
+      const verdict = await fastDetect(input);
+      return verdict.undecided ? harnessDetect(input) : verdict;
+    };
 
   const leaseTtlMs = config.leaseTtlMs;
   const maxAttempts = config.maxAttempts;
@@ -1821,7 +1833,15 @@ export function buildApp(
     onCaptureError: (e, scope) =>
       errors.record({ category: "memory", code: "capture_failed", message: errMessage(e), scopeLabel: scope }, e),
   });
-  const directory = config.databaseUrl ? createPostgresDirectoryStore(config.databaseUrl) : createDirectoryStore();
+  const discordChannels = createDiscordChannels(
+    artifactMap<DiscordChannelRecord>("discord_channels"),
+    new Set(config.discordGuildIds ?? []),
+  );
+  const directory = withDiscordChannels(
+    config.databaseUrl ? createPostgresDirectoryStore(config.databaseUrl) : createDirectoryStore(),
+    discordChannels,
+    (principalId) => identity.isInternal(identity.classify(principalId)),
+  );
   const projects = createProjectStore(artifactMap<Project>("projects"), {
     isActiveMember: (principalId) => identity.isInternal(identity.classify(principalId)),
     advisoryLock,
@@ -2165,6 +2185,13 @@ export function buildApp(
     ...(config.reachExecEnabled ? { reachExec: true } : {}),
     ...(config.surfaceDebugFooter ? { surfaceDebugFooter: true } : {}),
     ...(config.eagerProvisionEnabled ? { eagerProvision: true } : {}),
+    ...(config.eagerProvisionEnabled && config.eagerProvisionDuringCheck ? { eagerProvisionDuringCheck: true } : {}),
+    ...(config.discordTrustServerMembers
+      ? {
+          trustedChatRoom: async (surface: string, channelRef: string) =>
+            surface === "discord" && (await discordChannels.has(channelRef)),
+        }
+      : {}),
     environments,
     brokeredTools,
     deploymentLayer,
@@ -2373,6 +2400,7 @@ export function buildApp(
         resume: (ask, grant) => askResolution!(ask, grant),
       })
     : undefined;
+  const stagedEnvelopes = artifactMap<StagedEnvelope>("slack_staged_envelopes");
   const slackCore = createSlackCoreClient({
     identity,
     memory,
@@ -2385,7 +2413,7 @@ export function buildApp(
     inboxEvent: (event) => inboxRealtime.onConversationEvent(event),
     app,
     leaderLease,
-    stagedEnvelopes: artifactMap<StagedEnvelope>("slack_staged_envelopes"),
+    stagedEnvelopes,
     config: configStore,
     runtimeFallback: fallback,
     blobTransfer,
@@ -2398,6 +2426,41 @@ export function buildApp(
     ackModelId: () => auxiliaryModelForProvider("anthropic"),
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
+  });
+  const runtimeDeps: RuntimeDeps = {
+    config: configStore,
+    harnessId: fallbackHarness,
+    get baseModelDefault() {
+      return fallback.modelId;
+    },
+    providerKeys: providerKeysPresent(config),
+    modelCredentials,
+    userModelCredentials,
+    modelCredentialFetch: overrides.modelCredentialFetch,
+    refreshModels,
+  };
+  const discordCore = createDiscordCoreClient({
+    app,
+    blobTransfer,
+    deliveries,
+    errors,
+    metrics,
+    runs,
+    turnStream,
+    leaderLease,
+    stagedEnvelopes,
+    identity,
+    principalLinks,
+    linkPrompts: config.databaseUrl
+      ? createPostgresRateLimiter(config.databaseUrl, { maxPerWindow: 1, windowMs: 6 * 3_600_000 })
+      : createRateLimiter({ maxPerWindow: 1, windowMs: 6 * 3_600_000 }),
+    orgId: config.orgId,
+    auditLog,
+    ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
+    ...(config.publicWebUrl ? { portalUrl: config.publicWebUrl } : {}),
+    runtime: runtimeDeps,
+    sessions,
+    discordChannels,
   });
   runs.onTerminal((run) => {
     void runs
@@ -2663,38 +2726,8 @@ export function buildApp(
   cronChanged.notify = (id) => scheduler.notifyChanged(id);
   orchestratorDeps.control = createControlService(app, scheduler, admin);
   orchestratorDeps.validateScheduledRuntime = (scope, choice, purpose, actorId) =>
-    availableRuntimeError(
-      {
-        deps: {
-          config: configStore,
-          harnessId: fallbackHarness,
-          baseModelDefault: fallback.modelId,
-          providerKeys: providerKeysPresent(config),
-          modelCredentials,
-          userModelCredentials,
-          modelCredentialFetch: overrides.modelCredentialFetch,
-          refreshModels,
-        },
-      },
-      scope,
-      choice,
-      purpose,
-      actorId,
-    );
-  orchestratorDeps.runtime = createRuntimeService(
-    {
-      config: configStore,
-      harnessId: fallbackHarness,
-      get baseModelDefault() {
-        return fallback.modelId;
-      },
-      providerKeys: providerKeysPresent(config),
-      modelCredentials,
-      modelCredentialFetch: overrides.modelCredentialFetch,
-      refreshModels,
-    },
-    app,
-  );
+    availableRuntimeError({ deps: runtimeDeps }, scope, choice, purpose, actorId);
+  orchestratorDeps.runtime = createRuntimeService(runtimeDeps, app);
   const finishCredentials = (handle: SandboxHandle, processId: string) =>
     finishProcessCredentials({ sandbox, processes: processes!, ...(keychain ? { keychain } : {}) }, handle, processId);
   const monitorPoller: MonitorPoller | null =
@@ -3074,6 +3107,7 @@ export function buildApp(
         : createLocalDurableByteStore(join(config.dataDir, "session-shares")),
     skillSyncEngine,
     slackCore,
+    discordCore,
   };
 }
 

@@ -1,4 +1,4 @@
-import { resolveMentions } from "../slack/mrkdwn.ts";
+import { resolveMentions } from "../surfaces/conversation.ts";
 import type { CachedMessage } from "./surface-cache.ts";
 
 const AMBIENT_JUDGE_SYSTEM = `You are the ambient mind for a chat container — a thin, cheap observer that decides whether the

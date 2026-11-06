@@ -209,6 +209,8 @@ export interface OrchestratorDeps {
   managedGroups?: Pick<ManagedGroupDirectory, "recognizes" | "members" | "version" | "withVersion" | "slackChannel">;
   reachExec?: boolean;
   eagerProvision?: boolean;
+  eagerProvisionDuringCheck?: boolean;
+  trustedChatRoom?: (surface: string, channelRef: string) => Promise<boolean>;
   environments?: EnvironmentStore;
   layerBrokerFor?: (tool: BrokeredLayerTool) => AwsRoleBroker | undefined;
   brokeredTools?: readonly BrokeredLayerTool[];

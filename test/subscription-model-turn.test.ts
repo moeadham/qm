@@ -56,7 +56,7 @@ const { buildApp } = await import("../src/wiring.ts");
 test("web Astra selection reaches Pi with personal OAuth through app and orchestrator", async () => {
   const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
   try {
-    built.config.setIndividualModelAuth(true);
+    built.config.setIndividualModelAuthMode("required");
     built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
     await built.config.flushScope("org:default-org");
     await built.config.setRuntimeSelectionLatest("org:default-org", {
@@ -529,6 +529,111 @@ test("a Claude cron in a Codex project never refreshes the unrelated OpenAI logi
     assert.equal(claudeSeen.at(-1)?.runtime?.modelId, "claude-opus-5-5");
     assert.ok(auth.mock.callCount() > 0);
     auth.mock.restore();
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
+test("a session's saved model reaches a ChatGPT-subscription user's non-web turns, and a web pin saves and clears it", async () => {
+  const built = buildApp(testConfig({ harness: "mock", seedSkills: false }));
+  const start = seen.length;
+  try {
+    await built.config.setPersonalModelAuth("internal:alice", true, "openai");
+    built.config.setApprovedHarnesses(["mock", "pi", "claude"]);
+    await built.config.flushScope("org:default-org");
+    await built.userModelCredentials.setOAuth("internal:alice", "openai", {
+      accessToken: "test-access",
+      idToken: "test-id",
+      accountId: "test-account",
+      expiresAt: Date.now() + 3600000,
+    });
+    const chat = {
+      surface: "discord",
+      liveActor: true,
+      actor: { externalId: "internal:alice" },
+      conversation: { kind: "dm" as const, threadRef: "discord:dm:500000000000000001" },
+      text: "hello",
+      skipMemory: true,
+    };
+    assert.equal((await built.app.turn(chat)).status, "ok");
+    assert.notEqual(seen.at(-1)?.runtime?.modelId, "codex/gpt-6-astra");
+    const session = (await built.sessions.getByThread(chat.conversation.threadRef))!;
+    await built.sessions.setRuntime(session.id, { harnessId: "pi", modelId: "codex/gpt-6-astra" });
+    assert.equal((await built.app.turn({ ...chat, text: "again" })).status, "ok");
+    assert.equal(seen.at(-1)?.runtime?.modelId, "codex/gpt-6-astra");
+    assert.equal(seen.length - start, 2);
+
+    const web = {
+      surface: "web",
+      liveActor: true,
+      actor: { externalId: "internal:alice" },
+      conversation: { kind: "dm" as const, threadRef: "web:internal:alice:pinned" },
+      text: "pick astra",
+      skipMemory: true,
+    };
+    const picked = await built.app.turn({ ...web, harness: "pi", model: "codex/gpt-6-astra", pinRuntime: true });
+    assert.equal(picked.status, "ok", JSON.stringify(picked));
+    const webSession = (await built.sessions.getByThread(web.conversation.threadRef))!;
+    assert.deepEqual(
+      { harnessId: webSession.runtime?.harnessId, modelId: webSession.runtime?.modelId },
+      { harnessId: "pi", modelId: "codex/gpt-6-astra" },
+    );
+    assert.equal((await built.app.turn({ ...web, text: "back to default", pinRuntime: false })).status, "ok");
+    assert.equal((await built.sessions.getByThread(web.conversation.threadRef))?.runtime, undefined);
+    assert.notEqual(
+      seen.at(-1)?.runtime?.modelId,
+      "codex/gpt-6-astra",
+      "the turn that clears the pin already uses the default",
+    );
+
+    await built.config.setPersonalModelAuth("internal:bob", true, "anthropic");
+    await built.userModelCredentials.setOAuth("internal:bob", "anthropic", {
+      accessToken: "bob-access",
+      refreshToken: "bob-refresh",
+      expiresAt: Date.now() + 3600000,
+    });
+    const thread = {
+      surface: "discord",
+      liveActor: true,
+      conversation: {
+        kind: "channel" as const,
+        threadRef: "discord:ch:600000000000000001:800000000000000001",
+        channelRef: "600000000000000001",
+        audience: [{ externalId: "internal:alice" }, { externalId: "internal:bob" }],
+      },
+      skipMemory: true,
+    };
+    assert.equal(
+      (await built.app.turn({ ...thread, actor: { externalId: "internal:alice" }, text: "hi" })).status,
+      "ok",
+    );
+    const shared = (await built.sessions.getByThread(thread.conversation.threadRef))!;
+    await built.sessions.setRuntime(shared.id, { harnessId: "pi", modelId: "codex/gpt-6-astra" });
+    const claudeBefore = claudeSeen.length;
+    const bob = await built.app.turn({ ...thread, actor: { externalId: "internal:bob" }, text: "my turn" });
+    assert.equal(bob.status, "ok", JSON.stringify(bob));
+    assert.equal(claudeSeen.length, claudeBefore + 1, "bob's turn runs on his own Claude subscription");
+
+    const overheard = await built.app.turn({
+      ...thread,
+      actor: { externalId: "internal:alice" },
+      origin: { kind: "ambient", live: true },
+      text: "what model are you?",
+    });
+    assert.equal(overheard.status, "ok", JSON.stringify(overheard));
+    assert.equal(seen.at(-1)?.runtime?.modelId, "codex/gpt-6-astra");
+    assert.deepEqual(seen.at(-1)?.providerKeys, { "openai-codex": "test-access" });
+
+    built.config.setIndividualModelAuthMode("org-only");
+    await built.config.flushScope("org:default-org");
+    const beforeOrgOnly = seen.length;
+    const orgTurn = await built.app.turn({ ...thread, actor: { externalId: "internal:alice" }, text: "org only" });
+    assert.equal(orgTurn.status, "ok", JSON.stringify(orgTurn));
+    assert.deepEqual(
+      seen.slice(beforeOrgOnly).map((t) => t.providerKeys),
+      [],
+      "org-only never routes alice to her ChatGPT login",
+    );
   } finally {
     await built.runtime.stop();
   }

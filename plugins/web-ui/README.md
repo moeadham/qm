@@ -357,8 +357,10 @@ chat turns on the web and in Slack; background tasks retain company access.
 A submitted turn keeps its account choice, so switching affects new turns. Personal
 access failures do not retry on company credentials. Messages using a different
 account queue separately instead of steering an existing run; an explicit steer
-across accounts is refused. Organizations that already require individual accounts
-continue to require them.
+across accounts is refused. The org-wide `individual-model-auth` mode decides whether
+personal accounts exist at all: `org-only` runs every turn on company credentials and
+hides AI access, `optional` (the default) lets each person choose, and `required`
+makes everyone connect a personal account.
 
 The standalone `::link-slack-account{}` directive offers personal Slack account linking in a web reply. It shows the account card or linked status, requires the company bot to be installed first, and does not include the app picker. `::add-to-slack{}` remains the company installation trigger.
 

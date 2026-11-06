@@ -178,6 +178,7 @@ export interface HarnessDetectResult {
   respond: boolean;
   reactions?: string[];
   reason?: string;
+  undecided?: true;
 }
 
 export interface HarnessCompactInput {

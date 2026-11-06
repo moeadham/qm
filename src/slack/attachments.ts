@@ -125,6 +125,7 @@ export async function processInboundFiles(
   download: (file: SlackFile) => Promise<Uint8Array>,
   stage: (bytes: Uint8Array) => Promise<{ blobId: string }>,
   resolveAuthor?: (userId: string | undefined) => Promise<string | undefined> | string | undefined,
+  accessHint = "check my file-access permission (files:read)",
 ): Promise<ProcessedInbound> {
   const attachments: IncomingAttachment[] = [];
   const issues: string[] = [];
@@ -152,7 +153,7 @@ export async function processInboundFiles(
         err instanceof BlobTooLargeError
           ? "that request was too large — try fewer or smaller files"
           : (err as Error).message;
-      issues.push(`I couldn't read "${label}" — check my file-access permission (files:read) (${detail})`);
+      issues.push(`I couldn't read "${label}"${accessHint ? ` — ${accessHint}` : ""} (${detail})`);
     }
   }
   return { attachments, issues };
@@ -177,9 +178,18 @@ async function waitForShareCommit(client: UploadClient, channel: string, fileId:
   return undefined;
 }
 
-interface BlobSource {
+export interface BlobSource {
   readBlob(blobId: string): Promise<Buffer>;
   readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
+}
+
+export async function readOutgoingAttachment(a: OutgoingAttachment, blobs: BlobSource): Promise<Buffer> {
+  try {
+    return await blobs.readBlob(a.blobId);
+  } catch (err) {
+    if (!a.artifactId || !a.artifactViewerId) throw err;
+    return blobs.readFileArtifact(a.artifactId, a.artifactViewerId);
+  }
 }
 
 export async function uploadAttachments(
@@ -192,13 +202,7 @@ export async function uploadAttachments(
 ): Promise<{ uploaded: boolean; messageTs?: string }> {
   const fileUploads: Array<{ filename: string; file: Buffer }> = [];
   for (const a of attachments) {
-    let file: Buffer;
-    try {
-      file = await blobs.readBlob(a.blobId);
-    } catch (err) {
-      if (!a.artifactId || !a.artifactViewerId) throw err;
-      file = await blobs.readFileArtifact(a.artifactId, a.artifactViewerId);
-    }
+    const file = await readOutgoingAttachment(a, blobs);
     if (file.length > 0) fileUploads.push({ filename: a.name, file });
   }
   if (!fileUploads.length) return { uploaded: false };

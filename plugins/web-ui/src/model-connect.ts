@@ -66,6 +66,7 @@ interface DevicePrompt {
 }
 
 export interface StatusResponse {
+  mode?: "org-only" | "optional" | "required";
   account: "company" | "personal" | "anthropic" | "openai";
   individualModelAuth: boolean;
   required: boolean;

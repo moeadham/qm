@@ -1,4 +1,4 @@
-import { safeCutIndex, safeClip } from "./safe-cut.ts";
+import { safeCutIndex, safeClip } from "../surfaces/safe-cut.ts";
 
 export function inlineCode(text: string): string {
   const cleaned = text.replace(/`/g, "'");

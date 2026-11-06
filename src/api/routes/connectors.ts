@@ -35,15 +35,22 @@ function oauthStateSecret(deps: ServerDeps, signingSecret: string | undefined): 
 
 type OAuthFlowContext = Omit<OAuthState, "issuedAt" | "nonce">;
 
-function beginOAuthFlow(deps: ServerDeps, secret: string | undefined, state: OAuthFlowContext): Promise<string> {
+export function beginOAuthFlow(deps: ServerDeps, secret: string | undefined, state: OAuthFlowContext): Promise<string> {
   if (deps.oauthFlows) return deps.oauthFlows.start(state);
   return sealOAuthState(state, { secret: oauthStateSecret(deps, secret) });
 }
 
-async function resumeOAuthFlow(deps: ServerDeps, secret: string | undefined, param: string): Promise<OAuthState> {
-  const stored = deps.oauthFlows ? await deps.oauthFlows.finish(param) : null;
-  if (stored) return stored;
-  return openOAuthState(param, { secret: oauthStateSecret(deps, secret), maxAgeMs: OAUTH_STATE_MAX_AGE_MS });
+export async function resumeOAuthFlow(deps: ServerDeps, secret: string | undefined, param: string): Promise<OAuthState> {
+  const state =
+    (deps.oauthFlows ? await deps.oauthFlows.finish(param) : null) ??
+    (await openOAuthState(param, { secret: oauthStateSecret(deps, secret), maxAgeMs: OAUTH_STATE_MAX_AGE_MS }));
+  if (
+    !deps.replayDedupe ||
+    !(await deps.replayDedupe.claim(`oauth:${state.nonce}`, state.issuedAt + OAUTH_STATE_MAX_AGE_MS))
+  ) {
+    throw new Error("OAuth state was already used or replay protection is unavailable");
+  }
+  return state;
 }
 
 export function resolverFor(deps: ServerDeps): OAuthClientResolver {
@@ -143,12 +150,6 @@ async function oauthCallback(ctx: BaseCtx): Promise<void> {
     if (state.provider !== oauthRoute.provider) throw new Error("OAuth provider mismatch");
     if (state.orgId !== undefined && state.orgId !== configOrgId()) {
       throw new Error("OAuth state is for a different org");
-    }
-    if (
-      !deps.replayDedupe ||
-      !(await deps.replayDedupe.claim(`oauth:${state.nonce}`, state.issuedAt + OAUTH_STATE_MAX_AGE_MS))
-    ) {
-      throw new Error("OAuth state was already used or replay protection is unavailable");
     }
     const accountType = state.accountType ?? "default";
     const client = await resolverFor(deps)(oauthRoute.provider, { accountType });

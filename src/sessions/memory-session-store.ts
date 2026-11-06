@@ -182,6 +182,13 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       if (s) s.spawnMeta = meta;
     },
 
+    async setRuntime(sessionId, runtime) {
+      const s = sessions.get(sessionId);
+      if (!s) return;
+      if (runtime) s.runtime = runtime;
+      else delete s.runtime;
+    },
+
     async childrenOf(parentSessionId) {
       return [...sessions.values()]
         .filter((s) => s.parentSessionId === parentSessionId)

@@ -2,6 +2,7 @@ import type { RuntimeChoice } from "./harness.ts";
 import type { RuntimeService } from "./runtime-types.ts";
 import type { App } from "../api/app.ts";
 import {
+  matchRuntimeModel,
   runtimeConfigBody,
   validateRuntimeChoice,
   webuiModelEnabled,
@@ -77,22 +78,9 @@ export function createRuntimeService(deps: RuntimeDeps, app: Pick<App, "authoriz
     const harnessId = request.harness ?? active.harnessId;
     if (!isHarnessId(harnessId) || !snapshot.approvedHarnesses.includes(harnessId))
       return { ok: false, error: "harness_not_approved", candidates: snapshot.approvedHarnesses };
-    const candidates = snapshot.modelsByHarness[harnessId] ?? [];
-    let modelId = request.model ?? active.modelId;
-    if (!candidates.includes(modelId)) {
-      const query = modelId.toLowerCase();
-      const matches = candidates.filter((id) => {
-        const meta = snapshot.modelCatalog[id];
-        return [id, meta?.name, meta?.label, meta?.buttonLabel].some((label) => label?.toLowerCase() === query);
-      });
-      if (matches.length !== 1)
-        return {
-          ok: false,
-          error: matches.length ? "model_ambiguous" : "model_unavailable",
-          candidates: matches.length ? matches : candidates,
-        };
-      modelId = matches[0]!;
-    }
+    const match = matchRuntimeModel(snapshot, request.model ?? active.modelId, [harnessId]);
+    if (!match.ok) return { ok: false, error: match.error, candidates: match.candidates.map((c) => c.modelId) };
+    const { modelId } = match;
     if (!(await webuiModelEnabled({ deps }, modelId, purpose))) return { ok: false, error: "model_not_enabled" };
     const choice: RuntimeChoice = {
       harnessId,

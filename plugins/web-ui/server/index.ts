@@ -1316,6 +1316,8 @@ const apiRoutes: readonly WebRoute[] = [
     },
   })),
   { method: "GET", path: "/api/composio/slack", handle: (c) => relayCore(c.res, "GET", "/v1/composio/slack") },
+  { method: "GET", path: "/api/discord-link", handle: (c) => relayCore(c.res, "GET", "/v1/discord-link") },
+  { method: "DELETE", path: "/api/discord-link", handle: (c) => relayCore(c.res, "DELETE", "/v1/discord-link") },
   {
     method: "POST",
     path: "/api/composio/slack/authorize",
@@ -2153,6 +2155,7 @@ const apiRoutes: readonly WebRoute[] = [
         pinned?: unknown;
         color?: unknown;
         unread?: unknown;
+        runtime?: unknown;
       }>(req, res, false);
       if (!p) return;
       const patch: {
@@ -2161,20 +2164,26 @@ const apiRoutes: readonly WebRoute[] = [
         pinned?: boolean;
         color?: string | null;
         unread?: boolean;
+        runtime?: unknown;
       } = {};
       if (p.title === null || typeof p.title === "string") patch.title = p.title as string | null;
       if (typeof p.archived === "boolean") patch.archived = p.archived;
       if (typeof p.pinned === "boolean") patch.pinned = p.pinned;
       if (p.color === null || typeof p.color === "string") patch.color = p.color as string | null;
       if (typeof p.unread === "boolean") patch.unread = p.unread;
+      if (p.runtime === null || (typeof p.runtime === "object" && p.runtime !== undefined)) patch.runtime = p.runtime;
       if (
         patch.title === undefined &&
         patch.archived === undefined &&
         patch.pinned === undefined &&
         patch.color === undefined &&
-        patch.unread === undefined
+        patch.unread === undefined &&
+        patch.runtime === undefined
       ) {
-        return json(res, 400, { error: "bad_request", message: "title, archived, pinned, color, or unread required" });
+        return json(res, 400, {
+          error: "bad_request",
+          message: "title, archived, pinned, color, unread, or runtime required",
+        });
       }
       return relayCore(
         res,
@@ -2516,6 +2525,7 @@ const apiRoutes: readonly WebRoute[] = [
       let harness: string | undefined;
       let thinkingLevel: string | undefined;
       let fastMode: boolean | undefined;
+      let pinRuntime: boolean | undefined;
       let timezone: string | undefined;
       let scope: string | undefined;
       let channelName: string | undefined;
@@ -2557,6 +2567,7 @@ const apiRoutes: readonly WebRoute[] = [
         if (typeof p.harness === "string") harness = p.harness;
         if (typeof p.thinkingLevel === "string") thinkingLevel = p.thinkingLevel;
         if (typeof p.fastMode === "boolean") fastMode = p.fastMode;
+        if (typeof p.pinRuntime === "boolean") pinRuntime = p.pinRuntime;
         if (typeof p.timezone === "string" && p.timezone.trim()) timezone = p.timezone.trim().slice(0, 64);
         if (Array.isArray(p.attachments)) {
           for (const raw of p.attachments as unknown[]) {
@@ -2586,6 +2597,7 @@ const apiRoutes: readonly WebRoute[] = [
         ...(model ? { model } : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
         ...(typeof fastMode === "boolean" ? { fastMode } : {}),
+        ...(typeof pinRuntime === "boolean" ? { pinRuntime } : {}),
         ...(timezone ? { timezone } : {}),
         ...(attachments.length ? { attachments } : {}),
         ...(approval ? { approval } : {}),

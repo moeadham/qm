@@ -4,7 +4,7 @@ import { createMemorySurfaceCache, createPostgresSurfaceCache } from "../src/sur
 import { createMirror, slackMessageToIngestEvent } from "../src/slack/mirror.ts";
 import { toEvent } from "../src/api/routes/surface-cache.ts";
 import { createSlackHistoryReader } from "../src/slack/history.ts";
-import { buildContextWindow } from "../src/slack/conversation.ts";
+import { buildContextWindow } from "../src/surfaces/conversation.ts";
 import { createConversationSerializer } from "../src/slack/conversation-view.ts";
 import type { SlackCoreClient } from "../src/api/slack-core-client.ts";
 import type { BotIdentity, Directory } from "../src/slack/directory.ts";

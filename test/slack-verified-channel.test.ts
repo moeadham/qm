@@ -3,7 +3,8 @@ import type { AddressInfo } from "node:net";
 import type { SocketModeClient } from "@slack/socket-mode";
 import type { App as BoltApp, ReceiverEvent } from "@slack/bolt";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
-import { createEnvelopeStaging, type StagedEnvelope } from "../src/slack/envelope-staging.ts";
+import { createEnvelopeStaging, type StagedEnvelope } from "../src/surfaces/envelope-staging.ts";
+import { envelopeKey } from "../src/slack/payloads.ts";
 import { createDeferredAckReceiver, type AckGate } from "../src/slack/deferred-ack.ts";
 import { createHttpEventsReceiver } from "../src/slack/http-events.ts";
 import { createDeduper, dedupedRun } from "../src/slack/message-gating.ts";
@@ -142,7 +143,11 @@ for (const mode of ["socket", "http"] as const)
       const { observe } = fixture(options);
       const deduper = createDeduper();
       const map = createMemoryMap<StagedEnvelope>();
-      const staging = createEnvelopeStaging(map, { account: "test", staleAfterMs: 0 });
+      const staging = createEnvelopeStaging(map, {
+        account: "test",
+        keyFor: (b) => envelopeKey("test", b),
+        staleAfterMs: 0,
+      });
       let release!: () => void;
       const blocked = new Promise<void>((resolve) => {
         release = resolve;

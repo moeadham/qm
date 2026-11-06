@@ -10,7 +10,8 @@ import { createServer } from "./api/server.ts";
 import { dockerDaemonFailure } from "./deploy/docker-deploy-provider.ts";
 import { errMessage, reportFailureAs } from "./util/errors.ts";
 import { slackAccountConfigsFromEnv, slackPluginConfigFromEnv, startSlackPlugin } from "./slack/index.ts";
-import { createSlackRuntimeReconciler } from "./surfaces/slack-runtime.ts";
+import { createSurfaceRuntimeReconciler } from "./surfaces/surface-runtime.ts";
+import { assertOneChatPlatform, discordConfigFromEnv, startDiscordPlugin } from "./discord/index.ts";
 import { migrateRegisteredPgSchemas } from "./persistence/pg-pool.ts";
 
 const config = loadConfig();
@@ -21,6 +22,16 @@ await built.sandboxResources.initialize();
 const backfilledFires = await built.crons.backfillFires();
 if (backfilledFires > 0) console.log(`[qm] backfilled ${backfilledFires} cron fire log entries into cron_fires`);
 const envSlackConfig = slackPluginConfigFromEnv(process.env);
+const discordConfig = discordConfigFromEnv(process.env);
+assertOneChatPlatform(
+  discordConfig,
+  Boolean(
+    envSlackConfig ||
+    process.env.QM_SLACK_SERVICE_URL ||
+    slackAccountConfigsFromEnv(process.env).length ||
+    (await built.slackInstallation.get()),
+  ),
+);
 const slackConfig = envSlackConfig;
 const envSlackAttempted = Boolean(process.env.SLACK_BOT_TOKEN || process.env.SLACK_APP_TOKEN);
 let slackEnvironmentState: "absent" | "configured" | "partial" = "absent";
@@ -87,9 +98,10 @@ if (config.backgroundWorkEnabled && !config.backgroundDeploymentId) {
   console.log("[qm] background work disabled; scheduler and runtime loops will not start");
 }
 
-const slackRuntime = createSlackRuntimeReconciler({
+const slackRuntime = createSurfaceRuntimeReconciler({
   startPaused: Boolean(config.backgroundDeploymentId),
   load: async () => {
+    if (discordConfig) return null;
     const status = await built.slackInstallation.status();
     const stored = await built.slackInstallation.get();
     if (stored) {
@@ -116,7 +128,7 @@ const slackRuntime = createSlackRuntimeReconciler({
 if (config.backgroundWorkEnabled && !config.backgroundDeploymentId) slackRuntime.start();
 
 const slackAccountRuntimes = slackAccountConfigsFromEnv(process.env).map((account) =>
-  createSlackRuntimeReconciler({
+  createSurfaceRuntimeReconciler({
     startPaused: Boolean(config.backgroundDeploymentId),
     load: () => Promise.resolve({ version: `environment:${account.accountId}`, config: account }),
     startPlugin: (desired) => startSlackPlugin(desired, built.slackCore),
@@ -125,6 +137,15 @@ const slackAccountRuntimes = slackAccountConfigsFromEnv(process.env).map((accoun
 );
 if (config.backgroundWorkEnabled && !config.backgroundDeploymentId)
   for (const runtime of slackAccountRuntimes) runtime.start();
+
+const discordRuntime = createSurfaceRuntimeReconciler({
+  startPaused: Boolean(config.backgroundDeploymentId),
+  load: async () => (discordConfig ? { version: "environment", config: discordConfig } : null),
+  startPlugin: (desired) => startDiscordPlugin(desired, built.discordCore),
+  onError: reportFailureAs("discord plugin reconciliation", undefined),
+});
+if (config.backgroundWorkEnabled && !config.backgroundDeploymentId) discordRuntime.start();
+const chatRuntimes = [slackRuntime, ...slackAccountRuntimes, discordRuntime];
 
 let backgroundController: ReturnType<typeof createBackgroundController> | undefined;
 if (built.backgroundOwnership) {
@@ -137,8 +158,8 @@ if (built.backgroundOwnership) {
     void built.runtime
       .stopBackgroundClaims()
       .catch((error) => console.error("[qm] background claim stop failed:", errMessage(error)));
-    for (const runtime of [slackRuntime, ...slackAccountRuntimes])
-      void runtime.stop().catch((error) => console.error("[qm] Slack background stop failed:", errMessage(error)));
+    for (const runtime of chatRuntimes)
+      void runtime.stop().catch((error) => console.error("[qm] chat background stop failed:", errMessage(error)));
   };
   backgroundController = createBackgroundController({
     store: built.backgroundOwnership.store,
@@ -152,7 +173,7 @@ if (built.backgroundOwnership) {
       built.scheduler.start(1000);
       await built.scheduler.ready();
       if (signal.aborted || epoch !== activationEpoch) return;
-      for (const runtime of [slackRuntime, ...slackAccountRuntimes]) {
+      for (const runtime of chatRuntimes) {
         if (signal.aborted) return;
         runtime.start();
         await runtime.reconcile();
@@ -163,7 +184,7 @@ if (built.backgroundOwnership) {
       await Promise.all([
         built.runtime.stopBackgroundClaims(),
         built.scheduler.stopClaims(),
-        ...[slackRuntime, ...slackAccountRuntimes].map((runtime) => runtime.stop()),
+        ...chatRuntimes.map((runtime) => runtime.stop()),
       ]);
     },
     async drained() {
@@ -180,9 +201,8 @@ function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[qm] ${signal} received, shutting down`);
-  void slackRuntime.stop().catch((e: unknown) => console.error("[qm] slack plugin stop failed:", errMessage(e)));
-  for (const runtime of slackAccountRuntimes)
-    void runtime.stop().catch((e: unknown) => console.error("[qm] slack account stop failed:", errMessage(e)));
+  for (const runtime of chatRuntimes)
+    void runtime.stop().catch((e: unknown) => console.error("[qm] chat plugin stop failed:", errMessage(e)));
   void built.scheduler.stop().catch((e: unknown) => console.error("[qm] scheduler stop failed:", errMessage(e)));
   built.deploymentLayerRefresh.stop();
   server.close();

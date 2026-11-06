@@ -1,4 +1,4 @@
-import { safeChunks } from "./safe-cut.ts";
+import { safeChunks } from "../surfaces/safe-cut.ts";
 export function decodeSlackEntities(text: string): string {
   return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
@@ -7,16 +7,6 @@ export function resolveMentionsInText(text: string, lookup: (id: string) => stri
   return text.replace(/<@(U\w+)(?:\|([^>]*))?>/g, (_m, id: string, label?: string) => {
     const name = (label && label.trim()) || lookup(id);
     return name ? `@${name}` : `@${id}`;
-  });
-}
-
-const SLACK_MENTION = /<@([A-Z0-9]+)(?:\|[^>]*)?>/g;
-
-export function resolveMentions(text: string, nameById: ReadonlyMap<string, string> | undefined): string {
-  if (!nameById || !text.includes("<@")) return text;
-  return text.replace(SLACK_MENTION, (m, id) => {
-    const name = nameById.get(id);
-    return name ? `@${name}` : m;
   });
 }
 

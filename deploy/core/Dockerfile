@@ -11,7 +11,7 @@ RUN npm ci --prefix deploy/connector-sdk --ignore-scripts --no-audit --no-fund \
 
 FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 
-RUN apk add --no-cache ca-certificates curl git git-daemon docker-cli
+RUN apk add --no-cache ca-certificates curl git git-daemon docker-cli imagemagick imagemagick-jpeg imagemagick-webp
 
 COPY --from=wireproxy-build /out/wireproxy /usr/local/bin/wireproxy
 

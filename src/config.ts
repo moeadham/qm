@@ -1,3 +1,4 @@
+import { discordConfigFromEnv } from "./discord/config.ts";
 import { codexAuthFileForEnv, loadCodexAuthFile } from "./model/chatgpt-auth-file.ts";
 import {
   deploymentBrokerCredentialsFromEnv,
@@ -90,6 +91,8 @@ export interface Config {
   codexAuthFile?: string;
   /** Keychain credential id holding the Codex ChatGPT OAuth auth.json (production path). */
   codexAuthCredential?: string;
+  discordGuildIds?: string[];
+  discordTrustServerMembers?: boolean;
   /** Keychain credential id holding a Claude Code subscription token (production path). */
   claudeAuthCredential?: string;
   claudeModel?: string;
@@ -200,6 +203,7 @@ export interface Config {
   reachExecEnabled: boolean;
   surfaceDebugFooter: boolean;
   eagerProvisionEnabled: boolean;
+  eagerProvisionDuringCheck: boolean;
   awsSandbox: AwsSandboxEnv;
   localSandbox: LocalSandboxEnv;
   spritesSandbox: SpritesSandboxEnv;
@@ -1206,6 +1210,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   );
   const harness = harnessEnvStrict(env.HARNESS);
   const codexAuthCredential = env.CODEX_AUTH_CREDENTIAL?.trim() || undefined;
+  const discordGuildIds = [...(discordConfigFromEnv(env)?.guildIds ?? [])];
   const claudeAuthCredential = env.CLAUDE_AUTH_CREDENTIAL?.trim() || undefined;
   const codexAuthFile = codexAuthCredential ? undefined : codexAuthFileForEnv(env);
   if (env.NODE_ENV === "production" && codexAuthFile) {
@@ -1516,6 +1521,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.PI_MODEL ? { modelId: env.PI_MODEL } : {}),
     ...(codexAuthFile ? { codexAuthFile } : {}),
     ...(codexAuthCredential ? { codexAuthCredential } : {}),
+    ...(discordGuildIds.length ? { discordGuildIds } : {}),
+    ...(boolEnvStrict("DISCORD_TRUST_SERVER_MEMBERS", env.DISCORD_TRUST_SERVER_MEMBERS)
+      ? { discordTrustServerMembers: true }
+      : {}),
     ...(claudeAuthCredential ? { claudeAuthCredential } : {}),
     ...(env.CLAUDE_MODEL ? { claudeModel: env.CLAUDE_MODEL } : {}),
     ...(env.CLAUDE_BIN ? { claudeBinPath: env.CLAUDE_BIN } : {}),
@@ -1676,6 +1685,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reachExecEnabled: boolEnvStrict("REACH_EXEC", env.REACH_EXEC) ?? false,
     surfaceDebugFooter: boolEnvStrict("SURFACE_DEBUG_FOOTER", env.SURFACE_DEBUG_FOOTER) ?? false,
     eagerProvisionEnabled: boolEnvStrict("EAGER_PROVISION", env.EAGER_PROVISION) ?? true,
+    eagerProvisionDuringCheck: boolEnvStrict("EAGER_PROVISION_DURING_CHECK", env.EAGER_PROVISION_DURING_CHECK) ?? false,
     awsSandbox: awsSandboxEnv(env),
     localSandbox: localSandboxEnv(env),
     spritesSandbox: spritesSandboxEnv(env),

@@ -2,11 +2,11 @@ import { continueInPrivate } from "./private-continuation.ts";
 import { externalSlackNamespace, type ExternalSlackAccess } from "./external-access.ts";
 import { registerKeychainApprovalActions } from "./keychain-approvals.ts";
 import { registerDeployAccessActions } from "./deploy-access.ts";
-import { SlackPluginStartCleanupError } from "../surfaces/slack-runtime.ts";
+import { SlackPluginStartCleanupError } from "../surfaces/surface-runtime.ts";
 import { createSlackRateLimitNotice } from "./rate-limit-notice.ts";
 import { createSlackHistoryReader } from "./history.ts";
 import { reportFailure, swallow, swallowAs } from "../util/errors.ts";
-import { createEnvelopeStaging } from "./envelope-staging.ts";
+import { createEnvelopeStaging } from "../surfaces/envelope-staging.ts";
 import { createSweeper } from "../util/sweeper.ts";
 import bolt from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
@@ -21,7 +21,7 @@ import {
   slackAccountConfigsFromEnv,
   slackPluginConfigFromEnv,
 } from "./config.ts";
-import { createTurnFlow } from "./turn-flow.ts";
+import { createTurnFlow } from "../surfaces/turn-flow.ts";
 import { createActorGate, createDenyResponder } from "./allow-from.ts";
 import { createAckEmojiPicker } from "./ack-emoji.ts";
 import { type BotIdentity, createDirectory } from "./directory.ts";
@@ -34,7 +34,7 @@ import { createSurfaceContextFulfiller } from "./surface-context.ts";
 import { createDeliveryPoller } from "./deliveries.ts";
 import { createDeferredAckReceiver } from "./deferred-ack.ts";
 import { createHttpEventsReceiver } from "./http-events.ts";
-import { parseChannelPage, parseLogLevel } from "./payloads.ts";
+import { envelopeKey, parseChannelPage, parseLogLevel } from "./payloads.ts";
 import type { SlackCoreClient, SurfaceContextRequest } from "../api/slack-core-client.ts";
 import type { AuthTestResponse } from "@slack/web-api";
 const { App } = bolt;
@@ -165,7 +165,10 @@ export async function startSlackPlugin(
 
   const stagingAccount = cfg.installationId ? `${ACCOUNT_LABEL}:${cfg.installationId}` : ACCOUNT_LABEL;
   const staging = core.stagedEnvelopes
-    ? createEnvelopeStaging(core.stagedEnvelopes, { account: stagingAccount })
+    ? createEnvelopeStaging(core.stagedEnvelopes, {
+        account: stagingAccount,
+        keyFor: (body) => envelopeKey(stagingAccount, body),
+      })
     : undefined;
   const receiver = () => {
     if (cfg.receiverFactory) return cfg.receiverFactory(staging);
@@ -224,7 +227,7 @@ export async function startSlackPlugin(
   const deduper = createDeduper(1000);
   const threads = createThreadTracker();
 
-  const flow = createTurnFlow(core);
+  const flow = createTurnFlow(core, "slack-plugin");
   const ackEmoji = createAckEmojiPicker(core, { candidatesOverride: ackEmojiOverride });
   const directory = createDirectory({
     ...(cfg.externalAccess ? { externalAccess: cfg.externalAccess } : {}),

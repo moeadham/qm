@@ -29,17 +29,11 @@ const CLAIM_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 5;
 const REPLAY_WAIT_MS = 10_000;
 
-export function envelopeKey(account: string, body: Record<string, unknown>): string | null {
-  const event = body.event as { type?: string; channel?: string; ts?: string; event_ts?: string } | undefined;
-  if (body.type !== "event_callback" || !event?.type || !event.channel) return null;
-  const ts = event.ts ?? event.event_ts;
-  return ts ? `slack:${account}:${event.type}:${event.channel}:${ts}` : null;
-}
-
 export function createEnvelopeStaging(
   map: DurableMap<StagedEnvelope>,
   opts: {
     account: string;
+    keyFor(body: Record<string, unknown>): string | null;
     now?: () => number;
     stageTimeoutMs?: number;
     staleAfterMs?: number;
@@ -56,15 +50,15 @@ export function createEnvelopeStaging(
   const clear = (key: string): void => {
     void (inflight.get(key) ?? Promise.resolve())
       .then(() => map.delete(key))
-      .catch(swallowAs("slack: clear staged envelope", undefined));
+      .catch(swallowAs("surface: clear staged envelope", undefined));
   };
   return {
-    keyFor: (body) => envelopeKey(opts.account, body),
+    keyFor: opts.keyFor,
     async stage(key, body) {
       const write = map
         .putIfAbsent(key, { body, account: opts.account, receivedAt: now(), attempts: 0 })
         .then(() => true)
-        .catch(swallowAs("slack: stage envelope", false));
+        .catch(swallowAs("surface: stage envelope", false));
       inflight.set(key, write);
       void write.finally(() => {
         if (inflight.get(key) === write) inflight.delete(key);
@@ -94,9 +88,7 @@ export function createEnvelopeStaging(
           : await map.merge(key, claim);
         if (!claimed || !won) continue;
         if (claimed.attempts >= maxAttempts)
-          console.error(
-            `[slack-plugin] last replay of staged envelope ${key}; it stays until the daily sweep drops it`,
-          );
+          console.error(`[surface] last replay of staged envelope ${key}; it stays until the daily sweep drops it`);
         replayed++;
         let failed = false;
         const gate: ReplayGate = {
@@ -109,7 +101,7 @@ export function createEnvelopeStaging(
           .then(() => {
             if (!failed) clear(key);
           })
-          .catch(swallowAs(`slack: replay staged envelope ${key}`, undefined));
+          .catch(swallowAs(`surface: replay staged envelope ${key}`, undefined));
         await Promise.race([settled, sleep(replayWaitMs, { unref: true })]);
       }
       return replayed;

@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
-import { createMemoryConfigStore, type PersistedScopedFlag } from "../src/resolution/config-store.ts";
+import {
+  createMemoryConfigStore,
+  type PersistedModelAccount,
+  type PersistedScopedFlag,
+} from "../src/resolution/config-store.ts";
 import { createServer } from "../src/api/server.ts";
 import { mintPortalIdentity } from "../src/auth/portal-identity.ts";
 import { signRequest } from "../src/auth/source-auth.ts";
@@ -23,10 +27,10 @@ test("personal account choice persists across instances without changing anyone 
   await first.setPersonalModelAuth("alice", true);
   assert.equal(await second.getIndividualModelAuthDurable("alice"), true);
   assert.equal(await second.getIndividualModelAuthDurable("bob"), false);
-  assert.equal(await second.getIndividualModelAuthDurable(), false);
+  assert.equal(await second.getIndividualModelAuthModeDurable(), "optional");
   await second.setPersonalModelAuth("alice", false);
   assert.equal(await first.getIndividualModelAuthDurable("alice"), false);
-  first.setIndividualModelAuth(true);
+  first.setIndividualModelAuthMode("required");
   await first.flushScope("org:default-org");
   assert.equal(await second.getIndividualModelAuthDurable("alice"), true);
 });
@@ -74,6 +78,7 @@ test("account API binds choice to the signed-in person, preserves connections, a
     const enabled = await request("personal");
     assert.equal(enabled.status, 200);
     assert.deepEqual(await enabled.json(), {
+      mode: "optional",
       individualModelAuth: true,
       required: false,
       account: "personal",
@@ -95,9 +100,16 @@ test("account API binds choice to the signed-in person, preserves connections, a
     await built.userModelCredentials.delete("alice@default-org", "anthropic");
     assert.equal(await built.config.getIndividualModelAuthDurable("alice@default-org"), true);
     assert.equal((await request("company")).status, 200);
-    built.config.setIndividualModelAuth(true);
+    built.config.setIndividualModelAuthMode("required");
     await built.config.flushScope("org:default-org");
     assert.equal((await request("company")).status, 403);
+    await built.userModelCredentials.setApiKey("alice@default-org", "anthropic", "test-personal-key");
+    built.config.setIndividualModelAuthMode("org-only");
+    await built.config.flushScope("org:default-org");
+    const refused = await request("personal");
+    assert.equal(refused.status, 403);
+    assert.equal(((await refused.json()) as { error: string }).error, "personal_accounts_disabled");
+    assert.equal(await built.config.getModelAccountDurable("alice@default-org"), "company");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -147,4 +159,37 @@ test("shared chat messages queue instead of borrowing another person's account",
   assert.notEqual(other.steered, true);
   assert.equal((await built.runs.get(other.runId!))?.request.modelAccount, "company");
   assert.equal((await built.signals.takePending(first.runId!)).length, 0);
+});
+
+test("org-only ignores every saved personal account choice, and switching back restores them", async () => {
+  const rows = createMemoryMap<PersistedModelAccount>();
+  const config = createMemoryConfigStore("default-org", { individualModelAuth: rows });
+  await config.setPersonalModelAuth("alice", true, "openai");
+  assert.equal(await config.getModelAccountDurable("alice"), "openai");
+
+  config.setIndividualModelAuthMode("org-only");
+  await config.flushScope("org:default-org");
+  assert.equal(await config.getIndividualModelAuthModeDurable(), "org-only");
+  assert.equal(await config.getModelAccountDurable("alice"), "company");
+  assert.equal(
+    await config.getModelAccountDurable("alice", "personal"),
+    "company",
+    "a queued personal run is overridden",
+  );
+  assert.equal(await config.getIndividualModelAuthDurable("alice"), false);
+
+  config.setIndividualModelAuthMode("optional");
+  await config.flushScope("org:default-org");
+  assert.equal(await config.getModelAccountDurable("alice"), "openai");
+});
+
+test("an org switch saved before modes existed keeps its meaning", async () => {
+  const rows = createMemoryMap<PersistedModelAccount>();
+  await rows.put("org:default-org", { scopeId: "org:default-org", on: true });
+  const config = createMemoryConfigStore("default-org", { individualModelAuth: rows });
+  assert.equal(await config.getIndividualModelAuthModeDurable(), "required");
+  assert.equal(await config.getModelAccountDurable("bob"), "personal");
+  await rows.put("org:default-org", { scopeId: "org:default-org", on: false });
+  assert.equal(await config.getIndividualModelAuthModeDurable(), "optional");
+  assert.equal(await config.getModelAccountDurable("bob"), "company");
 });

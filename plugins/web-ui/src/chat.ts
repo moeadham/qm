@@ -710,9 +710,10 @@ export function createChatSurface(
     const selected = ctx.composer.currentModelOption();
     if (!selected) throw new Error("No model is available");
     const target = { scopeId: chatState.scopeId, channelName: chatState.contextName };
-    if (ctx.composer.followsDefault()) return target;
+    if (ctx.composer.followsDefault()) return { ...target, pinRuntime: false };
     const harness = selected.harnessId;
     return {
+      pinRuntime: true,
       ...(harnessSupportsEffort(harness) ? { effortLevel: ctx.composer.state.effortLevel } : {}),
       ...(harnessSupportsFastMode(harness) ? { fastMode: ctx.composer.state.fastMode } : {}),
       harness,

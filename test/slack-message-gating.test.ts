@@ -17,8 +17,8 @@ import {
   dedupeKey,
   isBareStop,
   maybeInterceptStop,
-  createInFlightThreadMap,
 } from "../src/slack/lib.ts";
+import { createInFlightThreadMap } from "../src/surfaces/turn-flow.ts";
 
 test("shouldProcessMessage allows file_share and thread_broadcast but drops other subtypes and the bot's own", () => {
   assert.equal(shouldProcessMessage({ subtype: "file_share", user: "U1" }, "BOT"), true);

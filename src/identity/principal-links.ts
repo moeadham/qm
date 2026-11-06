@@ -1,11 +1,12 @@
 import { createMemoryAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
-import { foldPrincipalId, type PrincipalLinkResolver } from "../directory/person.ts";
+import { foldPrincipalId, requiresPrincipalLink, type PrincipalLinkResolver } from "../directory/person.ts";
 
 export interface PrincipalLink {
   principalId: string;
   canonicalId: string;
   evidence: string;
+  label?: string;
   linkedBy: string;
   createdAt: number;
 }
@@ -14,6 +15,7 @@ interface PrincipalLinkInput {
   principalId: unknown;
   canonicalId: unknown;
   evidence: unknown;
+  label?: string;
   linkedBy: string;
 }
 
@@ -104,9 +106,12 @@ export function createPrincipalLinkService(
           throw new PrincipalLinkError(400, `evidence must say how the two identities were verified as one person`);
         const principalId = input.principalId.trim();
         const canonicalId = input.canonicalId.trim();
+        const label = input.label?.trim().slice(0, MAX_ID_LENGTH);
         const aliasKey = foldPrincipalId(principalId);
         const canonicalKey = foldPrincipalId(canonicalId);
         if (aliasKey === canonicalKey) throw new PrincipalLinkError(400, "a principal cannot be linked to itself");
+        if (requiresPrincipalLink(canonicalId))
+          throw new PrincipalLinkError(400, `${canonicalId} is a linked sign-in and cannot be a canonical principal`);
         await refresh(true);
         const existing = byAlias.get(aliasKey);
         if (existing) {
@@ -119,6 +124,11 @@ export function createPrincipalLinkService(
             400,
             `${canonicalId} is itself linked to ${canonicalIsAlias.canonicalId}; link to that principal instead`,
           );
+        if (
+          requiresPrincipalLink(principalId) &&
+          (byCanonical.get(canonicalKey) ?? []).some((row) => requiresPrincipalLink(row.principalId))
+        )
+          throw new PrincipalLinkError(409, `${canonicalId} already has a linked Discord account; unlink it first`);
         if (byCanonical.has(aliasKey))
           throw new PrincipalLinkError(
             400,
@@ -128,6 +138,7 @@ export function createPrincipalLinkService(
           principalId,
           canonicalId,
           evidence,
+          ...(label ? { label } : {}),
           linkedBy: input.linkedBy,
           createdAt: Date.now(),
         });
