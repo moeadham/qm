@@ -10,6 +10,7 @@ import {
 import { createDirectoryStore } from "../src/directory/directory-store.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { testConfig } from "./support/test-config.ts";
+import { encodeRef, serviceCredRef } from "../src/acl/resource-ref.ts";
 
 test("a Discord server channel the bot has seen works like a public channel for every linked person", async () => {
   const built = buildApp(testConfig({ harness: "mock", seedSkills: false, discordGuildIds: ["700000000000000001"] }));
@@ -66,7 +67,7 @@ test("the Slack directory's answer wins over a Discord record, and deactivated p
   assert.equal(await unknownToSlack.channelMember("600000000000000007", "former@default-org"), false);
 });
 
-test("with DISCORD_TRUST_SERVER_MEMBERS, a thread in an allowed server counts as company-only", async () => {
+test("with DISCORD_TRUST_SERVER_MEMBERS, a live message in an allowed server's thread counts as company-only", async () => {
   for (const trusted of [false, true]) {
     const built = buildApp(
       testConfig({
@@ -79,9 +80,42 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, a thread in an allowed server counts as
     try {
       built.config.setInternalMemberOverrides(["alice@default-org"]);
       await built.config.flushScope("org:default-org");
+      await built.serviceCreds.setServiceCredential("org:default-org", {
+        slug: "safe",
+        name: "safe",
+        delivery: "env",
+        envKey: "SAFE",
+        secret: "SYNTHETIC_safe",
+        host: "",
+      });
+      await built.acl.grant({
+        ownerScopeId: "org:default-org",
+        ref: encodeRef(serviceCredRef("safe")),
+        granteeScopeId: "org:default-org",
+        permission: "read",
+        grantedBy: "alice@default-org",
+      });
       await built.discordCore.rememberChannel("600000000000000009", "700000000000000001");
-      const turn = (channelRef: string) =>
-        built.app.turn({
+      for (const channel of ["600000000000000009", "600000000000000010"]) {
+        const scope = `channel:${channel}` as const;
+        const asSpeaker = built.sandboxResources.forTurn({
+          actorId: "alice@default-org",
+          scopeId: scope,
+          isCurrent: async () => true,
+        });
+        const computer = await asSpeaker.create("alice@default-org", scope, built.sandboxResources.defaultBackend());
+        await asSpeaker.setDefault("alice@default-org", scope, computer.id);
+      }
+      built.runtime.start();
+      const seen: Array<{ env?: string; companyOnly: boolean }> = [];
+      const run = built.sandbox.run.bind(built.sandbox);
+      built.sandbox.run = async (handle, command, opts) => {
+        seen.push({ env: handle.env?.SAFE, companyOnly: "BROWSE_LAB_MODEL" in (handle.env ?? {}) });
+        return run(handle, command, opts);
+      };
+      const turn = async (channelRef: string, credentials: string[] = []) => {
+        const before = seen.length;
+        await built.app.turn({
           surface: "discord",
           liveActor: true,
           async: true,
@@ -93,24 +127,22 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, a thread in an allowed server counts as
             audience: [{ externalId: "alice@default-org" }],
           },
           deliveryTarget: "800000000000000009",
-          text: "hello",
+          text: `!execute ${JSON.stringify({ command: "printf ok", credentials })}`,
           skipMemory: true,
         });
-      const members = async (channelRef: string) => {
-        const queued = await turn(channelRef);
-        const run = await built.runs.get(queued.runId!);
-        return run?.request.conversation.publishMembers?.map((p) => p.id);
+        const deadline = Date.now() + 3_000;
+        while (seen.length === before && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+        return seen.length > before ? seen.at(-1)! : null;
       };
-      assert.deepEqual(
-        await members("600000000000000009"),
-        trusted ? ["alice@default-org"] : undefined,
-        trusted ? "the linked speaker is the verified room" : "off by default",
-      );
-      assert.equal(
-        await members("600000000000000010"),
-        undefined,
-        "a channel outside the allowed servers never counts",
-      );
+
+      const room = await turn("600000000000000009");
+      assert.ok(room, "a plain command runs either way");
+      assert.equal(room.companyOnly, trusted, trusted ? "on: the room counts as company-only" : "off");
+      const withKey = await turn("600000000000000009", ["safe"]);
+      assert.equal(withKey?.env, trusted ? "SYNTHETIC_safe" : undefined, "the env credential rides only when on");
+
+      const outside = await turn("600000000000000010");
+      assert.equal(outside?.companyOnly, false, "a channel outside the allowed servers never counts");
     } finally {
       await built.runtime.stop();
     }

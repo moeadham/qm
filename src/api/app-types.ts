@@ -633,7 +633,6 @@ export interface App {
 }
 
 export interface AppDeps {
-  trustedChatRoom?: (surface: string, channelRef: string) => Promise<boolean>;
   externalSlackPolicies?: ExternalSlackPolicies;
   admittedWork?: AdmittedWork;
   shutdown?: () => AbortSignal;

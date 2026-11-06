@@ -2186,6 +2186,12 @@ export function buildApp(
     ...(config.surfaceDebugFooter ? { surfaceDebugFooter: true } : {}),
     ...(config.eagerProvisionEnabled ? { eagerProvision: true } : {}),
     ...(config.eagerProvisionEnabled && config.eagerProvisionDuringCheck ? { eagerProvisionDuringCheck: true } : {}),
+    ...(config.discordTrustServerMembers
+      ? {
+          trustedChatRoom: async (surface: string, channelRef: string) =>
+            surface === "discord" && (await discordChannels.has(channelRef)),
+        }
+      : {}),
     environments,
     brokeredTools,
     deploymentLayer,
@@ -2298,12 +2304,6 @@ export function buildApp(
         })
     : undefined;
   const app = createApp({
-    ...(config.discordTrustServerMembers
-      ? {
-          trustedChatRoom: async (surface: string, channelRef: string) =>
-            surface === "discord" && (await discordChannels.has(channelRef)),
-        }
-      : {}),
     teams,
     externalSlackPolicies: config.externalSlackPolicies,
     admittedWork,

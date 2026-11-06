@@ -210,6 +210,7 @@ export interface OrchestratorDeps {
   reachExec?: boolean;
   eagerProvision?: boolean;
   eagerProvisionDuringCheck?: boolean;
+  trustedChatRoom?: (surface: string, channelRef: string) => Promise<boolean>;
   environments?: EnvironmentStore;
   layerBrokerFor?: (tool: BrokeredLayerTool) => AwsRoleBroker | undefined;
   brokeredTools?: readonly BrokeredLayerTool[];

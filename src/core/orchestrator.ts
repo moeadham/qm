@@ -543,9 +543,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const humanTurn = input.origin.kind === "human";
       const sessionTurn = isSessionTurn(input);
       const humanInput = humanTurn && !sessionTurn;
+      const trustedRoom =
+        conversation.kind !== "dm" &&
+        !!conversation.channelRef &&
+        !!input.surface &&
+        !isSessionTurn(input) &&
+        (input.origin.kind === "human" || (input.origin.kind === "ambient" && input.origin.live === true)) &&
+        (await deps.trustedChatRoom?.(input.surface, conversation.channelRef)) === true;
       const allInternal =
         deps.identity.audienceIsAllInternal(conversation.audience) &&
         (conversation.kind === "dm" ||
+          trustedRoom ||
           (!!conversation.publishMembers?.length && conversation.publishMembers.every((p) => p.type === "internal")));
       const authoredDetection =
         input.origin.kind === "ambient" && input.origin.live === true && conversation.kind !== "dm";
