@@ -475,6 +475,16 @@ test("creating and editing an explicit ChatGPT cron validates the owner's subscr
     };
     const cron = await built.app.createCron(input);
     assert.equal(cron.runtime?.modelId, "codex/gpt-6-sol");
+    const spelledByProvider = await built.app.createCron({
+      ...input,
+      action: "Provider spelling",
+      runtime: { harnessId: "pi" as const, modelId: "gpt-6-sol" },
+    });
+    assert.equal(
+      spelledByProvider.runtime?.modelId,
+      "codex/gpt-6-sol",
+      "a cron keeps the one model id the owner's menu lists",
+    );
     await built.app.updateCron(cron.id, { runtime: { harnessId: "pi", modelId: "codex/gpt-6-astra" } });
     await built.userModelCredentials.delete("internal:alice", "openai");
     await assert.rejects(

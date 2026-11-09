@@ -8,7 +8,7 @@ import type { CoreTurnBody } from "../surfaces/turn-flow.ts";
 import type { ActorAssertion, TurnResult } from "../types.ts";
 import { createKeyedQueue } from "../util/async.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
-import type { DiscordApi } from "./api.ts";
+import { discordDisplayName, type DiscordApi } from "./api.ts";
 import {
   commandApprovalCard,
   commandDecisionText,
@@ -109,7 +109,7 @@ export function createApprovalButtons(deps: {
     if (!(await core.linkedPrincipal(user.id))) return tell("Link your Discord account first with `/qm link`.");
     const clicker: ActorAssertion = {
       externalId: `discord:${user.id}`,
-      displayName: user.global_name || user.username,
+      displayName: discordDisplayName(user),
     };
     await oneAtATime(`${button.kind}:${button.id}`, async () => {
       try {

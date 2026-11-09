@@ -43,6 +43,15 @@ test("an org saved with the old on/off switch is moved to the matching mode once
   });
 });
 
+test("an old on/off org row written mid-deploy still reads as its mode, and is rewritten as a mode", async () => {
+  const rows = createMemoryMap<PersistedModelAccount>();
+  const config = createMemoryConfigStore("default-org", { individualModelAuth: rows });
+  await rows.put("org:default-org", { scopeId: "org:default-org", on: true });
+  assert.equal(await config.getIndividualModelAuthModeDurable(), "required");
+  assert.equal(await config.getModelAccountDurable("bob"), "personal");
+  assert.deepEqual(await rows.get("org:default-org"), { scopeId: "org:default-org", mode: "required" });
+});
+
 test("account API binds choice to the signed-in person, preserves connections, and fails closed after disconnect", async () => {
   const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "personal-account-")) }));
   built.config.setInternalMemberOverrides(["alice@default-org", "bob@default-org"]);

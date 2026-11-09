@@ -1035,14 +1035,15 @@ export function createMemoryConfigStore(
         individualModelAuthStore.put(org, { scopeId: org, mode }),
       );
     },
-    getIndividualModelAuthModeDurable: async () => individualModelAuthMode(await individualModelAuthStore.get(org)),
+    getIndividualModelAuthModeDurable: async () =>
+      individualModelAuthMode(await migrateIndividualModelAuthMode(individualModelAuthStore, org)),
     async getIndividualModelAuthDurable(principalId) {
-      const mode = individualModelAuthMode(await individualModelAuthStore.get(org));
+      const mode = individualModelAuthMode(await migrateIndividualModelAuthMode(individualModelAuthStore, org));
       if (mode !== "optional") return mode === "required";
       return (await individualModelAuthStore.get(scopeId("personal", principalId)))?.on ?? false;
     },
     async getModelAccountDurable(principalId, requested) {
-      const mode = individualModelAuthMode(await individualModelAuthStore.get(org));
+      const mode = individualModelAuthMode(await migrateIndividualModelAuthMode(individualModelAuthStore, org));
       if (mode === "org-only") return "company";
       if (requested) return requested;
       const row = await individualModelAuthStore.get(scopeId("personal", principalId));
@@ -1268,7 +1269,7 @@ export function createMemoryConfigStore(
         brandingStore.get(id),
         id === org ? orgAmbientStore.get(org) : null,
         id === org ? interactiveFastModeStore.get(org) : null,
-        id === org ? individualModelAuthStore.get(org) : null,
+        id === org ? migrateIndividualModelAuthMode(individualModelAuthStore, org) : null,
         channelHeaderPinStore.get(id),
         id === org ? autoFlaggerStore.get(org) : null,
         id === org ? internalMemberOverridesStore.get(org) : null,
