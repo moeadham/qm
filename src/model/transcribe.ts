@@ -23,7 +23,7 @@ export function createTranscriber(
       throw new Error(`transcription provider ${target.providerId} is not configured or has no key`);
     const form = new FormData();
     form.set("model", target.modelId);
-    form.set("file", new Blob([audio], { type: mimetype }), filename);
+    form.set("file", new Blob([new Uint8Array(audio)], { type: mimetype }), filename);
     const res = await fetchImpl(`${spec.baseUrl.replace(/\/+$/, "")}/audio/transcriptions`, {
       method: "POST",
       headers: { authorization: `Bearer ${apiKey}` },
