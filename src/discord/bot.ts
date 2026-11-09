@@ -9,7 +9,9 @@ import { errMessage, swallowAs } from "../util/errors.ts";
 import {
   DISCORD_MESSAGE_LIMIT,
   discordErrorCode,
+  messageAttachments,
   messageHomeChannel,
+  messageText,
   postMessage,
   type DiscordApi,
   type DiscordChannel,
@@ -18,6 +20,7 @@ import {
 import type { DiscordCoreClient } from "./core.ts";
 import { receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
 import { emojiCharFor } from "../slack/emoji-map.ts";
+import { alignMarkdownTables } from "../slack/mrkdwn.ts";
 import { extractReactions, stripReactionDirectives } from "../slack/reactions.ts";
 
 const MAX_REACTIONS = 5;
@@ -43,6 +46,8 @@ const CONTEXT_MESSAGES = 20;
 const THREAD_NAME_LIMIT = 90;
 const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
+const STAKE_SCAN_MESSAGES = 100;
+const NO_STAKE_RECHECK_MS = 5 * 60_000;
 const CONVERSATION_MESSAGE_TYPES = new Set<number>([MessageType.Default, MessageType.Reply]);
 
 export interface TurnOutcome {
@@ -58,6 +63,7 @@ export interface AcceptGate {
 interface Place {
   kind: "dm" | "channel";
   channelId: string;
+  openedFrom?: string;
   threadRef: string;
   channelRef?: string;
   channelName?: string;
@@ -97,6 +103,25 @@ export function createDiscordBot(deps: {
   const { api, core, flow, self } = deps;
   const selfMention = `<@${self.id}>`;
   const channels = new Map<string, DiscordChannel>();
+  const threadStakes = new Map<string, { stake: boolean; at: number }>();
+
+  function noteStake(threadId: string, stake: boolean): void {
+    if (threadStakes.size >= CHANNEL_CACHE_LIMIT) threadStakes.clear();
+    threadStakes.set(threadId, { stake, at: Date.now() });
+  }
+
+  async function hasStakeIn(thread: DiscordChannel): Promise<boolean> {
+    if (thread.ownerId === self.id) return true;
+    const known = threadStakes.get(thread.id);
+    if (known && (known.stake || Date.now() - known.at < NO_STAKE_RECHECK_MS)) return known.stake;
+    const history = await api
+      .recentMessages(thread.id, STAKE_SCAN_MESSAGES)
+      .catch(swallowAs("discord: thread stake", undefined));
+    if (!history) return false;
+    const stake = history.some((m) => m.author.id === self.id || mentionsSelf(m));
+    noteStake(thread.id, stake);
+    return stake;
+  }
 
   async function channelOf(channelId: string): Promise<DiscordChannel> {
     const cached = channels.get(channelId);
@@ -119,8 +144,12 @@ export function createDiscordBot(deps: {
     if (!deps.guildIds.has(m.guild_id)) return undefined;
     const addressed = mentionsSelf(m);
     const channel = await channelOf(m.channel_id);
-    if (addressed) return { channel, addressed };
-    if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.ownerId === self.id) return { channel, addressed };
+    const isThread = THREAD_CHANNEL_TYPES.has(channel.type);
+    if (addressed) {
+      if (isThread) noteStake(channel.id, true);
+      return { channel, addressed };
+    }
+    if (isThread && (await hasStakeIn(channel))) return { channel, addressed };
     return undefined;
   }
 
@@ -152,8 +181,10 @@ export function createDiscordBot(deps: {
     }
     let threadId: string;
     let youOpenedIt = true;
+    let openedFrom: string | undefined;
     try {
       threadId = await api.startThread(channel.id, m.id, safeClip(text || "QM", THREAD_NAME_LIMIT));
+      openedFrom = channel.id;
       channels.set(threadId, { id: threadId, type: 11, parentId: channel.id, ownerId: self.id, guildId: m.guild_id! });
     } catch (error) {
       if (discordErrorCode(error) !== THREAD_ALREADY_EXISTS) throw error;
@@ -163,6 +194,7 @@ export function createDiscordBot(deps: {
     return {
       kind: "channel",
       channelId: threadId,
+      ...(openedFrom ? { openedFrom } : {}),
       threadRef: discordChannelThreadRef(channel.id, threadId),
       channelRef: channel.id,
       ...(channel.name ? { channelName: channel.name } : {}),
@@ -171,18 +203,20 @@ export function createDiscordBot(deps: {
   }
 
   async function threadContext(place: Place, trigger: DiscordMessage): Promise<Partial<CoreTurnBody>> {
-    const raw = await api
-      .recentMessages(place.channelId, CONTEXT_MESSAGES)
-      .catch(swallowAs("discord: thread history", [] as DiscordMessage[]));
+    const raw = await (
+      place.openedFrom
+        ? api.recentMessages(place.openedFrom, CONTEXT_MESSAGES, trigger.id)
+        : api.recentMessages(place.channelId, CONTEXT_MESSAGES)
+    ).catch(swallowAs("discord: thread history", [] as DiscordMessage[]));
     const nameById = new Map<string, string>([[self.id, self.username]]);
     for (const m of raw) nameById.set(m.author.id, displayName(m.author));
     const messages: RecentMessage[] = raw
-      .filter((m) => m.id !== trigger.id && CONVERSATION_MESSAGE_TYPES.has(m.type) && m.content.trim())
+      .filter((m) => m.id !== trigger.id && CONVERSATION_MESSAGE_TYPES.has(m.type) && messageText(m).trim())
       .map((m) => ({
         ts: m.id,
         name: displayName(m.author),
         authorId: m.author.id,
-        text: m.content,
+        text: messageText(m),
         ...(m.author.bot ? { isBot: true } : {}),
         ...(m.author.id === self.id ? { isSelf: true } : {}),
       }));
@@ -190,7 +224,7 @@ export function createDiscordBot(deps: {
       channel: { kind: "channel", ...(place.channelName ? { name: place.channelName } : {}) },
       members: [],
       messages,
-      here: { kind: "thread", youOpenedIt: place.youOpenedIt === true },
+      here: place.openedFrom ? { kind: "top-level" } : { kind: "thread", youOpenedIt: place.youOpenedIt === true },
       files: [],
       omittedFiles: [],
       nameById,
@@ -209,7 +243,7 @@ export function createDiscordBot(deps: {
     return {
       stream(text: string, onPlaceholder: (messageId: string) => Promise<void>): void {
         if (!streaming) return;
-        const shown = safeClip(text, DISCORD_MESSAGE_LIMIT - 1);
+        const shown = safeClip(alignMarkdownTables(text), DISCORD_MESSAGE_LIMIT - 1);
         chain = chain
           .then(async () => {
             if (placeholder) return api.edit(channelId, placeholder, shown);
@@ -261,9 +295,10 @@ export function createDiscordBot(deps: {
   }
 
   async function inboundFiles(m: DiscordMessage): Promise<Pick<CoreTurnBody, "attachments" | "inboundNotes">> {
-    if (!m.attachments?.length) return {};
+    const files = messageAttachments(m);
+    if (!files.length) return {};
     const { attachments, issues } = await receiveDiscordFiles(
-      m.attachments,
+      files,
       (bytes) => core.stageBlob(bytes),
       displayName(m.author),
     );
@@ -281,8 +316,8 @@ export function createDiscordBot(deps: {
       await promptLink(m.author.id);
       return gate?.persisted();
     }
-    const text = m.content.replaceAll(selfMention, `@${self.username}`).trim();
-    if (!text && !m.attachments?.length) return gate?.persisted();
+    const text = messageText(m).replaceAll(selfMention, `@${self.username}`).trim();
+    if (!text && !messageAttachments(m).length) return gate?.persisted();
     const messageKey = discordMessageKey(m.channel_id, m.id);
     let place: Place;
     try {

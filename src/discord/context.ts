@@ -1,7 +1,7 @@
 import { buildContextWindow, type RecentMessage } from "../surfaces/conversation.ts";
 import type { SurfaceContextRequest } from "../types.ts";
 import { errMessage } from "../util/errors.ts";
-import type { DiscordApi, DiscordMessage } from "./api.ts";
+import { messageAttachments, messageText, type DiscordApi, type DiscordMessage } from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import { receiveDiscordFiles } from "./files.ts";
 
@@ -37,7 +37,7 @@ export function createDiscordContextFulfiller(deps: {
 
   async function fetchFile(channelId: string, file: { ts: string; name?: string }) {
     const message = await api.message(channelId, file.ts);
-    const candidates = (message.attachments ?? []).filter((a) => !file.name || a.filename === file.name);
+    const candidates = messageAttachments(message).filter((a) => !file.name || a.filename === file.name);
     if (!candidates.length)
       return { error: file.name ? `no file named "${file.name}" on that message` : "that message has no files" };
     const { attachments, issues } = await receiveDiscordFiles(
@@ -89,16 +89,16 @@ export function createDiscordContextFulfiller(deps: {
       const { raw, hasMore } = await readHistory(channelId, before, match || count > PAGE ? SCAN_PAGES_FOR_MATCH : 1);
       const nameById = new Map<string, string>();
       const shaped: RecentMessage[] = raw
-        .filter((m) => m.content.trim() || m.attachments?.length)
+        .filter((m) => messageText(m).trim() || messageAttachments(m).length)
         .map((m) => {
           nameById.set(m.author.id, displayName(m.author));
           return {
             ts: m.id,
             name: displayName(m.author),
             authorId: m.author.id,
-            text: m.content,
+            text: messageText(m),
             parentTs: channelId,
-            ...(m.attachments?.length ? { files: m.attachments.map((a) => a.filename) } : {}),
+            ...(messageAttachments(m).length ? { files: messageAttachments(m).map((a) => a.filename) } : {}),
             ...(m.author.bot ? { isBot: true } : {}),
             ...(m.author.id === deps.selfId ? { isSelf: true } : {}),
           };

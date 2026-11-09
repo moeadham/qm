@@ -147,7 +147,9 @@ class FakeDiscord implements DiscordApi {
     if (!c) throw new Error(`unknown channel ${channelId}`);
     return c;
   }
-  async recentMessages(channelId: string) {
+  historyReads: Array<[string, string | undefined]> = [];
+  async recentMessages(channelId: string, _limit?: number, before?: string) {
+    this.historyReads.push([channelId, before]);
     return this.history.get(channelId) ?? [];
   }
   reactions: Array<[string, string, string]> = [];
@@ -490,6 +492,97 @@ test("a reply in a thread the bot owns is heard without a mention as an ambient 
   assert.equal(api.sent.length, 0);
   assert.deepEqual(h.acked, []);
   assert.deepEqual(api.typed, [], "a turn that stays quiet never shows typing");
+});
+
+test("in a thread a person started, follow-ups are heard without a mention once QM has a stake in it", async () => {
+  const h = harness({ result: () => ({ status: "silent" }) });
+  const api = new FakeDiscord();
+  const joined = "800000000000000101";
+  const mentioned = "800000000000000102";
+  const strangers = "800000000000000103";
+  for (const id of [joined, mentioned, strangers])
+    api.channels.set(id, { id, type: 11, parentId: CHANNEL, ownerId: ALICE, guildId: GUILD });
+  api.history.set(joined, [
+    {
+      ...dm(BOT, "here's what I found", "800000000000000104"),
+      channel_id: joined,
+      author: { id: BOT, username: "qm", global_name: null, bot: true },
+    },
+  ]);
+  const { handlers, plugin } = await boot(h, api);
+  const say = (thread: string, id: string, content: string, mention = false) =>
+    handlers.onMessage({
+      ...dm(ALICE, content, id),
+      channel_id: thread,
+      guild_id: GUILD,
+      ...(mention ? { mentions: [{ id: BOT } as never] } : {}),
+    });
+  say(strangers, "800000000000000110", "just us here");
+  say(joined, "800000000000000111", "and what about tuesday?");
+  await until(() => h.turns.length === 1, "follow-up in a thread QM answered");
+  say(mentioned, "800000000000000112", `<@${BOT}> can you check this`, true);
+  await until(() => h.turns.length === 2, "mention");
+  say(mentioned, "800000000000000113", "also the other one");
+  await until(() => h.turns.length === 3, "follow-up after the mention");
+  say(strangers, "800000000000000114", "still just us");
+  await new Promise((r) => setTimeout(r, 20));
+  await plugin.stop();
+
+  assert.deepEqual(
+    h.turns.map((t) => [t.deliveryTarget, t.origin]),
+    [
+      [joined, { kind: "ambient", live: true, entryTs: "800000000000000111" }],
+      [mentioned, { kind: "human", messageTs: "800000000000000112" }],
+      [mentioned, { kind: "ambient", live: true, entryTs: "800000000000000113" }],
+    ],
+  );
+  assert.equal(api.historyReads.filter(([c]) => c === strangers).length, 1, "a thread without QM is checked once");
+});
+
+test("a mention in the main channel gives QM the recent channel conversation", async () => {
+  const h = harness({});
+  const api = new FakeDiscord();
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  api.history.set(CHANNEL, [
+    { ...dm(MALLORY, "the deploy failed again", "800000000000000120"), channel_id: CHANNEL, guild_id: GUILD },
+  ]);
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({
+    ...dm(ALICE, `<@${BOT}> any idea why?`, "800000000000000121"),
+    channel_id: CHANNEL,
+    guild_id: GUILD,
+    mentions: [{ id: BOT } as never],
+  });
+  await until(() => h.acked.length === 1, "reply");
+  await plugin.stop();
+
+  const turn = h.turns[0]!;
+  assert.deepEqual(api.historyReads, [[CHANNEL, "800000000000000121"]]);
+  assert.match(turn.priorTurns?.[0]?.text ?? "", /the deploy failed again/);
+  assert.match(turn.conversationHeader ?? "", /top-level message/);
+});
+
+test("a forwarded message reaches QM with its text", async () => {
+  const h = harness({});
+  const { handlers, plugin } = await boot(h);
+  handlers.onMessage({
+    ...dm(ALICE, ""),
+    message_snapshots: [{ message: { content: "the build is green", attachments: [] } }],
+  });
+  await until(() => h.turns.length === 1, "turn");
+  await plugin.stop();
+  assert.equal(h.turns[0]!.text, "(forwarded message) the build is green");
+});
+
+test("markdown tables are sent as aligned code blocks", async () => {
+  const h = harness({
+    result: () => ({ status: "ok", reply: "Results:\n\n| name | score |\n|---|---|\n| alice | 10 |" }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "scores?"));
+  await until(() => h.acked.length === 1, "reply");
+  await plugin.stop();
+  assert.equal(api.sent[0]!.content, "Results:\n\n```\nname  | score\n------+------\nalice | 10\n```");
 });
 
 test("an unmentioned thread message shows typing once QM decides to answer it", async () => {

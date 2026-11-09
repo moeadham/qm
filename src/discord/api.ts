@@ -17,6 +17,7 @@ import {
 } from "@discordjs/core";
 import { createHash } from "node:crypto";
 import { REST } from "@discordjs/rest";
+import { alignMarkdownTables } from "../slack/mrkdwn.ts";
 import { safeChunks } from "../surfaces/safe-cut.ts";
 import { swallowAs } from "../util/errors.ts";
 import { sleep } from "../util/async.ts";
@@ -37,7 +38,20 @@ export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | 
   guild_id?: string;
   webhook_id?: string;
   author: Pick<APIMessage["author"], "id" | "username" | "global_name" | "bot">;
+  message_snapshots?: Array<{ message: { content?: string; attachments?: DiscordAttachment[] } }>;
 };
+
+export function messageText(m: DiscordMessage): string {
+  const forwarded = (m.message_snapshots ?? [])
+    .map((s) => s.message.content?.trim())
+    .filter((t): t is string => Boolean(t))
+    .map((t) => `(forwarded message) ${t}`);
+  return [m.content, ...forwarded].filter((t) => t.trim()).join("\n");
+}
+
+export function messageAttachments(m: DiscordMessage): DiscordAttachment[] {
+  return [...(m.attachments ?? []), ...(m.message_snapshots ?? []).flatMap((s) => s.message.attachments ?? [])];
+}
 
 export interface DiscordChannel {
   id: string;
@@ -140,7 +154,7 @@ export async function postMessage(
   text: string,
   opts: { key: string; editRef?: string; replyTo?: string },
 ): Promise<void> {
-  for (const [i, part] of safeChunks(text, DISCORD_MESSAGE_LIMIT).entries()) {
+  for (const [i, part] of safeChunks(alignMarkdownTables(text), DISCORD_MESSAGE_LIMIT).entries()) {
     if (i === 0 && opts.editRef) {
       try {
         await api.edit(channelId, opts.editRef, part);

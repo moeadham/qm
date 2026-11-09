@@ -159,9 +159,18 @@ export function toSlackMrkdwn(md: string): string {
   text = text.replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![*\w])/g, "$1_$2_");
 
   text = text.replaceAll(BOLD_SENTINEL, "*");
-  text = text.replace(new RegExp(`${STASH_OPEN}(\\d+)${STASH_OPEN}`, "g"), (_m, i) => stash[Number(i)] ?? "");
+  return restoreStash(text, stash);
+}
 
-  return text;
+function restoreStash(text: string, stash: readonly string[]): string {
+  return text.replace(new RegExp(`${STASH_OPEN}(\\d+)${STASH_OPEN}`, "g"), (_m, i) => stash[Number(i)] ?? "");
+}
+
+export function alignMarkdownTables(md: string): string {
+  if (!md.includes("|")) return md;
+  const stash: string[] = [];
+  const keep = (s: string): string => `${STASH_OPEN}${stash.push(s) - 1}${STASH_OPEN}`;
+  return restoreStash(reformatTables(stashFencedBlocks(md.replace(/\r\n/g, "\n"), keep), keep), stash);
 }
 
 function trimUrlTail(url: string): string {
