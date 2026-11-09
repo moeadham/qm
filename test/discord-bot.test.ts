@@ -786,6 +786,37 @@ test("reactions and pins on the message that started a thread land in the parent
   assert.deepEqual(api.pins, [[CHANNEL, "800000000000000061", false]]);
 });
 
+test("reactions and pins on a forum post's opening message stay in the post", async () => {
+  const h = harness({ result: () => ({ status: "ok", reply: "On it [[react: eyes]]" }) });
+  const api = new FakeDiscord();
+  const FORUM = "600000000000000009";
+  const POST = "800000000000000081";
+  api.channels.set(FORUM, { id: FORUM, type: 15, name: "ideas", guildId: GUILD });
+  api.channels.set(POST, { id: POST, type: 11, parentId: FORUM, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({
+    ...dm(ALICE, `<@${BOT}> thoughts?`),
+    id: POST,
+    channel_id: POST,
+    guild_id: GUILD,
+    mentions: [{ id: BOT } as never],
+  });
+  await until(() => api.reactions.length === 1, "trigger reaction");
+  h.queue.push({
+    id: "p-post",
+    destination: { type: "discord", target: POST, pin: { messageTs: POST } },
+    text: "",
+    idempotencyKey: "post:p-post",
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  await until(() => h.deliveriesAcked.length === 1, "pin acked");
+  await plugin.stop();
+
+  assert.deepEqual(api.reactions, [[POST, POST, "👀"]]);
+  assert.deepEqual(api.pins, [[POST, POST, false]]);
+});
+
 test("a react the agent asks for that Discord can never accept is settled, not retried", async () => {
   const h = harness({});
   const api = new FakeDiscord();

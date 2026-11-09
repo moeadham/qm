@@ -18,7 +18,7 @@ function buildMap(): Record<string, string> {
     add(e.unified, e.short_name);
     add(e.non_qualified, e.short_name);
   }
-  return Object.fromEntries(map);
+  return Object.assign(Object.create(null) as Record<string, string>, Object.fromEntries(map));
 }
 
 export const EMOJI_NAME_BY_CHAR: Record<string, string> = buildMap();
@@ -34,6 +34,6 @@ const EMOJI_CHAR_BY_NAME = buildCharByName();
 
 export function emojiCharFor(name: string): string | undefined {
   const trimmed = name.trim().replace(/^:|:$/g, "");
-  if (Object.hasOwn(EMOJI_NAME_BY_CHAR, trimmed.replace(VS16, ""))) return trimmed;
+  if (EMOJI_NAME_BY_CHAR[trimmed.replace(VS16, "")]) return trimmed;
   return EMOJI_CHAR_BY_NAME.get(trimmed.toLowerCase());
 }

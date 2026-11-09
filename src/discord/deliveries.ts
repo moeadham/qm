@@ -22,9 +22,9 @@ import { stripReactionDirectives } from "../slack/reactions.ts";
 
 const CLAIM_MS = 15_000;
 const RUN_RECOVERY_GRACE_MS = 15_000;
-const UNDELIVERABLE_CODES = new Set([10003, 10013, 50001, 50007, 50013]);
+const UNDELIVERABLE_CODES = new Set([10003, 10013, 50001, 50007, 50013, 50035]);
 const MAX_REPORTED = 5_000;
-const UNACTIONABLE_TARGET_CODES = new Set([DISCORD_UNKNOWN_MESSAGE, 10014, 30003, 30010, 50035]);
+const UNACTIONABLE_TARGET_CODES = new Set([DISCORD_UNKNOWN_MESSAGE, 10014, 30003, 30010]);
 
 export function createDiscordDeliveryPoller(deps: {
   api: DiscordApi;

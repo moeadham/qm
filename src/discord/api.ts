@@ -112,6 +112,7 @@ export interface DiscordGateway {
 export const DISCORD_MESSAGE_LIMIT = 2_000;
 const CLOSE_WAIT_MS = 5_000;
 export const DISCORD_UNKNOWN_MESSAGE = 10008;
+const POSTS_LIVE_IN_THREAD = new Set([15, 16]);
 
 export async function messageHomeChannel(
   api: Pick<DiscordApi, "channel">,
@@ -119,7 +120,9 @@ export async function messageHomeChannel(
   messageId: string,
 ): Promise<string> {
   if (messageId !== channelId) return channelId;
-  return (await api.channel(channelId)).parentId ?? channelId;
+  const { parentId } = await api.channel(channelId);
+  if (!parentId) return channelId;
+  return POSTS_LIVE_IN_THREAD.has((await api.channel(parentId)).type) ? channelId : parentId;
 }
 
 export function discordErrorCode(error: unknown): number | undefined {

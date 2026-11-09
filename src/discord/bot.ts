@@ -235,7 +235,9 @@ export function createDiscordBot(deps: {
   }
 
   async function reactTo(threadId: string, messageId: string, names: readonly string[]): Promise<void> {
-    const channelId = await messageHomeChannel(api, threadId, messageId).catch(() => threadId);
+    const channelId = await messageHomeChannel({ channel: channelOf }, threadId, messageId).catch(
+      swallowAs("discord: reaction channel", threadId),
+    );
     for (const name of names.slice(0, MAX_REACTIONS)) {
       const emoji = emojiCharFor(name);
       if (emoji) await api.react(channelId, messageId, emoji).catch(swallowAs("discord: react", undefined));
