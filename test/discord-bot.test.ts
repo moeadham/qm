@@ -241,6 +241,7 @@ function harness(opts: {
   runtime?: RuntimeDeps;
   sessions?: SessionStore;
   contextRequests?: SurfaceContextRequest[];
+  transcribe?: (audio: Uint8Array, filename: string, mimetype: string) => Promise<string>;
 }): Harness {
   const linked = opts.linked ?? { [ALICE]: "alice@example.com" };
   const enqueued = new Set<() => void>();
@@ -293,6 +294,7 @@ function harness(opts: {
     ...(opts.runtime ? { runtime: opts.runtime } : {}),
     sessions: opts.sessions ?? createMemorySessionStore(),
     discordChannels: { remember: async (channelId, guildId) => void h.channels.push([channelId, guildId]) },
+    ...(opts.transcribe ? { transcribe: opts.transcribe } : {}),
   });
   h.core = {
     ...real,
@@ -718,6 +720,128 @@ test("files in a forwarded message reach QM", async () => {
     h.turns[0]!.attachments?.map((a) => a.name),
     ["chart.png"],
   );
+});
+
+test("a voice note reaches QM as its transcript, with the audio still attached", async () => {
+  const heard: Array<[string, string, string]> = [];
+  const h = harness({
+    transcribe: async (audio, filename, mimetype) => {
+      heard.push([Buffer.from(audio).toString(), filename, mimetype]);
+      return "can you check the deploy";
+    },
+  });
+  const realFetch = globalThis.fetch;
+  let downloads = 0;
+  globalThis.fetch = (async () => {
+    downloads++;
+    return new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } });
+  }) as unknown as typeof fetch;
+  try {
+    const { handlers, plugin } = await boot(h);
+    handlers.onMessage({
+      ...dm(ALICE, ""),
+      flags: 8192,
+      attachments: [
+        {
+          id: "v1",
+          filename: "voice-message.ogg",
+          size: 7,
+          url: "https://cdn.discordapp.com/attachments/1/2/voice-message.ogg",
+          content_type: "audio/ogg",
+        },
+      ],
+    });
+    await until(() => h.turns.length === 1, "turn");
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual(heard, [["OGGDATA", "voice-message.ogg", "audio/ogg"]]);
+  assert.equal(downloads, 1, "the voice note is downloaded once for both transcription and the attachment");
+  assert.equal(h.blobs.get(h.turns[0]!.attachments![0]!.blobId)?.toString(), "OGGDATA");
+  assert.equal(h.turns[0]!.text, "(voice note) can you check the deploy");
+  assert.deepEqual(
+    h.turns[0]!.attachments?.map((a) => a.name),
+    ["voice-message.ogg"],
+  );
+});
+
+test("a voice note that can't be transcribed still reaches QM, with a note saying so", async () => {
+  const h = harness({
+    transcribe: async () => {
+      throw new Error("http 402 out of credit");
+    },
+  });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } })) as unknown as typeof fetch;
+  try {
+    const { handlers, plugin } = await boot(h);
+    handlers.onMessage({
+      ...dm(ALICE, ""),
+      flags: 8192,
+      attachments: [
+        {
+          id: "v2",
+          filename: "voice-message.ogg",
+          size: 7,
+          url: "https://cdn.discordapp.com/attachments/1/2/voice-message.ogg",
+          content_type: "audio/ogg",
+        },
+      ],
+    });
+    await until(() => h.turns.length === 1, "turn");
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.match(h.turns[0]!.inboundNotes?.join(" ") ?? "", /voice note that couldn't be transcribed/);
+  assert.equal(h.turns[0]!.text, "");
+  assert.deepEqual(
+    h.turns[0]!.attachments?.map((a) => a.name),
+    ["voice-message.ogg"],
+  );
+});
+
+test("only a voice note QM handles is transcribed: not from unlinked people, unflagged audio, or unfollowed channels", async () => {
+  let calls = 0;
+  const h = harness({
+    transcribe: async () => {
+      calls++;
+      return "hello";
+    },
+  });
+  const api = new FakeDiscord();
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } })) as unknown as typeof fetch;
+  const audio = {
+    id: "v3",
+    filename: "voice-message.ogg",
+    size: 7,
+    url: "https://cdn.discordapp.com/attachments/1/2/voice-message.ogg",
+    content_type: "audio/ogg",
+  };
+  try {
+    const { handlers, plugin } = await boot(h, api);
+    handlers.onMessage({ ...dm(MALLORY, "", "800000000000000201"), flags: 8192, attachments: [audio] });
+    handlers.onMessage({ ...dm(ALICE, "", "800000000000000202"), attachments: [audio] });
+    handlers.onMessage({
+      ...dm(ALICE, "", "800000000000000203"),
+      channel_id: CHANNEL,
+      guild_id: GUILD,
+      flags: 8192,
+      attachments: [audio],
+    });
+    await until(() => h.turns.length === 1, "the unflagged DM file still reaches QM");
+    await new Promise((r) => setTimeout(r, 50));
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(calls, 0);
+  assert.equal(h.turns.length, 1);
 });
 
 test("markdown tables are sent as aligned code blocks", async () => {

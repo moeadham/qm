@@ -1,4 +1,5 @@
 import type { MemoryEmbedder } from "./model/embeddings.ts";
+import { createTranscriber } from "./model/transcribe.ts";
 import { nonDeploymentCredential, withDeploymentCredentials } from "./credentials/deployment-credentials.ts";
 import { isHarnessId, resolveEmbeddingModel } from "./model/pi-models.ts";
 import { createPostgresTeamStore, type TeamStore } from "./teams/teams.ts";
@@ -2439,6 +2440,7 @@ export function buildApp(
     modelCredentialFetch: overrides.modelCredentialFetch,
     refreshModels,
   };
+  const transcribe = config.transcribeModel ? createTranscriber(customProviders, config.transcribeModel) : undefined;
   const discordCore = createDiscordCoreClient({
     app,
     blobTransfer,
@@ -2461,6 +2463,7 @@ export function buildApp(
     runtime: runtimeDeps,
     sessions,
     discordChannels,
+    ...(transcribe ? { transcribe } : {}),
   });
   runs.onTerminal((run) => {
     void runs

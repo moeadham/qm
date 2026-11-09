@@ -14,12 +14,12 @@ Status: in progress on branch `claude/slack-qm-integration-o4y3ag`. This is the 
 
 ## Configuration
 
-| Variable | Purpose |
-|---|---|
-| `DISCORD_BOT_TOKEN` | Bot token (Bot tab) |
-| `DISCORD_APPLICATION_ID` | Application / OAuth client id |
-| `DISCORD_CLIENT_SECRET` | OAuth client secret, used only for account linking |
-| `DISCORD_GUILD_IDS` | Comma-separated allowlist of servers the bot acts in |
+| Variable                 | Purpose                                              |
+| ------------------------ | ---------------------------------------------------- |
+| `DISCORD_BOT_TOKEN`      | Bot token (Bot tab)                                  |
+| `DISCORD_APPLICATION_ID` | Application / OAuth client id                        |
+| `DISCORD_CLIENT_SECRET`  | OAuth client secret, used only for account linking   |
+| `DISCORD_GUILD_IDS`      | Comma-separated allowlist of servers the bot acts in |
 
 The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it from the configured portal URL and linking reports itself unconfigured without one.
 
@@ -58,22 +58,31 @@ Do not grant Administrator, Manage Server, Manage Channels, Manage Roles, Manage
 ## Remaining
 
 ### PR 3 follow-ups
+
 - Independent review accepted at `a899994` (88/100) after four rounds of fixes.
 - Live QA once the bot is in the test server with Message Content enabled, then the staging end-to-end pass.
 
 ### PR 4: interactions, files, reactions
+
 - Status-message stop button; reaction and member intents when their features land.
 - Inbound attachments only from Discord's CDN hosts into `stageBlob`; outbound uploads within the server limit, otherwise a QM file link.
 - `[[react: …]]` directives and inbound reactions on messages the bot has a stake in.
 - Private replies: ephemeral for interactions, DM otherwise.
 
 ### PR 5: directory, hand-offs, admin, docs
+
 - Channel audience: the requester plus linked members who can view the channel (needs the GuildMembers intent).
 - Channel directory push with `discord:` ids; people come from QM links, not a Discord roster.
 - `reach` and principal deliveries target the configured platform.
 - Pinned model header and channel topic.
 - Admin install page (stored bot token) and linked-accounts view.
 - Operator docs: this file, plus what Discord cannot do (email lookup, group DMs, acting as the user, Slack's AI pane, Slack Connect external access, HTTP events).
+
+## Voice notes
+
+`TRANSCRIBE_MODEL=<custom provider id>:<model id>` (for example `allmodels:openai/gpt-transcribe`) turns on transcription: a Discord voice message's audio goes to that OpenAI-protocol custom provider's `/audio/transcriptions` endpoint with its stored key, and QM gets `(voice note) <transcript>` with the audio still attached. It is the only setting; there is no schema change. A malformed value fails at startup; a missing, Anthropic-protocol or keyless provider fails per message, leaving the audio attached with a note that it couldn't be transcribed.
+
+A voice message has no text, so it can't mention QM: voice notes are handled in DMs, in replies that ping QM, and in threads QM follows, where every linked participant's voice note is transcribed and its audio sent to the provider. Unlinked senders and messages QM ignores are never transcribed.
 
 ## Verification
 

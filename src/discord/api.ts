@@ -39,6 +39,7 @@ export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | 
   webhook_id?: string;
   author: Pick<APIMessage["author"], "id" | "username" | "global_name" | "bot">;
   message_snapshots?: Array<{ message: { content?: string; attachments?: DiscordAttachment[] } }>;
+  flags?: number;
 };
 
 export function discordDisplayName(author: DiscordMessage["author"]): string {
