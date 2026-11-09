@@ -56,6 +56,10 @@ The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it fr
 - Admin install page (stored bot token) and linked-accounts view.
 - Operator docs: this file, plus what Discord cannot do (email lookup, group DMs, acting as the user, Slack's AI pane, Slack Connect external access, HTTP events).
 
+## Voice notes
+
+Discord voice messages arrive as an audio attachment flagged as a voice message. When `TRANSCRIBE_MODEL` is set to `<custom provider id>:<model id>` (for example `allmodels:openai/gpt-transcribe`), the core sends the audio to that custom provider's OpenAI-style `/audio/transcriptions` endpoint with the provider's stored key, and QM receives `(voice note) <transcript>` as the message text, with the audio still attached. If transcription fails, the turn still runs with the audio attached and a note that it couldn't be transcribed. Unset, voice notes arrive as plain audio files.
+
 ## Verification
 
 - Tests through real paths with a fake Discord REST client and gateway, in the style of `test/slack-*.test.ts`; each bug-fix test fails on old code.

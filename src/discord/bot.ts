@@ -1,4 +1,4 @@
-import { MessageType } from "@discordjs/core";
+import { MessageFlags, MessageType } from "@discordjs/core";
 import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
@@ -19,7 +19,7 @@ import {
   type DiscordMessage,
 } from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
-import { receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
+import { downloadDiscordFile, receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
 import { emojiCharFor } from "../slack/emoji-map.ts";
 import type { ThreadTracker } from "../slack/message-gating.ts";
 import { alignMarkdownTables } from "../slack/mrkdwn.ts";
@@ -307,6 +307,27 @@ export function createDiscordBot(deps: {
     };
   }
 
+  function withNote(
+    files: Pick<CoreTurnBody, "attachments" | "inboundNotes">,
+    note: string | undefined,
+  ): Pick<CoreTurnBody, "attachments" | "inboundNotes"> {
+    return note ? { ...files, inboundNotes: [...(files.inboundNotes ?? []), note] } : files;
+  }
+
+  async function voiceNote(m: DiscordMessage): Promise<{ transcript?: string; note?: string }> {
+    const transcribe = core.transcribe;
+    const audio = m.attachments?.find((a) => a.content_type?.startsWith("audio/"));
+    if (!transcribe || !audio || !((m.flags ?? 0) & MessageFlags.IsVoiceMessage)) return {};
+    try {
+      const bytes = await downloadDiscordFile({ id: audio.id, name: audio.filename, url_private: audio.url });
+      const spoken = await transcribe(bytes, audio.filename, audio.content_type ?? "audio/ogg");
+      return spoken ? { transcript: `(voice note) ${spoken}` } : {};
+    } catch (error) {
+      console.error(`[discord] voice note ${m.id} could not be transcribed: ${errMessage(error)}`);
+      return { note: `${discordDisplayName(m.author)} sent a voice note that couldn't be transcribed.` };
+    }
+  }
+
   async function handleMessage(m: DiscordMessage, stage?: () => Promise<AcceptGate>): Promise<void> {
     const relevant = await relevantPlace(m);
     if (!relevant) return;
@@ -315,7 +336,12 @@ export function createDiscordBot(deps: {
       if (relevant.addressed) await promptLink(m.author.id);
       return gate?.persisted();
     }
-    const text = messageText(m).replaceAll(selfMention, `@${self.username}`).trim();
+    const spoken = await voiceNote(m);
+    const text = [messageText(m), spoken.transcript ?? ""]
+      .filter((part) => part.trim())
+      .join("\n")
+      .replaceAll(selfMention, `@${self.username}`)
+      .trim();
     if (!text && !messageAttachments(m).length) return gate?.persisted();
     const messageKey = discordMessageKey(m.channel_id, m.id);
     let place: Place;
@@ -353,7 +379,7 @@ export function createDiscordBot(deps: {
         ...(place.kind === "dm" ? { instructions: DISCORD_REACTION_INSTRUCTION } : {}),
       },
       redeliveryKey: messageKey,
-      ...(await inboundFiles(m)),
+      ...withNote(await inboundFiles(m), spoken.note),
       ...(place.kind === "channel" ? await threadContext(place, m) : {}),
     };
     await converse(place.channelId, body, {
