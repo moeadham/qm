@@ -64,13 +64,26 @@ export type ModelAccount = "company" | "personal" | "anthropic" | "openai";
 export const INDIVIDUAL_MODEL_AUTH_MODES = ["org-only", "optional", "required"] as const;
 export type IndividualModelAuthMode = (typeof INDIVIDUAL_MODEL_AUTH_MODES)[number];
 
-export interface PersistedModelAccount extends PersistedScopedFlag {
+export interface PersistedModelAccount {
+  scopeId: ScopeId;
+  on?: boolean;
   provider?: "anthropic" | "openai";
   mode?: IndividualModelAuthMode;
 }
 
 function individualModelAuthMode(row: PersistedModelAccount | null | undefined): IndividualModelAuthMode {
-  return row?.mode ?? (row?.on ? "required" : "optional");
+  return row?.mode ?? "optional";
+}
+
+async function migrateIndividualModelAuthMode(
+  store: DurableMap<PersistedModelAccount>,
+  org: ScopeId,
+): Promise<PersistedModelAccount | null> {
+  const row = await store.get(org);
+  if (!row || row.mode) return row ?? null;
+  const migrated = { scopeId: org, mode: row.on ? ("required" as const) : ("optional" as const) };
+  await store.put(org, migrated);
+  return migrated;
 }
 
 export interface PersistedScopedFlag {
@@ -572,7 +585,9 @@ export function createMemoryConfigStore(
           internalMemberOverrides = (await internalMemberOverridesStore.get(org))?.members ?? [];
           orgAmbient = (await orgAmbientStore.get(org))?.on ?? true;
           interactiveFastMode = (await interactiveFastModeStore.get(org))?.on ?? false;
-          individualModelAuthModeCache = individualModelAuthMode(await individualModelAuthStore.get(org));
+          individualModelAuthModeCache = individualModelAuthMode(
+            await migrateIndividualModelAuthMode(individualModelAuthStore, org),
+          );
           for (const r of await webuiModelStore.all()) webuiModels.set(r.scopeId, r.ids);
           for (const r of await peopleDirectoryUrlStore.all()) peopleDirectoryUrls.set(r.scopeId, r.url);
           for (const r of await ackEmojiStore.all()) ackEmoji.set(r.scopeId, r.names);
@@ -1017,7 +1032,7 @@ export function createMemoryConfigStore(
     setIndividualModelAuthMode(mode) {
       individualModelAuthModeCache = mode;
       persist(`individualModelAuth:${org}`, "individual model auth mode", () =>
-        individualModelAuthStore.put(org, { scopeId: org, on: mode === "required", mode }),
+        individualModelAuthStore.put(org, { scopeId: org, mode }),
       );
     },
     getIndividualModelAuthModeDurable: async () => individualModelAuthMode(await individualModelAuthStore.get(org)),

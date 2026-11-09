@@ -6,11 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
-import {
-  createMemoryConfigStore,
-  type PersistedModelAccount,
-  type PersistedScopedFlag,
-} from "../src/resolution/config-store.ts";
+import { createMemoryConfigStore, type PersistedModelAccount } from "../src/resolution/config-store.ts";
 import { createServer } from "../src/api/server.ts";
 import { mintPortalIdentity } from "../src/auth/portal-identity.ts";
 import { signRequest } from "../src/auth/source-auth.ts";
@@ -20,7 +16,7 @@ import { testConfig } from "./support/test-config.ts";
 const SECRET = "personal-account-test-signing-secret";
 
 test("personal account choice persists across instances without changing anyone else's choice", async () => {
-  const individualModelAuth = createMemoryMap<PersistedScopedFlag>();
+  const individualModelAuth = createMemoryMap<PersistedModelAccount>();
   const first = createMemoryConfigStore("default-org", { individualModelAuth });
   const second = createMemoryConfigStore("default-org", { individualModelAuth });
   assert.equal(await first.getIndividualModelAuthDurable("alice"), false);
@@ -33,6 +29,18 @@ test("personal account choice persists across instances without changing anyone 
   first.setIndividualModelAuthMode("required");
   await first.flushScope("org:default-org");
   assert.equal(await second.getIndividualModelAuthDurable("alice"), true);
+});
+
+test("an org saved with the old on/off switch is moved to the matching mode once", async () => {
+  const individualModelAuth = createMemoryMap<PersistedModelAccount>();
+  await individualModelAuth.put("org:default-org", { scopeId: "org:default-org", on: true });
+  const config = createMemoryConfigStore("default-org", { individualModelAuth });
+  await config.hydrate?.();
+  assert.equal(config.getIndividualModelAuthMode(), "required");
+  assert.deepEqual(await individualModelAuth.get("org:default-org"), {
+    scopeId: "org:default-org",
+    mode: "required",
+  });
 });
 
 test("account API binds choice to the signed-in person, preserves connections, and fails closed after disconnect", async () => {
@@ -80,7 +88,6 @@ test("account API binds choice to the signed-in person, preserves connections, a
     assert.deepEqual(await enabled.json(), {
       mode: "optional",
       individualModelAuth: true,
-      required: false,
       account: "personal",
       connections: [{ provider: "anthropic", kind: "apikey" }],
     });
@@ -181,15 +188,4 @@ test("org-only ignores every saved personal account choice, and switching back r
   config.setIndividualModelAuthMode("optional");
   await config.flushScope("org:default-org");
   assert.equal(await config.getModelAccountDurable("alice"), "openai");
-});
-
-test("an org switch saved before modes existed keeps its meaning", async () => {
-  const rows = createMemoryMap<PersistedModelAccount>();
-  await rows.put("org:default-org", { scopeId: "org:default-org", on: true });
-  const config = createMemoryConfigStore("default-org", { individualModelAuth: rows });
-  assert.equal(await config.getIndividualModelAuthModeDurable(), "required");
-  assert.equal(await config.getModelAccountDurable("bob"), "personal");
-  await rows.put("org:default-org", { scopeId: "org:default-org", on: false });
-  assert.equal(await config.getIndividualModelAuthModeDurable(), "optional");
-  assert.equal(await config.getModelAccountDurable("bob"), "company");
 });

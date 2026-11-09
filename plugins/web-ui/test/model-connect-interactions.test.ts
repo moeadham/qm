@@ -59,8 +59,8 @@ test("AI account modal interactions", async (t) => {
     connections: { provider: string; kind: string; needsReconnect?: boolean }[] = [],
   ) => ({
     account,
+    mode: "optional",
     individualModelAuth: account !== "company",
-    required: false,
     connections,
   });
   const pendingDevice = {

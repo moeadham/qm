@@ -490,7 +490,7 @@ function aiAccountsRow(): TemplateResult | typeof nothing {
                 type="button"
                 class="settings-choice-option ${aiStatus?.account === value ? "selected" : ""}"
                 aria-pressed=${aiStatus?.account === value}
-                ?disabled=${aiBusy || aiSaving || !aiStatus || (value === "company" && aiStatus.required)}
+                ?disabled=${aiBusy || aiSaving || !aiStatus || (value === "company" && aiStatus.mode === "required")}
                 @click=${() => void chooseAiAccount(value)}
               >
                 ${label}

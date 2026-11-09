@@ -28,7 +28,7 @@ async function getStatus(ctx: ApiCtx): Promise<void> {
   const connections = (await ctx.deps.userModelCredentials?.connections(principal)) ?? [];
   const individualModelAuth = (await ctx.deps.config?.getIndividualModelAuthDurable(principal)) ?? false;
   const account = (await ctx.deps.config?.getModelAccountDurable(principal)) ?? "company";
-  return sendJson(ctx.res, 200, { mode, individualModelAuth, required: mode === "required", account, connections });
+  return sendJson(ctx.res, 200, { mode, individualModelAuth, account, connections });
 }
 
 async function setAccount(ctx: ApiCtx): Promise<void> {
