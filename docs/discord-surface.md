@@ -21,7 +21,26 @@ Status: in progress on branch `claude/slack-qm-integration-o4y3ag`. This is the 
 | `DISCORD_CLIENT_SECRET` | OAuth client secret, used only for account linking |
 | `DISCORD_GUILD_IDS` | Comma-separated allowlist of servers the bot acts in |
 
-The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it from the configured portal URL and linking reports itself unconfigured without one. Enable the **Message Content** privileged intent; the gateway refuses to connect without it. Invite with scopes `bot applications.commands` and permissions `309237771328` (view channels, send messages, add reactions, embed links, attach files, read history, create public threads, send in threads, manage messages).
+The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it from the configured portal URL and linking reports itself unconfigured without one.
+
+### Discord Developer Portal setup
+
+On **Bot → Privileged Gateway Intents**, enable **Message Content Intent**. Leave **Presence Intent** and **Server Members Intent** disabled; QM does not request them.
+
+On **OAuth2 → URL Generator**, select the `bot` and `applications.commands` scopes, then grant these bot permissions:
+
+- View Channels
+- Send Messages
+- Create Public Threads
+- Send Messages in Threads
+- Read Message History
+- Attach Files
+- Add Reactions
+- Pin Messages
+
+The resulting minimum permissions integer is `2252109051432000`. **Embed Links** is optional; enabling it changes the integer to `2252109051448384`. Apply the same permissions to the QM bot role in every channel where QM should work, because channel overrides can remove role permissions.
+
+Do not grant Administrator, Manage Server, Manage Channels, Manage Roles, Manage Threads, Mention Everyone, or Manage Messages. QM deletes and edits only its own messages; Discord's dedicated Pin Messages permission is sufficient for its pin/unpin action.
 
 ## Done
 
