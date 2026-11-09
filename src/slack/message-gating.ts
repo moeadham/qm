@@ -126,7 +126,9 @@ export function createThreadTracker(opts: { negativeTtlMs?: number } = {}): Thre
       return cache.get(keyOf(channel, threadTs));
     },
     mark(channel, threadTs, present) {
-      cache.set(keyOf(channel, threadTs), present, present ? undefined : { ttl: negativeTtlMs });
+      const key = keyOf(channel, threadTs);
+      if (!present && cache.get(key) === true) return;
+      cache.set(key, present, present ? undefined : { ttl: negativeTtlMs });
     },
   };
 }

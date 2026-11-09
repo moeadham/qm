@@ -123,6 +123,13 @@ test("createThreadTracker caches participation and never time-expires a positive
   assert.equal(t.get("C", "3"), true);
 });
 
+test("createThreadTracker: a history scan that finishes late doesn't undo a stake gained meanwhile", () => {
+  const t = createThreadTracker();
+  t.mark("C", "1", true);
+  t.mark("C", "1", false);
+  assert.equal(t.get("C", "1"), true);
+});
+
 test("createThreadTracker expires a NEGATIVE entry after its TTL (the bot can gain a stake later, e.g. a cron delivery)", async () => {
   const t = createThreadTracker({ negativeTtlMs: 120 });
   t.mark("C", "1", false);

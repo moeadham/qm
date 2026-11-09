@@ -128,7 +128,7 @@ export function toSlackMrkdwn(md: string): string {
   text = text.replace(/`[^`\n]+`/g, keep);
   text = neutralizeMassMentions(text);
 
-  text = reformatTables(text, keep);
+  text = reformatTables(text, keep, stash);
 
   text = text.replace(/!?\[([^\]]*)\]\(\s*<?([^()\s>]+)>?(?:\s+"[^"]*")?\s*\)/g, (_m, label, url) =>
     keep(label ? `<${url}|${label}>` : `<${url}>`),
@@ -171,9 +171,9 @@ export function alignMarkdownTables(md: string): string {
   const stash: string[] = [];
   const keep = (s: string): string => `${STASH_OPEN}${stash.push(s) - 1}${STASH_OPEN}`;
   const stashed = stashFencedBlocks(md.replace(/\r\n/g, "\n"), keep);
-  const open = stashed.indexOf("```");
+  const open = stashed.search(/^[ \t]*(```|~~~)/m);
   const tablesEnd = open < 0 ? stashed.length : open;
-  return restoreStash(reformatTables(stashed.slice(0, tablesEnd), keep) + stashed.slice(tablesEnd), stash);
+  return restoreStash(reformatTables(stashed.slice(0, tablesEnd), keep, stash) + stashed.slice(tablesEnd), stash);
 }
 
 function trimUrlTail(url: string): string {
@@ -202,24 +202,9 @@ function trimUrlTail(url: string): string {
 
 const stripEdgePipes = (t: string): string => t.replace(/^\s*\|/, "").replace(/\|\s*$/, "");
 function splitTableRow(line: string): string[] {
-  const row = stripEdgePipes(line.trim());
-  const cells: string[] = [];
-  let cell = "";
-  let inCode = false;
-  for (let i = 0; i < row.length; i++) {
-    const ch = row[i]!;
-    if (ch === "\\" && row[i + 1] === "|") {
-      cell += "|";
-      i++;
-    } else if (ch === "|" && !inCode) {
-      cells.push(cell.trim());
-      cell = "";
-    } else {
-      if (ch === "`" && (inCode || row.indexOf("`", i + 1) >= 0)) inCode = !inCode;
-      cell += ch;
-    }
-  }
-  return [...cells, cell.trim()];
+  return stripEdgePipes(line.trim())
+    .split(/(?<!\\)\|/)
+    .map((c) => c.replaceAll("\\|", "|").trim());
 }
 const looksLikeTableRow = (line: string | undefined): boolean =>
   line != null && line.includes("|") && line.trim().length > 0;
@@ -243,15 +228,16 @@ function renderAlignedTable(rows: string[][]): string {
   return [fmtRow(head ?? []), sep, ...body.map(fmtRow)].join("\n");
 }
 
-function reformatTables(text: string, keep: (s: string) => string): string {
+function reformatTables(text: string, keep: (s: string) => string, stash: readonly string[]): string {
   if (!text.includes("|")) return text;
   const lines = text.split("\n");
   const out: string[] = [];
+  const cellsOf = (line: string): string[] => splitTableRow(restoreStash(line, stash));
   for (let i = 0; i < lines.length; i++) {
     if (looksLikeTableRow(lines[i]) && isTableDelimiter(lines[i + 1])) {
-      const rows: string[][] = [splitTableRow(lines[i]!)];
+      const rows: string[][] = [cellsOf(lines[i]!)];
       let j = i + 2;
-      for (; j < lines.length && looksLikeTableRow(lines[j]); j++) rows.push(splitTableRow(lines[j]!));
+      for (; j < lines.length && looksLikeTableRow(lines[j]); j++) rows.push(cellsOf(lines[j]!));
       out.push(keep("```\n" + renderAlignedTable(rows) + "\n```"));
       i = j - 1;
     } else {

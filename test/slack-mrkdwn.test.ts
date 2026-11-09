@@ -276,11 +276,25 @@ test("a label-less wire mention is disarmed to the person's name when the direct
   }
 });
 
-test("alignMarkdownTables keeps pipes inside code and escaped pipes in their cell", () => {
+test("alignMarkdownTables splits cells like GitHub does: escaped pipes stay, lone backticks are text", () => {
   assert.equal(
-    alignMarkdownTables("| cmd | desc |\n|---|---|\n| `x | y` | pipe |\n| a \\| b | escaped |"),
-    "```\ncmd     | desc\n--------+--------\n`x | y` | pipe\na | b   | escaped\n```",
+    alignMarkdownTables("| cmd | desc |\n|---|---|\n| `x \\| y` | pipe |\n| it`s | `z` |"),
+    "```\ncmd     | desc\n--------+-----\n`x | y` | pipe\nit`s    | `z`\n```",
   );
+});
+
+test("alignMarkdownTables only holds back tables after a code fence that opens a line", () => {
+  assert.equal(
+    alignMarkdownTables("Wrap in ``` fences\n| a | b |\n|---|---|\n| 1 | 2 |"),
+    "Wrap in ``` fences\n```\na | b\n--+--\n1 | 2\n```",
+  );
+  assert.equal(alignMarkdownTables("| a | b |\n|---|---|\n| x | ```y |"), "```\na | b\n--+-----\nx | ```y\n```");
+  const tilde = "~~~\n| a | b |\n|---|---|";
+  assert.equal(alignMarkdownTables(tilde), tilde);
+});
+
+test("toSlackMrkdwn: inline code in a table cell is shown, not a placeholder", () => {
+  assert.equal(toSlackMrkdwn("| `a` | b |\n|---|---|\n| `x` | 2 |"), "```\n`a` | b\n----+--\n`x` | 2\n```");
 });
 
 test("alignMarkdownTables leaves a table inside a code block that hasn't closed yet alone", () => {
