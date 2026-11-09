@@ -96,7 +96,7 @@ function stashFencedBlocks(text: string, keep: (s: string) => string): string {
     if (tilde === undefined && backtick < 0) break;
     if (backtick >= 0 && (tilde === undefined || backtick < tilde.start)) {
       const close = text.indexOf("```", backtick + 3);
-      if (close < 0) break;
+      if (close < 0) return out + text.slice(i, backtick) + keep(text.slice(backtick));
       out += text.slice(i, backtick) + keep(text.slice(backtick, close + 3));
       i = close + 3;
       continue;
@@ -198,10 +198,26 @@ function trimUrlTail(url: string): string {
 }
 
 const stripEdgePipes = (t: string): string => t.replace(/^\s*\|/, "").replace(/\|\s*$/, "");
-const splitTableRow = (line: string): string[] =>
-  stripEdgePipes(line.trim())
-    .split("|")
-    .map((c) => c.trim());
+function splitTableRow(line: string): string[] {
+  const row = stripEdgePipes(line.trim());
+  const cells: string[] = [];
+  let cell = "";
+  let inCode = false;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i]!;
+    if (ch === "\\" && row[i + 1] === "|") {
+      cell += "|";
+      i++;
+    } else if (ch === "|" && !inCode) {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      if (ch === "`") inCode = !inCode;
+      cell += ch;
+    }
+  }
+  return [...cells, cell.trim()];
+}
 const looksLikeTableRow = (line: string | undefined): boolean =>
   line != null && line.includes("|") && line.trim().length > 0;
 

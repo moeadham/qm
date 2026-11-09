@@ -1,3 +1,4 @@
+import { createThreadTracker } from "../slack/message-gating.ts";
 import { createEnvelopeStaging } from "../surfaces/envelope-staging.ts";
 import { createTurnFlow } from "../surfaces/turn-flow.ts";
 import { reportFailureAs, swallowAs } from "../util/errors.ts";
@@ -43,8 +44,9 @@ export async function startDiscordPlugin(
   const gateway = transport?.gateway ?? createDiscordGateway(cfg.botToken, rest!);
   const self = await api.me();
   const flow = createTurnFlow(core, "discord");
-  const bot = createDiscordBot({ api, core, flow, guildIds: cfg.guildIds, self });
-  const deliveries = createDiscordDeliveryPoller({ api, core, flow });
+  const threads = createThreadTracker();
+  const bot = createDiscordBot({ api, core, flow, guildIds: cfg.guildIds, self, threads });
+  const deliveries = createDiscordDeliveryPoller({ api, core, flow, threads });
   const buttons = createApprovalButtons({ api, core, resumeTurn: bot.resumeTurn });
   const fulfillContext = createDiscordContextFulfiller({ api, core, selfId: self.id });
   const contextInFlight = new Set<string>();

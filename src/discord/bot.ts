@@ -20,6 +20,7 @@ import {
 import type { DiscordCoreClient } from "./core.ts";
 import { receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
 import { emojiCharFor } from "../slack/emoji-map.ts";
+import type { ThreadTracker } from "../slack/message-gating.ts";
 import { alignMarkdownTables } from "../slack/mrkdwn.ts";
 import { extractReactions, stripReactionDirectives } from "../slack/reactions.ts";
 
@@ -47,7 +48,6 @@ const THREAD_NAME_LIMIT = 90;
 const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
 const STAKE_SCAN_MESSAGES = 100;
-const NO_STAKE_RECHECK_MS = 5 * 60_000;
 const CONVERSATION_MESSAGE_TYPES = new Set<number>([MessageType.Default, MessageType.Reply]);
 
 export interface TurnOutcome {
@@ -99,28 +99,30 @@ export function createDiscordBot(deps: {
   flow: TurnFlow;
   guildIds: ReadonlySet<string>;
   self: { id: string; username: string };
+  threads: ThreadTracker;
 }) {
-  const { api, core, flow, self } = deps;
+  const { api, core, flow, self, threads } = deps;
   const selfMention = `<@${self.id}>`;
   const channels = new Map<string, DiscordChannel>();
-  const threadStakes = new Map<string, { stake: boolean; at: number }>();
+  const stakeScans = new Map<string, Promise<boolean>>();
 
-  function noteStake(threadId: string, stake: boolean): void {
-    if (threadStakes.size >= CHANNEL_CACHE_LIMIT) threadStakes.clear();
-    threadStakes.set(threadId, { stake, at: Date.now() });
-  }
-
-  async function hasStakeIn(thread: DiscordChannel): Promise<boolean> {
-    if (thread.ownerId === self.id) return true;
-    const known = threadStakes.get(thread.id);
-    if (known && (known.stake || Date.now() - known.at < NO_STAKE_RECHECK_MS)) return known.stake;
-    const history = await api
+  function hasStakeIn(thread: DiscordChannel): Promise<boolean> {
+    if (thread.ownerId === self.id) return Promise.resolve(true);
+    const known = threads.get(thread.id, "");
+    if (known !== undefined) return Promise.resolve(known);
+    const inFlight = stakeScans.get(thread.id);
+    if (inFlight) return inFlight;
+    const scan = api
       .recentMessages(thread.id, STAKE_SCAN_MESSAGES)
-      .catch(swallowAs("discord: thread stake", undefined));
-    if (!history) return false;
-    const stake = history.some((m) => m.author.id === self.id || mentionsSelf(m));
-    noteStake(thread.id, stake);
-    return stake;
+      .then((history) => history.some((m) => m.author.id === self.id || mentionsSelf(m)))
+      .catch(swallowAs("discord: thread stake", false))
+      .then((stake) => {
+        threads.mark(thread.id, "", stake);
+        return stake;
+      })
+      .finally(() => stakeScans.delete(thread.id));
+    stakeScans.set(thread.id, scan);
+    return scan;
   }
 
   async function channelOf(channelId: string): Promise<DiscordChannel> {
@@ -146,7 +148,7 @@ export function createDiscordBot(deps: {
     const channel = await channelOf(m.channel_id);
     const isThread = THREAD_CHANNEL_TYPES.has(channel.type);
     if (addressed) {
-      if (isThread) noteStake(channel.id, true);
+      if (isThread) threads.mark(channel.id, "", true);
       return { channel, addressed };
     }
     if (isThread && (await hasStakeIn(channel))) return { channel, addressed };
@@ -313,7 +315,7 @@ export function createDiscordBot(deps: {
     if (!relevant) return;
     const gate = await stage?.();
     if (!(await core.linkedPrincipal(m.author.id))) {
-      await promptLink(m.author.id);
+      if (relevant.addressed) await promptLink(m.author.id);
       return gate?.persisted();
     }
     const text = messageText(m).replaceAll(selfMention, `@${self.username}`).trim();

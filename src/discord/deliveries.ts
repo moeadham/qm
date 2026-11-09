@@ -18,6 +18,7 @@ import { discordDmThreadRef } from "./bot.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import { sendDiscordFiles } from "./files.ts";
 import { emojiCharFor } from "../slack/emoji-map.ts";
+import type { ThreadTracker } from "../slack/message-gating.ts";
 import { stripReactionDirectives } from "../slack/reactions.ts";
 
 const CLAIM_MS = 15_000;
@@ -30,9 +31,10 @@ export function createDiscordDeliveryPoller(deps: {
   api: DiscordApi;
   core: DiscordCoreClient;
   flow: Pick<TurnFlow, "inFlightRuns">;
+  threads: ThreadTracker;
   claimMs?: number;
 }): { poll(): Promise<boolean> } {
-  const { api, core, flow } = deps;
+  const { api, core, flow, threads } = deps;
   const claimMs = deps.claimMs ?? CLAIM_MS;
   const reported = new Set<string>();
 
@@ -139,6 +141,7 @@ export function createDiscordDeliveryPoller(deps: {
         return;
       }
       await postTextAndFiles(channelId, d, replyTo);
+      threads.mark(channelId, "", true);
     });
   }
 

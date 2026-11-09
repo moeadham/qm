@@ -148,8 +148,10 @@ class FakeDiscord implements DiscordApi {
     return c;
   }
   historyReads: Array<[string, string | undefined]> = [];
+  historyErrors = new Set<string>();
   async recentMessages(channelId: string, _limit?: number, before?: string) {
     this.historyReads.push([channelId, before]);
+    if (this.historyErrors.has(channelId)) throw Object.assign(new Error("Missing Access"), { code: 50001 });
     return this.history.get(channelId) ?? [];
   }
   reactions: Array<[string, string, string]> = [];
@@ -539,6 +541,66 @@ test("in a thread a person started, follow-ups are heard without a mention once 
   assert.equal(api.historyReads.filter(([c]) => c === strangers).length, 1, "a thread without QM is checked once");
 });
 
+test("a thread QM can't read, or one hit by a burst of messages, is checked once", async () => {
+  const h = harness({ result: () => ({ status: "silent" }) });
+  const api = new FakeDiscord();
+  const locked = "800000000000000131";
+  const busy = "800000000000000132";
+  for (const id of [locked, busy])
+    api.channels.set(id, { id, type: 11, parentId: CHANNEL, ownerId: ALICE, guildId: GUILD });
+  api.historyErrors.add(locked);
+  const { handlers, plugin } = await boot(h, api);
+  for (const [i, thread] of [locked, locked, busy, busy, busy].entries())
+    handlers.onMessage({ ...dm(ALICE, "hey", `80000000000000014${i}`), channel_id: thread, guild_id: GUILD });
+  await new Promise((r) => setTimeout(r, 50));
+  await plugin.stop();
+  assert.deepEqual(
+    api.historyReads.map(([c]) => c),
+    [locked, busy],
+  );
+  assert.equal(h.turns.length, 0);
+});
+
+test("once QM posts into a thread someone else started, replies there are heard", async () => {
+  const h = harness({ result: () => ({ status: "silent" }) });
+  const api = new FakeDiscord();
+  const thread = "800000000000000151";
+  api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: ALICE, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({ ...dm(ALICE, "before", "800000000000000152"), channel_id: thread, guild_id: GUILD });
+  await new Promise((r) => setTimeout(r, 20));
+  h.queue.push({
+    id: "d-post",
+    destination: { type: "discord", target: thread },
+    text: "Daily summary",
+    idempotencyKey: "post:d-post",
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  await until(() => h.deliveriesAcked.length === 1, "delivery");
+  handlers.onMessage({
+    ...dm(ALICE, "thanks, and the rest?", "800000000000000153"),
+    channel_id: thread,
+    guild_id: GUILD,
+  });
+  await until(() => h.turns.length === 1, "follow-up heard");
+  await plugin.stop();
+  assert.deepEqual(h.turns[0]!.origin, { kind: "ambient", live: true, entryTs: "800000000000000153" });
+});
+
+test("an unlinked bystander in a thread QM follows gets no link prompt", async () => {
+  const h = harness({});
+  const api = new FakeDiscord();
+  const thread = "800000000000000161";
+  api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({ ...dm(MALLORY, "lol", "800000000000000162"), channel_id: thread, guild_id: GUILD });
+  await new Promise((r) => setTimeout(r, 50));
+  await plugin.stop();
+  assert.deepEqual(api.sent, []);
+  assert.equal(h.turns.length, 0);
+});
+
 test("a mention in the main channel gives QM the recent channel conversation", async () => {
   const h = harness({});
   const api = new FakeDiscord();
@@ -572,6 +634,43 @@ test("a forwarded message reaches QM with its text", async () => {
   await until(() => h.turns.length === 1, "turn");
   await plugin.stop();
   assert.equal(h.turns[0]!.text, "(forwarded message) the build is green");
+});
+
+test("files in a forwarded message reach QM", async () => {
+  const h = harness({});
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("PNGDATA", { headers: { "content-type": "image/png" } })) as unknown as typeof fetch;
+  try {
+    const { handlers, plugin } = await boot(h);
+    handlers.onMessage({
+      ...dm(ALICE, ""),
+      message_snapshots: [
+        {
+          message: {
+            content: "",
+            attachments: [
+              {
+                id: "a1",
+                filename: "chart.png",
+                size: 7,
+                url: "https://cdn.discordapp.com/attachments/1/2/chart.png",
+                content_type: "image/png",
+              },
+            ],
+          },
+        },
+      ],
+    });
+    await until(() => h.turns.length === 1, "turn");
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual(
+    h.turns[0]!.attachments?.map((a) => a.name),
+    ["chart.png"],
+  );
 });
 
 test("markdown tables are sent as aligned code blocks", async () => {

@@ -11,6 +11,7 @@ import {
   setMentionIndex,
   inlineCode,
 } from "../src/slack/lib.ts";
+import { alignMarkdownTables } from "../src/slack/mrkdwn.ts";
 
 test("inlineCode clamps long text and neutralizes backticks", () => {
   const clamped = inlineCode("`echo hi`" + "y".repeat(60000));
@@ -273,4 +274,17 @@ test("a label-less wire mention is disarmed to the person's name when the direct
   } finally {
     setMentionIndex(new Map());
   }
+});
+
+test("alignMarkdownTables keeps pipes inside code and escaped pipes in their cell", () => {
+  assert.equal(
+    alignMarkdownTables("| cmd | desc |\n|---|---|\n| `x | y` | pipe |\n| a \\| b | escaped |"),
+    "```\ncmd     | desc\n--------+--------\n`x | y` | pipe\na | b   | escaped\n```",
+  );
+});
+
+test("alignMarkdownTables leaves a table inside a code block that hasn't closed yet alone", () => {
+  const partial = "Here:\n```\na | b\n--|--\n1 | 2";
+  assert.equal(alignMarkdownTables(partial), partial);
+  assert.equal(toSlackMrkdwn(partial), partial);
 });
