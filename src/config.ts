@@ -100,7 +100,7 @@ export interface Config {
   claudeBinPath?: string;
   claudeProcessEnv: NodeJS.ProcessEnv;
   detectModelId?: string;
-  transcribeModel?: { providerId: string; modelId: string };
+  transcribeModel?: ReturnType<typeof parseTranscribeModel>;
   titleModelId?: string;
   judgeModelId?: string;
   anthropicApiKey?: string;

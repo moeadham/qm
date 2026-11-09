@@ -5,7 +5,7 @@ import { renderConversationView, type RecentMessage } from "../surfaces/conversa
 import { safeClip } from "../surfaces/safe-cut.ts";
 import { hasRunDelivery, turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
 import type { ActorAssertion, TurnResult } from "../types.ts";
-import { errMessage, swallowAs } from "../util/errors.ts";
+import { errMessage, reportFailure, swallowAs } from "../util/errors.ts";
 import {
   DISCORD_MESSAGE_LIMIT,
   discordDisplayName,
@@ -26,6 +26,12 @@ import { alignMarkdownTables } from "../slack/mrkdwn.ts";
 import { extractReactions, stripReactionDirectives } from "../slack/reactions.ts";
 
 const MAX_REACTIONS = 5;
+
+interface VoiceNote {
+  transcript?: string;
+  note?: string;
+  downloaded?: { url: string; bytes: Uint8Array };
+}
 
 export const DISCORD_REACTION_INSTRUCTION =
   "When the user explicitly asks you to add an emoji reaction, actually react by writing the directive " +
@@ -293,39 +299,43 @@ export function createDiscordBot(deps: {
     return () => clearInterval(timer);
   }
 
-  async function inboundFiles(m: DiscordMessage): Promise<Pick<CoreTurnBody, "attachments" | "inboundNotes">> {
+  async function inboundFiles(
+    m: DiscordMessage,
+    voice: VoiceNote,
+  ): Promise<Pick<CoreTurnBody, "attachments" | "inboundNotes">> {
     const files = messageAttachments(m);
-    if (!files.length) return {};
-    const { attachments, issues } = await receiveDiscordFiles(
-      files,
-      (bytes) => core.stageBlob(bytes),
-      discordDisplayName(m.author),
-    );
+    const downloaded = voice.downloaded;
+    const reuse: typeof fetch = (url, init) =>
+      downloaded && String(url) === downloaded.url
+        ? Promise.resolve(new Response(new Uint8Array(downloaded.bytes)))
+        : fetch(url, init);
+    const { attachments, issues } = files.length
+      ? await receiveDiscordFiles(files, (bytes) => core.stageBlob(bytes), discordDisplayName(m.author), reuse)
+      : { attachments: [], issues: [] };
+    const notes = [...issues, ...(voice.note ? [voice.note] : [])];
     return {
       ...(attachments.length ? { attachments } : {}),
-      ...(issues.length ? { inboundNotes: issues } : {}),
+      ...(notes.length ? { inboundNotes: notes } : {}),
     };
   }
 
-  function withNote(
-    files: Pick<CoreTurnBody, "attachments" | "inboundNotes">,
-    note: string | undefined,
-  ): Pick<CoreTurnBody, "attachments" | "inboundNotes"> {
-    return note ? { ...files, inboundNotes: [...(files.inboundNotes ?? []), note] } : files;
-  }
-
-  async function voiceNote(m: DiscordMessage): Promise<{ transcript?: string; note?: string }> {
+  async function voiceNote(m: DiscordMessage): Promise<VoiceNote> {
     const transcribe = core.transcribe;
     const audio = m.attachments?.find((a) => a.content_type?.startsWith("audio/"));
     const mimetype = audio?.content_type;
     if (!transcribe || !audio || !mimetype || !((m.flags ?? 0) & MessageFlags.IsVoiceMessage)) return {};
+    let downloaded: VoiceNote["downloaded"];
     try {
       const bytes = await downloadDiscordFile({ id: audio.id, name: audio.filename, url_private: audio.url });
+      downloaded = { url: audio.url, bytes };
       const spoken = await transcribe(bytes, audio.filename, mimetype);
-      return spoken ? { transcript: `(voice note) ${spoken}` } : {};
+      return { downloaded, ...(spoken ? { transcript: `(voice note) ${spoken}` } : {}) };
     } catch (error) {
-      console.error(`[discord] voice note ${m.id} could not be transcribed: ${errMessage(error)}`);
-      return { note: `${discordDisplayName(m.author)} sent a voice note that couldn't be transcribed.` };
+      reportFailure("discord: voice note transcription", error, m.id);
+      return {
+        ...(downloaded ? { downloaded } : {}),
+        note: `${discordDisplayName(m.author)} sent a voice note that couldn't be transcribed.`,
+      };
     }
   }
 
@@ -380,7 +390,7 @@ export function createDiscordBot(deps: {
         ...(place.kind === "dm" ? { instructions: DISCORD_REACTION_INSTRUCTION } : {}),
       },
       redeliveryKey: messageKey,
-      ...withNote(await inboundFiles(m), spoken.note),
+      ...(await inboundFiles(m, spoken)),
       ...(place.kind === "channel" ? await threadContext(place, m) : {}),
     };
     await converse(place.channelId, body, {

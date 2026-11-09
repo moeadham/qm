@@ -1,11 +1,6 @@
 import type { CustomProviderStore } from "./custom-provider-store.ts";
 import { httpFailure } from "../util/errors.ts";
 
-export interface TranscriptionEndpoint {
-  baseUrl: string;
-  apiKey: string;
-}
-
 export type Transcribe = (audio: Uint8Array, filename: string, mimetype: string) => Promise<string>;
 
 export function parseTranscribeModel(value: string): { providerId: string; modelId: string } {
@@ -17,19 +12,21 @@ export function parseTranscribeModel(value: string): { providerId: string; model
 }
 
 export function createTranscriber(
-  modelId: string,
-  endpoint: () => Promise<TranscriptionEndpoint | null>,
+  providers: Pick<CustomProviderStore, "enabled" | "resolveKey">,
+  target: ReturnType<typeof parseTranscribeModel>,
   fetchImpl: typeof fetch = fetch,
 ): Transcribe {
   return async (audio, filename, mimetype) => {
-    const target = await endpoint();
-    if (!target) throw new Error("the transcription provider is not configured or has no key");
+    const spec = (await providers.enabled()).find((p) => p.id === target.providerId);
+    const apiKey = spec && spec.protocol !== "anthropic" ? await providers.resolveKey(spec.id) : null;
+    if (!spec || !apiKey)
+      throw new Error(`transcription provider ${target.providerId} is not configured or has no key`);
     const form = new FormData();
-    form.set("model", modelId);
+    form.set("model", target.modelId);
     form.set("file", new Blob([audio], { type: mimetype }), filename);
-    const res = await fetchImpl(`${target.baseUrl.replace(/\/+$/, "")}/audio/transcriptions`, {
+    const res = await fetchImpl(`${spec.baseUrl.replace(/\/+$/, "")}/audio/transcriptions`, {
       method: "POST",
-      headers: { authorization: `Bearer ${target.apiKey}` },
+      headers: { authorization: `Bearer ${apiKey}` },
       body: form,
       signal: AbortSignal.timeout(60_000),
     });
@@ -37,17 +34,5 @@ export function createTranscriber(
     const data = (await res.json()) as { text?: unknown };
     if (typeof data.text !== "string") throw new Error("transcription response had no text");
     return data.text.trim();
-  };
-}
-
-export function customProviderEndpoint(
-  providers: Pick<CustomProviderStore, "enabled" | "resolveKey">,
-  providerId: string,
-): () => Promise<TranscriptionEndpoint | null> {
-  return async () => {
-    const spec = (await providers.enabled()).find((p) => p.id === providerId);
-    if (!spec || spec.protocol === "anthropic") return null;
-    const apiKey = await providers.resolveKey(spec.id);
-    return apiKey ? { baseUrl: spec.baseUrl, apiKey } : null;
   };
 }

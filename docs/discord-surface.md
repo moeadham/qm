@@ -14,12 +14,12 @@ Status: in progress on branch `claude/slack-qm-integration-o4y3ag`. This is the 
 
 ## Configuration
 
-| Variable | Purpose |
-|---|---|
-| `DISCORD_BOT_TOKEN` | Bot token (Bot tab) |
-| `DISCORD_APPLICATION_ID` | Application / OAuth client id |
-| `DISCORD_CLIENT_SECRET` | OAuth client secret, used only for account linking |
-| `DISCORD_GUILD_IDS` | Comma-separated allowlist of servers the bot acts in |
+| Variable                 | Purpose                                              |
+| ------------------------ | ---------------------------------------------------- |
+| `DISCORD_BOT_TOKEN`      | Bot token (Bot tab)                                  |
+| `DISCORD_APPLICATION_ID` | Application / OAuth client id                        |
+| `DISCORD_CLIENT_SECRET`  | OAuth client secret, used only for account linking   |
+| `DISCORD_GUILD_IDS`      | Comma-separated allowlist of servers the bot acts in |
 
 The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it from the configured portal URL and linking reports itself unconfigured without one. Enable the **Message Content** privileged intent; the gateway refuses to connect without it. Invite with scopes `bot applications.commands` and permissions `309237771328` (view channels, send messages, add reactions, embed links, attach files, read history, create public threads, send in threads, manage messages).
 
@@ -39,16 +39,19 @@ The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it fr
 ## Remaining
 
 ### PR 3 follow-ups
+
 - Independent review accepted at `a899994` (88/100) after four rounds of fixes.
 - Live QA once the bot is in the test server with Message Content enabled, then the staging end-to-end pass.
 
 ### PR 4: interactions, files, reactions
+
 - Status-message stop button; reaction and member intents when their features land.
 - Inbound attachments only from Discord's CDN hosts into `stageBlob`; outbound uploads within the server limit, otherwise a QM file link.
 - `[[react: …]]` directives and inbound reactions on messages the bot has a stake in.
 - Private replies: ephemeral for interactions, DM otherwise.
 
 ### PR 5: directory, hand-offs, admin, docs
+
 - Channel audience: the requester plus linked members who can view the channel (needs the GuildMembers intent).
 - Channel directory push with `discord:` ids; people come from QM links, not a Discord roster.
 - `reach` and principal deliveries target the configured platform.
@@ -58,9 +61,9 @@ The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it fr
 
 ## Voice notes
 
-Discord voice messages arrive as an audio attachment flagged as a voice message. When `TRANSCRIBE_MODEL` is set to `<custom provider id>:<model id>` (for example `allmodels:openai/gpt-transcribe`), the core sends the audio to that custom provider's OpenAI-style `/audio/transcriptions` endpoint with the provider's stored key, and QM receives `(voice note) <transcript>` as the message text, with the audio still attached. If transcription fails, the turn still runs with the audio attached and a note that it couldn't be transcribed. Unset, voice notes arrive as plain audio files.
+`TRANSCRIBE_MODEL=<custom provider id>:<model id>` (for example `allmodels:openai/gpt-transcribe`) turns on transcription: a Discord voice message's audio goes to that OpenAI-protocol custom provider's `/audio/transcriptions` endpoint with its stored key, and QM gets `(voice note) <transcript>` with the audio still attached. It is the only setting; there is no schema change. A malformed value fails at startup; a missing, Anthropic-protocol or keyless provider fails per message, leaving the audio attached with a note that it couldn't be transcribed.
 
-A voice message carries no text, so it can't mention QM and the relevance check runs before transcription. Voice notes are handled in DMs, in replies that ping QM, and in threads QM already follows. In a followed thread every linked participant's voice note is transcribed (and its audio sent to the provider) so the reply check can judge it, even when it turns out not to be meant for QM. Unlinked people's voice notes and voice notes QM ignores are never transcribed. An envelope replay of an unaccepted message transcribes again.
+A voice message has no text, so it can't mention QM: voice notes are handled in DMs, in replies that ping QM, and in threads QM follows, where every linked participant's voice note is transcribed and its audio sent to the provider. Unlinked senders and messages QM ignores are never transcribed.
 
 ## Verification
 

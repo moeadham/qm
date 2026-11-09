@@ -731,8 +731,11 @@ test("a voice note reaches QM as its transcript, with the audio still attached",
     },
   });
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } })) as unknown as typeof fetch;
+  let downloads = 0;
+  globalThis.fetch = (async () => {
+    downloads++;
+    return new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } });
+  }) as unknown as typeof fetch;
   try {
     const { handlers, plugin } = await boot(h);
     handlers.onMessage({
@@ -754,6 +757,8 @@ test("a voice note reaches QM as its transcript, with the audio still attached",
     globalThis.fetch = realFetch;
   }
   assert.deepEqual(heard, [["OGGDATA", "voice-message.ogg", "audio/ogg"]]);
+  assert.equal(downloads, 1, "the voice note is downloaded once for both transcription and the attachment");
+  assert.equal(h.blobs.get(h.turns[0]!.attachments![0]!.blobId)?.toString(), "OGGDATA");
   assert.equal(h.turns[0]!.text, "(voice note) can you check the deploy");
   assert.deepEqual(
     h.turns[0]!.attachments?.map((a) => a.name),
