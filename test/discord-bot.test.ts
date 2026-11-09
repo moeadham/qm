@@ -63,7 +63,14 @@ function sharedLease(): LeaderLease {
 }
 
 class FakeDiscord implements DiscordApi {
-  sent: Array<{ channelId: string; content: string; id: string; nonce?: string; buttons?: DiscordButton[] }> = [];
+  sent: Array<{
+    channelId: string;
+    content: string;
+    id: string;
+    nonce?: string;
+    buttons?: DiscordButton[];
+    replyTo?: string;
+  }> = [];
   edits: Array<{ channelId: string; messageId: string; content: string; buttons?: DiscordButton[] }> = [];
   deferredUpdates: string[] = [];
   threads: Array<{ channelId: string; messageId: string; name: string }> = [];
@@ -86,13 +93,18 @@ class FakeDiscord implements DiscordApi {
     });
     return `msg-${this.next++}`;
   }
-  async send(channelId: string, content: string, opts: { nonce?: string; buttons?: DiscordButton[] } = {}) {
+  async send(
+    channelId: string,
+    content: string,
+    opts: { nonce?: string; buttons?: DiscordButton[]; replyTo?: string } = {},
+  ) {
     const id = `msg-${this.next++}`;
     this.sent.push({
       channelId,
       content,
       id,
       ...(opts.nonce ? { nonce: opts.nonce } : {}),
+      ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
       ...(opts.buttons ? { buttons: opts.buttons } : {}),
     });
     return id;
@@ -401,7 +413,7 @@ test("in servers the bot answers mentions in a new thread and ignores unmentione
   assert.equal(turn.conversation.channelRef, CHANNEL);
   assert.equal(turn.deliveryTarget, "800000000000000003");
   assert.equal(turn.text, "@qm summarize this");
-  assert.deepEqual(turn.origin, { kind: "human" });
+  assert.deepEqual(turn.origin, { kind: "human", messageTs: "800000000000000003" });
 });
 
 test("a reply in a thread the bot owns is heard without a mention as an ambient turn", async () => {
@@ -434,11 +446,11 @@ test("a reply in a thread the bot owns is heard without a mention as an ambient 
   await plugin.stop();
 
   const turn = h.turns[0]!;
-  assert.deepEqual(turn.origin, { kind: "ambient", live: true });
+  assert.deepEqual(turn.origin, { kind: "ambient", live: true, entryTs: "800000000000000010" });
   assert.equal(turn.conversation.threadRef, `discord:ch:${CHANNEL}:${thread}`);
   assert.equal(turn.priorTurns?.length, 1);
   assert.equal(turn.priorTurns?.[0]?.role, "assistant");
-  assert.match(turn.priorTurns?.[0]?.text ?? "", /^\[~\w+\] earlier answer$/);
+  assert.match(turn.priorTurns?.[0]?.text ?? "", /^\[800000000000000008\] earlier answer$/, "real Discord message ids");
   assert.equal(api.threads.length, 0);
   assert.equal(api.sent.length, 0);
   assert.deepEqual(h.acked, []);
@@ -595,6 +607,37 @@ test("a file the agent posts to a thread is uploaded there", async () => {
 
   assert.deepEqual(api.files, [{ channelId: "thread-2", names: ["report.pdf"], bytes: ["REPORT"] }]);
   assert.equal(api.sent.length, 0);
+});
+
+test("the agent's reply-under, edit and delete reach the Discord messages it named", async () => {
+  const h = harness({});
+  const row = (id: string, destination: Delivery["destination"], text: string): Delivery => ({
+    id,
+    destination,
+    text,
+    idempotencyKey: `post:${id}`,
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  h.queue.push(
+    row("reply", { type: "discord", target: "thread-3:800000000000000031" }, "answering that one"),
+    row("edit", { type: "discord", target: "thread-3", editRef: "800000000000000032" }, "fixed wording"),
+    row("delete", { type: "discord", target: "thread-3", delete: { messageTs: "800000000000000033" } }, ""),
+  );
+  const api = new FakeDiscord();
+  const { plugin } = await boot(h, api);
+  await until(() => h.deliveriesAcked.length === 3, "deliveries acked");
+  await plugin.stop();
+
+  assert.deepEqual(
+    api.sent.map((m) => [m.channelId, m.content, m.replyTo]),
+    [["thread-3", "answering that one", "800000000000000031"]],
+  );
+  assert.deepEqual(
+    api.edits.map((e) => [e.channelId, e.messageId, e.content]),
+    [["thread-3", "800000000000000032", "fixed wording"]],
+  );
+  assert.deepEqual(api.removed, ["800000000000000033"]);
 });
 
 test("a file sent to a person by DM is uploaded to their DM", async () => {

@@ -7,11 +7,11 @@ import {
   recordMessageRevisions,
   renderMessageRevision,
   revisionAnchorAt,
-  slackTsToMs,
   type MessageRevisionPayload,
 } from "../src/core/message-revisions.ts";
 import { parseSlackThreadRef, slackThreadRefCandidates } from "../src/slack/message-gating.ts";
 import { sleep } from "../src/util/async.ts";
+import { messageTimeMs } from "../src/util/message-tag.ts";
 import { createMemorySurfaceCache } from "../src/surface-cache/surface-cache.ts";
 import { reconstructMessagesFromHistory } from "../src/harness/replay.ts";
 import type { SessionStore } from "../src/sessions/session-store.ts";
@@ -374,8 +374,8 @@ test("an edit made before the message's own turn is still caught through the tri
     1,
     "the turn's own message widens the window back to its send time",
   );
-  assert.equal(slackTsToMs("1700000000.123456"), 1700000000123);
-  assert.equal(slackTsToMs("t1"), undefined);
+  assert.equal(messageTimeMs("1700000000.123456"), 1700000000123);
+  assert.equal(messageTimeMs("t1"), undefined);
   await sessions.releaseLease(lease!);
 });
 
@@ -400,4 +400,15 @@ test("imported agent posts receive attributed edits and deletions without creati
     reconstructMessagesFromHistory(entries).some((m) => m.role === "assistant"),
     false,
   );
+});
+
+test("a Discord message id reads as the time Discord created it, and renders as a message ref", async () => {
+  const { isoFromTs } = await import("../src/util/message-tag.ts");
+  const { messageRef, formatSlackTs } = await import("../src/surfaces/conversation.ts");
+  const id = "1568200583100243969";
+  assert.equal(isoFromTs(id), new Date(Number((BigInt(id) >> 22n) + 1420070400000n)).toISOString());
+  assert.match(isoFromTs(id), /^2026-/);
+  assert.notEqual(formatSlackTs(id), "");
+  assert.equal(messageRef(id), id);
+  assert.match(messageRef("1700000000.000100"), /^~/);
 });

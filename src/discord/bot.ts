@@ -63,11 +63,6 @@ export function threadRefForChannel(channel: DiscordChannel): string | undefined
   return undefined;
 }
 
-function epochTs(iso: string): string {
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) ? (ms / 1000).toFixed(6) : "";
-}
-
 function displayName(author: DiscordMessage["author"]): string {
   return author.global_name || author.username;
 }
@@ -164,14 +159,13 @@ export function createDiscordBot(deps: {
     const messages: RecentMessage[] = raw
       .filter((m) => m.id !== trigger.id && CONVERSATION_MESSAGE_TYPES.has(m.type) && m.content.trim())
       .map((m) => ({
-        ts: epochTs(m.timestamp),
+        ts: m.id,
         name: displayName(m.author),
         authorId: m.author.id,
         text: m.content,
         ...(m.author.bot ? { isBot: true } : {}),
         ...(m.author.id === self.id ? { isSelf: true } : {}),
-      }))
-      .filter((m) => m.ts);
+      }));
     const rendered = renderConversationView({
       channel: { kind: "channel", ...(place.channelName ? { name: place.channelName } : {}) },
       members: [],
@@ -287,7 +281,7 @@ export function createDiscordBot(deps: {
       },
       deliveryTarget: place.channelId,
       text,
-      origin: relevant.addressed ? { kind: "human" } : { kind: "ambient", live: true },
+      origin: relevant.addressed ? { kind: "human", messageTs: m.id } : { kind: "ambient", live: true, entryTs: m.id },
       gatewayContext: {
         location: place.kind === "dm" ? "a Discord direct message with the user" : "a Discord thread",
         details: { channel: place.channelId },

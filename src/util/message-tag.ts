@@ -6,10 +6,26 @@ export function xmlAttrEscape(s: string): string {
   return xmlEscape(s).replace(/"/g, "&quot;");
 }
 
+const DISCORD_EPOCH_MS = 1_420_070_400_000n;
+const DISCORD_ID = /^\d{15,20}$/;
+
+export function isDiscordMessageId(ts: string): boolean {
+  return DISCORD_ID.test(ts);
+}
+
+export function messageTimeMs(ts: string | undefined): number | undefined {
+  if (!ts) return undefined;
+  if (isDiscordMessageId(ts)) {
+    const ms = Number((BigInt(ts) >> 22n) + DISCORD_EPOCH_MS);
+    return ms > 0 ? ms : undefined;
+  }
+  const seconds = Number.parseFloat(ts);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds * 1000) : undefined;
+}
+
 export function isoFromTs(ts: string | undefined): string {
-  if (!ts) return "";
-  const n = Number.parseFloat(ts);
-  return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString() : "";
+  const ms = messageTimeMs(ts);
+  return ms === undefined ? "" : new Date(ms).toISOString();
 }
 
 export interface MessageTagAttrs {

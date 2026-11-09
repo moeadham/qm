@@ -2,7 +2,7 @@ import type { ScopeId, SessionEntry } from "../types.ts";
 import type { Lease, SessionStore } from "../sessions/session-store.ts";
 import { parseSlackThreadRef, slackThreadRefCandidates } from "../slack/message-gating.ts";
 import type { IngestEvent, SurfaceCache } from "../surface-cache/types.ts";
-import { isoFromTs, xmlAttrEscape, xmlEscape } from "../util/message-tag.ts";
+import { isoFromTs, messageTimeMs, xmlAttrEscape, xmlEscape } from "../util/message-tag.ts";
 import { sleep } from "../util/async.ts";
 
 export interface MessageRevisionPayload {
@@ -181,11 +181,6 @@ export async function revisionAnchorAt(
   return undefined;
 }
 
-export function slackTsToMs(ts: string | undefined): number | undefined {
-  const seconds = Number(ts);
-  return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds * 1000) : undefined;
-}
-
 export async function reconcileMessageRevisions(opts: {
   sessions: Pick<SessionStore, "append" | "getEntries">;
   surfaceCache: Pick<SurfaceCache, "revisedSince">;
@@ -197,7 +192,7 @@ export async function reconcileMessageRevisions(opts: {
 }): Promise<number> {
   const ref = parseSlackThreadRef(opts.session.threadRef);
   if (!ref) return 0;
-  const since = Math.max(1, Math.min(opts.anchorAt ?? opts.fallbackSince, slackTsToMs(opts.triggerTs) ?? Infinity));
+  const since = Math.max(1, Math.min(opts.anchorAt ?? opts.fallbackSince, messageTimeMs(opts.triggerTs) ?? Infinity));
   const revised = await opts.surfaceCache.revisedSince(ref.container, since, ref.root ? { thread: ref.root } : {});
   if (!revised.length) return 0;
   const entries = await opts.sessions.getEntries(opts.session.id);
