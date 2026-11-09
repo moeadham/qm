@@ -16,6 +16,25 @@ import {
 } from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import { receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
+import { emojiCharFor } from "../slack/emoji-map.ts";
+import { extractReactions, stripReactionDirectives } from "../slack/reactions.ts";
+
+const MAX_REACTIONS = 5;
+
+export const DISCORD_REACTION_INSTRUCTION =
+  "When the user explicitly asks you to add an emoji reaction, actually react by writing the directive " +
+  "`[[react: name1 name2]]` in your reply, using emoji short-names with NO colons (e.g. `[[react: eyes white_check_mark]]`, " +
+  "`[[react: +1]]`, `[[react: tada]]`). Typing an emoji into your prose does nothing; only the directive adds a real " +
+  "Discord reaction. The directive is stripped from what the user sees and the reactions (up to 5) go on the message " +
+  "you're answering, so a reply can be just the directive. To react to a different message, use your surface tool's " +
+  "react action with that message's id.";
+
+function triggerMessageId(body: CoreTurnBody): string | undefined {
+  const origin = body.origin;
+  if (origin?.kind === "human") return origin.messageTs;
+  if (origin?.kind === "ambient") return origin.entryTs;
+  return undefined;
+}
 
 const THREAD_CHANNEL_TYPES = new Set([10, 11, 12]);
 const TYPING_REFRESH_MS = 8_000;
@@ -214,6 +233,13 @@ export function createDiscordBot(deps: {
     };
   }
 
+  async function reactTo(channelId: string, messageId: string, names: readonly string[]): Promise<void> {
+    for (const name of names.slice(0, MAX_REACTIONS)) {
+      const emoji = emojiCharFor(name);
+      if (emoji) await api.react(channelId, messageId, emoji).catch(swallowAs("discord: react", undefined));
+    }
+  }
+
   function replyText(result: TurnResult, addressed: boolean, dm: boolean): string {
     if (result.status === "ok") return result.reply?.trim() || (result.stopped ? "Stopped." : "");
     if (result.status === "refused" || result.status === "failed")
@@ -286,6 +312,7 @@ export function createDiscordBot(deps: {
         location: place.kind === "dm" ? "a Discord direct message with the user" : "a Discord thread",
         details: { channel: place.channelId },
         botHandle: self.username,
+        ...(place.kind === "dm" ? { instructions: DISCORD_REACTION_INSTRUCTION } : {}),
       },
       redeliveryKey: messageKey,
       ...(await inboundFiles(m)),
@@ -331,7 +358,7 @@ export function createDiscordBot(deps: {
           onSteered: accept,
           onReplying: typeOnceReplying,
           onSnapshot: (snapshot) =>
-            writer.stream(snapshot, async (messageId) => {
+            writer.stream(stripReactionDirectives(snapshot), async (messageId) => {
               if (queuedRunId) await core.reportRunEditRef(queuedRunId, messageId);
             }),
         });
@@ -346,7 +373,16 @@ export function createDiscordBot(deps: {
       }
       if (!accepted) accept();
       if (result.steered) return { result, accepted };
-      const reply = quiet && result.status !== "ok" ? "" : replyText(result, typing, body.conversation.kind === "dm");
+      const extracted = extractReactions(
+        quiet && result.status !== "ok" ? "" : replyText(result, typing, body.conversation.kind === "dm"),
+      );
+      const reply = extracted.text.trim();
+      const reactions = [
+        ...(result.status === "react" ? (result.reactions ?? []) : []),
+        ...extracted.reactions.filter((d) => !d.target && !d.targetId).flatMap((d) => d.names),
+      ];
+      const trigger = triggerMessageId(body);
+      if (reactions.length && trigger) await reactTo(channelId, trigger, reactions);
       const runId = queuedRunId;
       try {
         await writer.finish(reply, runId ? `run:${runId}` : key);

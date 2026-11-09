@@ -143,6 +143,14 @@ class FakeDiscord implements DiscordApi {
   async recentMessages(channelId: string) {
     return this.history.get(channelId) ?? [];
   }
+  reactions: Array<[string, string, string]> = [];
+  pins: Array<[string, string, boolean]> = [];
+  async react(channelId: string, messageId: string, emoji: string) {
+    this.reactions.push([channelId, messageId, emoji]);
+  }
+  async pin(channelId: string, messageId: string, remove = false) {
+    this.pins.push([channelId, messageId, remove]);
+  }
   async message(channelId: string, messageId: string) {
     const found = (this.history.get(channelId) ?? []).find((m) => m.id === messageId);
     if (!found) throw Object.assign(new Error("Unknown Message"), { code: 10008 });
@@ -690,6 +698,62 @@ test("the agent can read its Discord thread: a pending request is answered from 
       ["900000000000000002", "you", "the earlier answer"],
     ],
   );
+});
+
+test("the agent's react and pin actions land on the Discord message it named", async () => {
+  const h = harness({});
+  const row = (id: string, destination: Delivery["destination"]): Delivery => ({
+    id,
+    destination,
+    text: "",
+    idempotencyKey: `post:${id}`,
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  h.queue.push(
+    row("r1", {
+      type: "discord",
+      target: "thread-4",
+      react: { messageTs: "800000000000000041", emoji: "white_check_mark" },
+    }),
+    row("r2", {
+      type: "discord",
+      target: "thread-4",
+      react: { messageTs: "800000000000000041", emoji: "not_a_real_emoji" },
+    }),
+    row("p1", { type: "discord", target: "thread-4", pin: { messageTs: "800000000000000042" } }),
+    row("p2", { type: "discord", target: "thread-4", pin: { messageTs: "800000000000000043", remove: true } }),
+  );
+  const api = new FakeDiscord();
+  const { plugin } = await boot(h, api);
+  await until(() => h.deliveriesAcked.length === 4, "deliveries acked");
+  await plugin.stop();
+
+  assert.deepEqual(api.reactions, [["thread-4", "800000000000000041", "✅"]]);
+  assert.deepEqual(api.pins, [
+    ["thread-4", "800000000000000042", false],
+    ["thread-4", "800000000000000043", true],
+  ]);
+  assert.equal(api.sent.length, 0);
+});
+
+test("QM reacts to the message instead of replying when the reply check says so, and honours react directives", async () => {
+  let reply: TurnResult = { status: "react", reactions: ["pray"] };
+  const h = harness({ result: () => reply });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "thanks!", "900000000000000051"));
+  await until(() => api.reactions.length === 1, "reaction");
+  reply = { status: "ok", reply: "Done [[react: tada]]" };
+  handlers.onMessage(dm(ALICE, "react with tada please", "900000000000000052"));
+  await until(() => api.reactions.length === 2 && api.sent.length === 1, "directive reaction");
+  await plugin.stop();
+
+  assert.deepEqual(api.reactions, [
+    [DM, "900000000000000051", "🙏"],
+    [DM, "900000000000000052", "🎉"],
+  ]);
+  assert.equal(api.sent[0]!.content, "Done", "the directive never shows as text");
+  assert.match(h.turns[1]!.gatewayContext?.instructions ?? "", /\[\[react:/);
 });
 
 test("a file sent to a person by DM is uploaded to their DM", async () => {

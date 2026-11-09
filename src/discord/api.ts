@@ -80,6 +80,8 @@ export interface DiscordApi {
   channel(channelId: string): Promise<DiscordChannel>;
   recentMessages(channelId: string, limit: number, before?: string): Promise<DiscordMessage[]>;
   message(channelId: string, messageId: string): Promise<DiscordMessage>;
+  react(channelId: string, messageId: string, emoji: string): Promise<void>;
+  pin(channelId: string, messageId: string, remove?: boolean): Promise<void>;
   registerCommands(commands: RESTPutAPIApplicationCommandsJSONBody): Promise<void>;
   deferEphemeral(interactionId: string, token: string): Promise<void>;
   editReply(
@@ -259,6 +261,13 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
     },
     async recentMessages(channelId, limit, before) {
       return (await api.channels.getMessages(channelId, { limit, ...(before ? { before } : {}) })) as DiscordMessage[];
+    },
+    async react(channelId, messageId, emoji) {
+      await api.channels.addMessageReaction(channelId, messageId, emoji);
+    },
+    async pin(channelId, messageId, remove = false) {
+      if (remove) await api.channels.unpinMessage(channelId, messageId);
+      else await api.channels.pinMessage(channelId, messageId);
     },
     async message(channelId, messageId) {
       return (await api.channels.getMessage(channelId, messageId)) as DiscordMessage;

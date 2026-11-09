@@ -10,6 +10,8 @@ import { commandApprovalCard, deployAccessCard, keychainCard, type DiscordCard }
 import { discordDmThreadRef } from "./bot.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import { sendDiscordFiles } from "./files.ts";
+import { emojiCharFor } from "../slack/emoji-map.ts";
+import { stripReactionDirectives } from "../slack/reactions.ts";
 
 const CLAIM_MS = 15_000;
 const RUN_RECOVERY_GRACE_MS = 15_000;
@@ -74,10 +76,15 @@ export function createDiscordDeliveryPoller(deps: {
     });
   }
 
+  function settleMissingMessage(error: unknown): void {
+    if (discordErrorCode(error) !== DISCORD_UNKNOWN_MESSAGE) throw error;
+  }
+
   async function postTextAndFiles(channelId: string, d: Delivery, replyTo?: string): Promise<void> {
     const key = d.idempotencyKey ?? d.id;
-    if (d.text.trim())
-      await postMessage(api, channelId, d.text.trim(), {
+    const text = stripReactionDirectives(d.text).trim();
+    if (text)
+      await postMessage(api, channelId, text, {
         key,
         ...(replyTo ? { replyTo } : {}),
         ...(d.destination.editRef ? { editRef: d.destination.editRef } : {}),
@@ -85,7 +92,7 @@ export function createDiscordDeliveryPoller(deps: {
     if (!d.attachments?.length) return;
     const problems = await sendDiscordFiles(api, core, channelId, d.attachments, {
       key,
-      ...(replyTo && !d.text.trim() ? { replyTo } : {}),
+      ...(replyTo && !text ? { replyTo } : {}),
     });
     if (problems.length) await postMessage(api, channelId, `⚠️ ${problems.join("; ")}.`, { key: `${key}:file-notes` });
   }
@@ -105,8 +112,18 @@ export function createDiscordDeliveryPoller(deps: {
       const card = await approvalCard(d);
       if (card === "skip") return;
       if (card) return postCard(channelId, d, card);
-      if (d.destination.react || d.destination.pin)
-        console.log(`[discord] delivery ${d.id}: reactions and pins are not delivered on Discord yet`);
+      if (d.destination.react) {
+        const emoji = emojiCharFor(d.destination.react.emoji);
+        if (!emoji) return console.error(`[discord] delivery ${d.id}: unknown emoji "${d.destination.react.emoji}"`);
+        await api.react(channelId, d.destination.react.messageTs, emoji).catch(settleMissingMessage);
+        return;
+      }
+      if (d.destination.pin) {
+        await api
+          .pin(channelId, d.destination.pin.messageTs, d.destination.pin.remove === true)
+          .catch(settleMissingMessage);
+        return;
+      }
       await postTextAndFiles(channelId, d, replyTo);
     });
   }
@@ -122,7 +139,7 @@ export function createDiscordDeliveryPoller(deps: {
         await postCard(dm, d, card);
         return { recipientThreadRef: discordDmThreadRef(dm) };
       }
-      if (!d.text.trim() && !d.attachments?.length) return;
+      if (!stripReactionDirectives(d.text).trim() && !d.attachments?.length) return;
       const dm = await api.openDm(discordId);
       await postTextAndFiles(dm, d);
       return { recipientThreadRef: discordDmThreadRef(dm) };

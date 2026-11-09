@@ -22,3 +22,18 @@ function buildMap(): Record<string, string> {
 }
 
 export const EMOJI_NAME_BY_CHAR: Record<string, string> = buildMap();
+
+function buildCharByName(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const e of emojiData)
+    for (const name of e.short_names ?? [e.short_name]) map.set(name, unifiedToChar(e.unified));
+  return map;
+}
+
+const EMOJI_CHAR_BY_NAME = buildCharByName();
+
+export function emojiCharFor(name: string): string | undefined {
+  const trimmed = name.trim().replace(/^:|:$/g, "");
+  if (EMOJI_NAME_BY_CHAR[trimmed.replace(VS16, "")]) return trimmed;
+  return EMOJI_CHAR_BY_NAME.get(trimmed.toLowerCase());
+}
