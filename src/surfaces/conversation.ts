@@ -1,5 +1,5 @@
 import { encodeTs, summarizeReactions, type ReactionTally } from "../slack/reactions.ts";
-import { isDiscordMessageId, messageTimeMs } from "../util/message-tag.ts";
+import { isDiscordSnowflake, messageTimeMs } from "../util/message-tag.ts";
 import { utcMinute } from "../util/time.ts";
 import { MAX_ATTACHMENTS_PER_TURN } from "../slack/attachments.ts";
 
@@ -169,7 +169,7 @@ export function formatSlackTs(ts: string): string {
 }
 
 export function messageRef(ts: string): string {
-  return isDiscordMessageId(ts) ? ts : encodeTs(ts);
+  return isDiscordSnowflake(ts) ? ts : encodeTs(ts);
 }
 
 function messageTurnText(

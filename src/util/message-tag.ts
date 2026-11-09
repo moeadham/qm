@@ -7,15 +7,15 @@ export function xmlAttrEscape(s: string): string {
 }
 
 const DISCORD_EPOCH_MS = 1_420_070_400_000n;
-const DISCORD_ID = /^\d{15,20}$/;
+const DISCORD_SNOWFLAKE = /^\d{15,20}$/;
 
-export function isDiscordMessageId(ts: string): boolean {
-  return DISCORD_ID.test(ts);
+export function isDiscordSnowflake(id: string): boolean {
+  return DISCORD_SNOWFLAKE.test(id);
 }
 
 export function messageTimeMs(ts: string | undefined): number | undefined {
   if (!ts) return undefined;
-  if (isDiscordMessageId(ts)) {
+  if (isDiscordSnowflake(ts)) {
     const ms = Number((BigInt(ts) >> 22n) + DISCORD_EPOCH_MS);
     return ms > 0 ? ms : undefined;
   }

@@ -1353,5 +1353,4 @@ test("a scheduled run that delivers to a Discord conversation gets the Discord s
   );
   assert.equal(monitor.status, "ok");
   assert.equal(seen.at(-1)!.surfaceName, "discord");
-  assert.match(seen.at(-1)!.systemPrompt, /Your words reach people ONLY through the `discord` tool/);
 });

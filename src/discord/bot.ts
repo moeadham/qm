@@ -8,6 +8,7 @@ import type { ActorAssertion, TurnResult } from "../types.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
 import {
   DISCORD_MESSAGE_LIMIT,
+  discordDisplayName,
   discordErrorCode,
   messageAttachments,
   messageHomeChannel,
@@ -87,10 +88,6 @@ export function threadRefForChannel(channel: DiscordChannel): string | undefined
   if (THREAD_CHANNEL_TYPES.has(channel.type) && channel.parentId)
     return discordChannelThreadRef(channel.parentId, channel.id);
   return undefined;
-}
-
-function displayName(author: DiscordMessage["author"]): string {
-  return author.global_name || author.username;
 }
 
 export function createDiscordBot(deps: {
@@ -211,12 +208,12 @@ export function createDiscordBot(deps: {
         : api.recentMessages(place.channelId, CONTEXT_MESSAGES)
     ).catch(swallowAs("discord: thread history", [] as DiscordMessage[]));
     const nameById = new Map<string, string>([[self.id, self.username]]);
-    for (const m of raw) nameById.set(m.author.id, displayName(m.author));
+    for (const m of raw) nameById.set(m.author.id, discordDisplayName(m.author));
     const messages: RecentMessage[] = raw
       .filter((m) => m.id !== trigger.id && CONVERSATION_MESSAGE_TYPES.has(m.type) && messageText(m).trim())
       .map((m) => ({
         ts: m.id,
-        name: displayName(m.author),
+        name: discordDisplayName(m.author),
         authorId: m.author.id,
         text: messageText(m),
         ...(m.author.bot ? { isBot: true } : {}),
@@ -302,7 +299,7 @@ export function createDiscordBot(deps: {
     const { attachments, issues } = await receiveDiscordFiles(
       files,
       (bytes) => core.stageBlob(bytes),
-      displayName(m.author),
+      discordDisplayName(m.author),
     );
     return {
       ...(attachments.length ? { attachments } : {}),
@@ -336,7 +333,7 @@ export function createDiscordBot(deps: {
     }
     if (place.channelRef && m.guild_id)
       await core.rememberChannel(place.channelRef, m.guild_id).catch(swallowAs("discord: remember channel", undefined));
-    const actor: ActorAssertion = { externalId: `discord:${m.author.id}`, displayName: displayName(m.author) };
+    const actor: ActorAssertion = { externalId: `discord:${m.author.id}`, displayName: discordDisplayName(m.author) };
     const body: CoreTurnBody = {
       actor,
       conversation: {

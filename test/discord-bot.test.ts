@@ -243,13 +243,20 @@ function harness(opts: {
   contextRequests?: SurfaceContextRequest[];
 }): Harness {
   const linked = opts.linked ?? { [ALICE]: "alice@example.com" };
+  const enqueued = new Set<() => void>();
+  const queue: Delivery[] = [];
+  queue.push = (...rows: Delivery[]) => {
+    const size = Array.prototype.push.apply(queue, rows);
+    for (const notify of enqueued) notify();
+    return size;
+  };
   const h: Harness = {
     turns: [],
     acked: [],
     editRefs: [],
     stopped: [],
     deliveriesAcked: [],
-    queue: [],
+    queue,
     decisions: [],
     channels: [],
     blobs: new Map(),
@@ -259,7 +266,12 @@ function harness(opts: {
   const real = createDiscordCoreClient({
     app: {} as never,
     blobTransfer: {} as never,
-    deliveries: { onEnqueue: () => () => {} } as never,
+    deliveries: {
+      onEnqueue: (listener: () => void) => {
+        enqueued.add(listener);
+        return () => enqueued.delete(listener);
+      },
+    } as never,
     metrics: {} as never,
     runs: { onTerminal: () => {} } as never,
     turnStream: {} as never,

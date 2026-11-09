@@ -1,6 +1,6 @@
 import { swallowAs } from "../util/errors.ts";
 import { CURATED_ACK_EMOJI, DEFAULT_ACK_REACTIONS } from "./lib.ts";
-import { EMOJI_NAME_BY_CHAR } from "./emoji-map.ts";
+import { emojiCharFor } from "./emoji-map.ts";
 import type { SlackCoreClient } from "../api/slack-core-client.ts";
 
 export interface AckEmojiPicker {
@@ -15,10 +15,6 @@ export interface AckEmojiPicker {
 
 const ACK_EMOJI_TTL_MS = 60 * 60_000;
 const COMPLETION_EMOJI = /check|done|complete|approved|ship|tada|party|100|thumbsup|\+1|yes/i;
-
-const NAME_TO_CHAR = new Map<string, string>();
-for (const [char, name] of Object.entries(EMOJI_NAME_BY_CHAR))
-  if (!NAME_TO_CHAR.has(name)) NAME_TO_CHAR.set(name, char);
 
 const CUSTOM_PICK_SAMPLE = 40;
 function sample<T>(items: readonly T[], n: number): T[] {
@@ -54,7 +50,7 @@ export function createAckEmojiPicker(
   }
 
   function resolveEmojiIcon(name: string): string | undefined {
-    return ackEmojiCache?.urls.get(name) ?? NAME_TO_CHAR.get(name);
+    return ackEmojiCache?.urls.get(name) ?? emojiCharFor(name);
   }
 
   function ackPickCandidates(client: any): string[] {

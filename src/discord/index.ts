@@ -25,7 +25,8 @@ export { discordConfigFromEnv, assertOneChatPlatform, type DiscordConfig } from 
 const GATEWAY_RETRY_MS = 5_000;
 const GATEWAY_MAX_BACKOFF_MS = 30 * 60_000;
 const GATEWAY_TRANSIENT_BACKOFF_MS = 60_000;
-const DELIVERY_SWEEP_MS = 5_000;
+const DELIVERY_SWEEP_MS = 60_000;
+const DELIVERY_FOLLOWER_RETRY_MS = 5_000;
 const ENVELOPE_REPLAY_SWEEP_MS = 60_000;
 
 function messageKey(body: Record<string, unknown>): string | null {
@@ -134,6 +135,7 @@ export async function startDiscordPlugin(
 
   let polling: Promise<void> | null = null;
   let pollAgain = false;
+  let followerRetry: NodeJS.Timeout | undefined;
   const kickDeliveries = (): void => {
     if (stopped) return;
     if (polling) {
@@ -141,10 +143,18 @@ export async function startDiscordPlugin(
       return;
     }
     polling = (async () => {
+      let ranAsLeader = true;
       do {
         pollAgain = false;
-        await deliveries.poll();
+        ranAsLeader = await deliveries.poll();
       } while (pollAgain && !stopped);
+      if (!ranAsLeader && !stopped && !followerRetry) {
+        followerRetry = setTimeout(() => {
+          followerRetry = undefined;
+          kickDeliveries();
+        }, DELIVERY_FOLLOWER_RETRY_MS);
+        followerRetry.unref?.();
+      }
     })()
       .catch(reportFailureAs("discord: delivery poll", undefined))
       .finally(() => {
@@ -172,6 +182,7 @@ export async function startDiscordPlugin(
       if (stopped) return;
       stopped = true;
       release();
+      clearTimeout(followerRetry);
       unsubscribe();
       stopContext();
       await Promise.all(sweepers.map((sweeper) => sweeper.stop()));

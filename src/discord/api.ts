@@ -41,6 +41,10 @@ export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | 
   message_snapshots?: Array<{ message: { content?: string; attachments?: DiscordAttachment[] } }>;
 };
 
+export function discordDisplayName(author: DiscordMessage["author"]): string {
+  return author.global_name || author.username;
+}
+
 export function messageText(m: DiscordMessage): string {
   const forwarded = (m.message_snapshots ?? [])
     .map((s) => s.message.content?.trim())

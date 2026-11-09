@@ -3409,9 +3409,9 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       ),
       channel: Type.Optional(
         Type.String({
-          description:
-            (reachChannels ? "" : `Not available on ${surfaceLabel}: reach can't post to other channels there. `) +
-            "reach: send to THIS named channel (a channel you and the recipient can both see). EXTREMELY IMPORTANT: a channel post is a broadcast to everyone there — pick the narrowest audience that can act. A question or errand for one person (or a few) goes to their DM via `recipient`, NEVER to a public channel; use a channel only when the person you're helping explicitly named it as the destination, or the message genuinely concerns that whole room. react/edit/delete: which channel the target message is in (omit for the current one). NOT valid on post — post only ever replies in the current conversation.",
+          description: reachChannels
+            ? "reach: send to THIS named channel (a channel you and the recipient can both see). EXTREMELY IMPORTANT: a channel post is a broadcast to everyone there — pick the narrowest audience that can act. A question or errand for one person (or a few) goes to their DM via `recipient`, NEVER to a public channel; use a channel only when the person you're helping explicitly named it as the destination, or the message genuinely concerns that whole room. react/edit/delete: which channel the target message is in (omit for the current one). NOT valid on post — post only ever replies in the current conversation."
+            : "react/edit/delete: which channel the target message is in (omit for the current one).",
         }),
       ),
       recipient: Type.Optional(Type.String({ description: "reach: DM this teammate (by name). NOT valid on post." })),

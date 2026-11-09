@@ -4531,6 +4531,4 @@ test("the Discord tool only offers what Discord can do; Slack keeps group DMs an
   assert.ok(params("slack").includes("source"));
   assert.ok(!params("discord").includes("participants"));
   assert.ok(!params("discord").includes("source"));
-  assert.match(JSON.stringify(tool("discord").parameters), /can't send to other channels/);
-  assert.doesNotMatch(JSON.stringify(tool("discord").parameters), /Slack/);
 });

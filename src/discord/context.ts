@@ -1,17 +1,13 @@
 import { buildContextWindow, type RecentMessage } from "../surfaces/conversation.ts";
 import type { SurfaceContextRequest } from "../types.ts";
 import { errMessage } from "../util/errors.ts";
-import { messageAttachments, messageText, type DiscordApi, type DiscordMessage } from "./api.ts";
+import { discordDisplayName, messageAttachments, messageText, type DiscordApi, type DiscordMessage } from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import { receiveDiscordFiles } from "./files.ts";
 
 const PAGE = 100;
 const SCAN_PAGES_FOR_MATCH = 3;
 const DEFAULT_COUNT = 50;
-
-function displayName(author: DiscordMessage["author"]): string {
-  return author.global_name || author.username;
-}
 
 export function createDiscordContextFulfiller(deps: {
   api: Pick<DiscordApi, "recentMessages" | "message">;
@@ -43,7 +39,7 @@ export function createDiscordContextFulfiller(deps: {
     const { attachments, issues } = await receiveDiscordFiles(
       candidates.slice(0, 1),
       (bytes) => core.stageBlob(bytes),
-      displayName(message.author),
+      discordDisplayName(message.author),
       deps.fetchImpl,
     );
     const got = attachments[0];
@@ -91,10 +87,10 @@ export function createDiscordContextFulfiller(deps: {
       const shaped: RecentMessage[] = raw
         .filter((m) => messageText(m).trim() || messageAttachments(m).length)
         .map((m) => {
-          nameById.set(m.author.id, displayName(m.author));
+          nameById.set(m.author.id, discordDisplayName(m.author));
           return {
             ts: m.id,
-            name: displayName(m.author),
+            name: discordDisplayName(m.author),
             authorId: m.author.id,
             text: messageText(m),
             parentTs: channelId,

@@ -4,15 +4,15 @@ import { mintSignedPayload, verifySignedPayload } from "../auth/signed-token.ts"
 import { DISCORD_PRINCIPAL_PREFIX as ALIAS_PREFIX, personIds } from "../directory/person.ts";
 import type { AuditLog } from "../audit/audit-log.ts";
 import type { PrincipalLink, PrincipalLinkService } from "./principal-links.ts";
+import { isDiscordSnowflake } from "../util/message-tag.ts";
 
-const SNOWFLAKE = /^\d{15,22}$/;
 const TICKET_TTL_MS = 30 * 60_000;
 
 export const DISCORD_LINK_PROVIDER = "discord-link";
 export const DISCORD_LINK_CALLBACK_PATH = "/v1/discord-link/callback";
 
 export function discordAlias(userId: string): string {
-  if (!SNOWFLAKE.test(userId)) throw new Error("invalid Discord user id");
+  if (!isDiscordSnowflake(userId)) throw new Error("invalid Discord user id");
   return `${ALIAS_PREFIX}${userId}`;
 }
 
@@ -20,7 +20,7 @@ export function linkedDiscordId(principalId: string): string | undefined {
   for (const id of personIds(principalId)) {
     if (!id.toLowerCase().startsWith(ALIAS_PREFIX)) continue;
     const userId = id.slice(ALIAS_PREFIX.length);
-    if (SNOWFLAKE.test(userId)) return userId;
+    if (isDiscordSnowflake(userId)) return userId;
   }
   return undefined;
 }
@@ -49,7 +49,7 @@ export async function verifyDiscordLinkTicket(
     typeof claims.exp !== "number" ||
     claims.exp <= now ||
     typeof claims.discordId !== "string" ||
-    !SNOWFLAKE.test(claims.discordId)
+    !isDiscordSnowflake(claims.discordId)
   )
     return null;
   return claims.discordId;
@@ -108,7 +108,7 @@ export async function verifiedDiscordUser(opts: {
   const token = await api.oauth2.tokenExchange(exchange);
   rest.setToken(token.access_token);
   const user = await api.users.getCurrent();
-  if (!SNOWFLAKE.test(user.id) || user.bot === true) throw new Error("Discord returned an unusable user");
+  if (!isDiscordSnowflake(user.id) || user.bot === true) throw new Error("Discord returned an unusable user");
   return { id: user.id, username: user.username };
 }
 
