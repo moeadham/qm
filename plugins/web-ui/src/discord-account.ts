@@ -118,7 +118,10 @@ export class DiscordAccount extends LitElement {
 
   private renderNotice() {
     if (!this.notice) return nothing;
-    return html`<p class=${this.notice.ok ? "discord-account-notice" : "slack-account-error"} role="status">
+    return html`<p
+      class=${this.notice.ok ? "discord-account-notice" : "slack-account-error"}
+      role=${this.notice.ok ? "status" : "alert"}
+    >
       ${this.notice.text}
     </p>`;
   }
@@ -137,17 +140,18 @@ export class DiscordAccount extends LitElement {
     return html`<section class="discord-account" aria-label="Your Discord account">
       ${
         status.linked
-          ? html`<div class="discord-linked">
-              <div class="discord-logo" aria-hidden="true">${discordMark(22)}</div>
-              <span class="discord-linked-text"
-                ><strong>${icon(Check, 14)}Discord account linked</strong
-                >${detail ? html`<small>${detail}</small>` : nothing}</span
+          ? html`<div class="slack-connected" role="status">
+              ${icon(Check, 14)}<span>Your Discord account is linked${detail ? ` · ${detail}` : ""}</span>
+              <button
+                class="btn mc-quiet-danger"
+                type="button"
+                ?disabled=${this.busy}
+                @click=${() => void this.unlink()}
               >
-              <button class="btn" type="button" ?disabled=${this.busy} @click=${() => void this.unlink()}>
                 ${this.busy ? "Unlinking…" : "Unlink"}
               </button>
             </div>`
-          : html`<a class="welcome-slack" href="/connect/discord">
+          : html`<a class="welcome-slack" href=${withBase("/connect/discord")}>
               <div class="slack-link-icon" aria-hidden="true">
                 <span class="slack-link-person">${icon(UserRound, 17)}</span>
                 <span class="slack-link-service">${discordMark(16)}</span>

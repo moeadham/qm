@@ -39,12 +39,10 @@ test("Settings shows the linked Discord account after the OAuth return and can u
   try {
     h.releaseSessions();
     await h.boot();
-    await waitFor(() => /Discord account linked/.test(card()?.textContent ?? ""));
-    const text = card()!.textContent ?? "";
-    assert.match(text, /@moe/);
-    assert.match(text, /linked .*2026/);
-    assert.match(text, /The QM bot now accepts your messages/);
-    assert.ok(card()!.querySelector(".discord-mark"));
+    await waitFor(() => /Your Discord account is linked/.test(card()?.textContent ?? ""));
+    const status = card()!.querySelector<HTMLElement>(".slack-connected[role=status]");
+    assert.match(status?.textContent ?? "", /Your Discord account is linked · @moe · linked .*2026/);
+    assert.match(card()!.textContent ?? "", /The QM bot now accepts your messages/);
     assert.equal(new URL(location.href).searchParams.get("discord"), null);
 
     Object.assign(window, { confirm: () => true });
@@ -53,6 +51,7 @@ test("Settings shows the linked Discord account after the OAuth return and can u
     await waitFor(() => /Link your Discord account/.test(card()?.textContent ?? ""));
     assert.equal(deletes.length, 1);
     assert.match(card()!.textContent ?? "", /Discord unlinked/);
+    assert.equal(card()!.querySelector("a.welcome-slack")?.getAttribute("href"), "/connect/discord");
   } finally {
     await h.close();
   }

@@ -20,7 +20,7 @@ test("a failed Discord link return explains the failure in Settings", async () =
     h.releaseSessions();
     await h.boot();
     await waitFor(() => /Link your Discord account/.test(card()?.textContent ?? ""));
-    assert.match(card()!.textContent ?? "", /linked to another QM user/);
+    assert.match(card()!.querySelector("[role=alert]")?.textContent ?? "", /linked to another QM user/);
   } finally {
     await h.close();
   }
