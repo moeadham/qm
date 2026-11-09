@@ -116,7 +116,8 @@ export function createDiscordBot(deps: {
       .recentMessages(thread.id, STAKE_SCAN_MESSAGES)
       .then((history) => history.some((m) => m.author.id === self.id || mentionsSelf(m)))
       .catch(swallowAs("discord: thread stake", false))
-      .then((stake) => {
+      .then((found) => {
+        const stake = found || threads.get(thread.id, "") === true;
         threads.mark(thread.id, "", stake);
         return stake;
       })

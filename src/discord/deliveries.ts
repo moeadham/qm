@@ -123,7 +123,11 @@ export function createDiscordDeliveryPoller(deps: {
       }
       const card = await approvalCard(d);
       if (card === "skip") return;
-      if (card) return postCard(channelId, d, card);
+      if (card) {
+        await postCard(channelId, d, card);
+        threads.mark(channelId, "", true);
+        return;
+      }
       if (d.destination.react) {
         const emoji = emojiCharFor(d.destination.react.emoji);
         if (!emoji) return console.error(`[discord] delivery ${d.id}: unknown emoji "${d.destination.react.emoji}"`);

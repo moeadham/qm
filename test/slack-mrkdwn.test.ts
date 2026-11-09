@@ -286,5 +286,13 @@ test("alignMarkdownTables keeps pipes inside code and escaped pipes in their cel
 test("alignMarkdownTables leaves a table inside a code block that hasn't closed yet alone", () => {
   const partial = "Here:\n```\na | b\n--|--\n1 | 2";
   assert.equal(alignMarkdownTables(partial), partial);
-  assert.equal(toSlackMrkdwn(partial), partial);
+});
+
+test("alignMarkdownTables treats an unpaired backtick in a cell as a literal", () => {
+  assert.equal(alignMarkdownTables("| word | n |\n|---|---|\n| it`s | 2 |"), "```\nword | n\n-----+--\nit`s | 2\n```");
+});
+
+test("toSlackMrkdwn: a stray ``` doesn't stop mass mentions being neutralized or text being formatted after it", () => {
+  const out = toSlackMrkdwn("Wrap code in ``` fences. **Bold** and [link](https://x.com) <!channel>");
+  assert.equal(out, "Wrap code in ``` fences. *Bold* and <https://x.com|link> @\u200bchannel");
 });

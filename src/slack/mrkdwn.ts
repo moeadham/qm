@@ -96,7 +96,7 @@ function stashFencedBlocks(text: string, keep: (s: string) => string): string {
     if (tilde === undefined && backtick < 0) break;
     if (backtick >= 0 && (tilde === undefined || backtick < tilde.start)) {
       const close = text.indexOf("```", backtick + 3);
-      if (close < 0) return out + text.slice(i, backtick) + keep(text.slice(backtick));
+      if (close < 0) break;
       out += text.slice(i, backtick) + keep(text.slice(backtick, close + 3));
       i = close + 3;
       continue;
@@ -170,7 +170,10 @@ export function alignMarkdownTables(md: string): string {
   if (!md.includes("|")) return md;
   const stash: string[] = [];
   const keep = (s: string): string => `${STASH_OPEN}${stash.push(s) - 1}${STASH_OPEN}`;
-  return restoreStash(reformatTables(stashFencedBlocks(md.replace(/\r\n/g, "\n"), keep), keep), stash);
+  const stashed = stashFencedBlocks(md.replace(/\r\n/g, "\n"), keep);
+  const open = stashed.indexOf("```");
+  const tablesEnd = open < 0 ? stashed.length : open;
+  return restoreStash(reformatTables(stashed.slice(0, tablesEnd), keep) + stashed.slice(tablesEnd), stash);
 }
 
 function trimUrlTail(url: string): string {
@@ -212,7 +215,7 @@ function splitTableRow(line: string): string[] {
       cells.push(cell.trim());
       cell = "";
     } else {
-      if (ch === "`") inCode = !inCode;
+      if (ch === "`" && (inCode || row.indexOf("`", i + 1) >= 0)) inCode = !inCode;
       cell += ch;
     }
   }

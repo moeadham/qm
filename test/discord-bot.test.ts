@@ -149,8 +149,12 @@ class FakeDiscord implements DiscordApi {
   }
   historyReads: Array<[string, string | undefined]> = [];
   historyErrors = new Set<string>();
+  historyGates = new Map<string, Promise<void>>();
   async recentMessages(channelId: string, _limit?: number, before?: string) {
     this.historyReads.push([channelId, before]);
+    const gate = this.historyGates.get(channelId);
+    this.historyGates.delete(channelId);
+    await gate;
     if (this.historyErrors.has(channelId)) throw Object.assign(new Error("Missing Access"), { code: 50001 });
     return this.history.get(channelId) ?? [];
   }
@@ -559,6 +563,37 @@ test("a thread QM can't read, or one hit by a burst of messages, is checked once
     [locked, busy],
   );
   assert.equal(h.turns.length, 0);
+});
+
+test("a mention that lands while a thread is being checked isn't undone by the check", async () => {
+  const h = harness({ result: () => ({ status: "silent" }) });
+  const api = new FakeDiscord();
+  const thread = "800000000000000171";
+  api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: ALICE, guildId: GUILD });
+  let release!: () => void;
+  api.historyGates.set(thread, new Promise<void>((r) => (release = r)));
+  const { handlers, plugin } = await boot(h, api);
+  const say = (id: string, content: string, mention = false) =>
+    handlers.onMessage({
+      ...dm(ALICE, content, id),
+      channel_id: thread,
+      guild_id: GUILD,
+      ...(mention ? { mentions: [{ id: BOT } as never] } : {}),
+    });
+  say("800000000000000172", "chatting");
+  await until(() => api.historyReads.length === 1, "scan started");
+  say("800000000000000173", `<@${BOT}> look at this`, true);
+  await until(() => h.turns.length === 1, "mention");
+  release();
+  await new Promise((r) => setTimeout(r, 20));
+  say("800000000000000174", "and this too");
+  await until(() => h.turns.some((t) => t.deliveryTarget === thread && t.text === "and this too"), "follow-up heard");
+  await plugin.stop();
+  assert.deepEqual(h.turns.find((t) => t.text === "and this too")!.origin, {
+    kind: "ambient",
+    live: true,
+    entryTs: "800000000000000174",
+  });
 });
 
 test("once QM posts into a thread someone else started, replies there are heard", async () => {
