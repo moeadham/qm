@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EMOJI_NAME_BY_CHAR } from "../src/slack/emoji-map.ts";
+import { EMOJI_NAME_BY_CHAR, emojiCharFor } from "../src/slack/emoji-map.ts";
 import {
   normalizeReaction,
   normalizeReactions,
@@ -488,4 +488,13 @@ test("a react directive followed by a huge whitespace run strips in linear time"
   extractReactions("thanks [[react:" + " ".repeat(100000) + "]x");
   extractReactions("[[react: eyes]] tail" + " ".repeat(100000) + "no newline");
   assert.ok(Number(process.hrtime.bigint() - start) / 1e6 < 200);
+});
+
+test("object prototype names are never treated as emoji", () => {
+  for (const name of ["constructor", "toString", "hasOwnProperty"]) {
+    assert.equal(emojiCharFor(name), undefined, name);
+    assert.equal(normalizeReaction(name), name.toLowerCase(), name);
+  }
+  assert.equal(emojiCharFor("tada"), "🎉");
+  assert.equal(emojiCharFor("🎉"), "🎉");
 });

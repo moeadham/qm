@@ -74,7 +74,7 @@ function emojiCharToName(s: string): string | null {
       return "";
     })
     .replace(VARIATION_SELECTOR_16, "");
-  const name = EMOJI_NAME_BY_CHAR[base];
+  const name = Object.hasOwn(EMOJI_NAME_BY_CHAR, base) ? EMOJI_NAME_BY_CHAR[base] : undefined;
   if (!name) return null;
   return tone ? `${name}::skin-tone-${tone}` : name;
 }

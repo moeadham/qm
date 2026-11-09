@@ -34,6 +34,6 @@ const EMOJI_CHAR_BY_NAME = buildCharByName();
 
 export function emojiCharFor(name: string): string | undefined {
   const trimmed = name.trim().replace(/^:|:$/g, "");
-  if (EMOJI_NAME_BY_CHAR[trimmed.replace(VS16, "")]) return trimmed;
+  if (Object.hasOwn(EMOJI_NAME_BY_CHAR, trimmed.replace(VS16, ""))) return trimmed;
   return EMOJI_CHAR_BY_NAME.get(trimmed.toLowerCase());
 }

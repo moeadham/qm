@@ -5,7 +5,14 @@ import { drainClaimedDeliveries } from "../surfaces/delivery-claims.ts";
 import type { TurnFlow } from "../surfaces/turn-flow.ts";
 import type { Delivery } from "../types.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
-import { DISCORD_UNKNOWN_MESSAGE, discordErrorCode, messageNonce, postMessage, type DiscordApi } from "./api.ts";
+import {
+  DISCORD_UNKNOWN_MESSAGE,
+  discordErrorCode,
+  messageHomeChannel,
+  messageNonce,
+  postMessage,
+  type DiscordApi,
+} from "./api.ts";
 import { commandApprovalCard, deployAccessCard, keychainCard, type DiscordCard } from "./approval-cards.ts";
 import { discordDmThreadRef } from "./bot.ts";
 import type { DiscordCoreClient } from "./core.ts";
@@ -17,6 +24,7 @@ const CLAIM_MS = 15_000;
 const RUN_RECOVERY_GRACE_MS = 15_000;
 const UNDELIVERABLE_CODES = new Set([10003, 10013, 50001, 50007, 50013]);
 const MAX_REPORTED = 5_000;
+const UNACTIONABLE_TARGET_CODES = new Set([DISCORD_UNKNOWN_MESSAGE, 10014, 30003, 30010, 50035]);
 
 export function createDiscordDeliveryPoller(deps: {
   api: DiscordApi;
@@ -76,9 +84,13 @@ export function createDiscordDeliveryPoller(deps: {
     });
   }
 
-  function settleMissingMessage(error: unknown): void {
-    if (discordErrorCode(error) !== DISCORD_UNKNOWN_MESSAGE) throw error;
-  }
+  const settleUnactionable =
+    (d: Delivery) =>
+    (error: unknown): void => {
+      const code = discordErrorCode(error);
+      if (code === undefined || !UNACTIONABLE_TARGET_CODES.has(code)) throw error;
+      console.error(`[discord] delivery ${d.id}: dropped after discord error ${code}`);
+    };
 
   async function postTextAndFiles(channelId: string, d: Delivery, replyTo?: string): Promise<void> {
     const key = d.idempotencyKey ?? d.id;
@@ -104,9 +116,7 @@ export function createDiscordDeliveryPoller(deps: {
     const [channelId = "", replyTo] = d.destination.target.split(":");
     await attempt(d, async () => {
       if (d.destination.delete) {
-        await api.remove(channelId, d.destination.delete.messageTs).catch((error: unknown) => {
-          if (discordErrorCode(error) !== DISCORD_UNKNOWN_MESSAGE) throw error;
-        });
+        await api.remove(channelId, d.destination.delete.messageTs).catch(settleUnactionable(d));
         return;
       }
       const card = await approvalCard(d);
@@ -115,13 +125,17 @@ export function createDiscordDeliveryPoller(deps: {
       if (d.destination.react) {
         const emoji = emojiCharFor(d.destination.react.emoji);
         if (!emoji) return console.error(`[discord] delivery ${d.id}: unknown emoji "${d.destination.react.emoji}"`);
-        await api.react(channelId, d.destination.react.messageTs, emoji).catch(settleMissingMessage);
+        const { messageTs } = d.destination.react;
+        await api
+          .react(await messageHomeChannel(api, channelId, messageTs), messageTs, emoji)
+          .catch(settleUnactionable(d));
         return;
       }
       if (d.destination.pin) {
+        const { messageTs, remove } = d.destination.pin;
         await api
-          .pin(channelId, d.destination.pin.messageTs, d.destination.pin.remove === true)
-          .catch(settleMissingMessage);
+          .pin(await messageHomeChannel(api, channelId, messageTs), messageTs, remove === true)
+          .catch(settleUnactionable(d));
         return;
       }
       await postTextAndFiles(channelId, d, replyTo);

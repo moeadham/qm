@@ -133,6 +133,13 @@ class FakeDiscord implements DiscordApi {
   async startThread(channelId: string, messageId: string, name: string) {
     if (this.threadExists) throw Object.assign(new Error("thread exists"), { code: 160004 });
     this.threads.push({ channelId, messageId, name });
+    const parent = this.channels.get(channelId);
+    this.channels.set(messageId, {
+      id: messageId,
+      type: 11,
+      parentId: channelId,
+      ...(parent?.guildId ? { guildId: parent.guildId } : {}),
+    });
     return messageId;
   }
   async channel(channelId: string) {
@@ -145,7 +152,10 @@ class FakeDiscord implements DiscordApi {
   }
   reactions: Array<[string, string, string]> = [];
   pins: Array<[string, string, boolean]> = [];
+  reactionErrors = new Map<string, number>();
   async react(channelId: string, messageId: string, emoji: string) {
+    const code = this.reactionErrors.get(emoji);
+    if (code !== undefined) throw Object.assign(new Error(`discord ${code}`), { code });
     this.reactions.push([channelId, messageId, emoji]);
   }
   async pin(channelId: string, messageId: string, remove = false) {
@@ -735,6 +745,75 @@ test("the agent's react and pin actions land on the Discord message it named", a
     ["thread-4", "800000000000000043", true],
   ]);
   assert.equal(api.sent.length, 0);
+});
+
+test("reactions and pins on the message that started a thread land in the parent channel", async () => {
+  const h = harness({ result: () => ({ status: "ok", reply: "On it [[react: eyes]]" }) });
+  const api = new FakeDiscord();
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  const row = (id: string, destination: Delivery["destination"]): Delivery => ({
+    id,
+    destination,
+    text: "",
+    idempotencyKey: `post:${id}`,
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({
+    ...dm(ALICE, `<@${BOT}> look`),
+    id: "800000000000000061",
+    channel_id: CHANNEL,
+    guild_id: GUILD,
+    mentions: [{ id: BOT } as never],
+  });
+  await until(() => api.reactions.length === 1, "trigger reaction");
+  h.queue.push(
+    row("r-start", {
+      type: "discord",
+      target: "800000000000000061",
+      react: { messageTs: "800000000000000061", emoji: "tada" },
+    }),
+    row("p-start", { type: "discord", target: "800000000000000061", pin: { messageTs: "800000000000000061" } }),
+  );
+  await until(() => h.deliveriesAcked.length === 2, "deliveries acked");
+  await plugin.stop();
+
+  assert.deepEqual(api.reactions, [
+    [CHANNEL, "800000000000000061", "👀"],
+    [CHANNEL, "800000000000000061", "🎉"],
+  ]);
+  assert.deepEqual(api.pins, [[CHANNEL, "800000000000000061", false]]);
+});
+
+test("a react the agent asks for that Discord can never accept is settled, not retried", async () => {
+  const h = harness({});
+  const api = new FakeDiscord();
+  api.reactionErrors.set("🎉", 10014);
+  h.queue.push({
+    id: "r-bad",
+    destination: { type: "discord", target: "thread-4", react: { messageTs: "800000000000000071", emoji: "tada" } },
+    text: "",
+    idempotencyKey: "post:r-bad",
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  const { plugin } = await boot(h, api);
+  await until(() => h.deliveriesAcked.length === 1, "settled");
+  await plugin.stop();
+  assert.deepEqual(api.reactions, []);
+});
+
+test("a streamed snapshot that is only a react directive posts nothing", async () => {
+  const h = harness({ snapshots: ["[[react: eyes]]"], result: () => ({ status: "ok", reply: "Done." }) });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+  assert.deepEqual(
+    api.sent.map((m) => m.content),
+    ["Done."],
+  );
 });
 
 test("QM reacts to the message instead of replying when the reply check says so, and honours react directives", async () => {

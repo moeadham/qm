@@ -9,6 +9,7 @@ import { errMessage, swallowAs } from "../util/errors.ts";
 import {
   DISCORD_MESSAGE_LIMIT,
   discordErrorCode,
+  messageHomeChannel,
   postMessage,
   type DiscordApi,
   type DiscordChannel,
@@ -233,7 +234,8 @@ export function createDiscordBot(deps: {
     };
   }
 
-  async function reactTo(channelId: string, messageId: string, names: readonly string[]): Promise<void> {
+  async function reactTo(threadId: string, messageId: string, names: readonly string[]): Promise<void> {
+    const channelId = await messageHomeChannel(api, threadId, messageId).catch(() => threadId);
     for (const name of names.slice(0, MAX_REACTIONS)) {
       const emoji = emojiCharFor(name);
       if (emoji) await api.react(channelId, messageId, emoji).catch(swallowAs("discord: react", undefined));
@@ -357,10 +359,13 @@ export function createDiscordBot(deps: {
           },
           onSteered: accept,
           onReplying: typeOnceReplying,
-          onSnapshot: (snapshot) =>
-            writer.stream(stripReactionDirectives(snapshot), async (messageId) => {
+          onSnapshot: (snapshot) => {
+            const text = stripReactionDirectives(snapshot);
+            if (!text.trim()) return;
+            writer.stream(text, async (messageId) => {
               if (queuedRunId) await core.reportRunEditRef(queuedRunId, messageId);
-            }),
+            });
+          },
         });
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));

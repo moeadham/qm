@@ -113,6 +113,15 @@ export const DISCORD_MESSAGE_LIMIT = 2_000;
 const CLOSE_WAIT_MS = 5_000;
 export const DISCORD_UNKNOWN_MESSAGE = 10008;
 
+export async function messageHomeChannel(
+  api: Pick<DiscordApi, "channel">,
+  channelId: string,
+  messageId: string,
+): Promise<string> {
+  if (messageId !== channelId) return channelId;
+  return (await api.channel(channelId)).parentId ?? channelId;
+}
+
 export function discordErrorCode(error: unknown): number | undefined {
   const code = (error as { code?: unknown })?.code;
   return typeof code === "number" ? code : undefined;

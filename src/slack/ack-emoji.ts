@@ -16,8 +16,9 @@ export interface AckEmojiPicker {
 const ACK_EMOJI_TTL_MS = 60 * 60_000;
 const COMPLETION_EMOJI = /check|done|complete|approved|ship|tada|party|100|thumbsup|\+1|yes/i;
 
-const NAME_TO_CHAR: Record<string, string> = {};
-for (const [char, name] of Object.entries(EMOJI_NAME_BY_CHAR)) if (!(name in NAME_TO_CHAR)) NAME_TO_CHAR[name] = char;
+const NAME_TO_CHAR = new Map<string, string>();
+for (const [char, name] of Object.entries(EMOJI_NAME_BY_CHAR))
+  if (!NAME_TO_CHAR.has(name)) NAME_TO_CHAR.set(name, char);
 
 const CUSTOM_PICK_SAMPLE = 40;
 function sample<T>(items: readonly T[], n: number): T[] {
@@ -53,7 +54,7 @@ export function createAckEmojiPicker(
   }
 
   function resolveEmojiIcon(name: string): string | undefined {
-    return ackEmojiCache?.urls[name] ?? NAME_TO_CHAR[name];
+    return ackEmojiCache?.urls[name] ?? NAME_TO_CHAR.get(name);
   }
 
   function ackPickCandidates(client: any): string[] {
