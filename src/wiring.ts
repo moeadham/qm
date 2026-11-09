@@ -1,6 +1,6 @@
 import type { MemoryEmbedder } from "./model/embeddings.ts";
 import { nonDeploymentCredential, withDeploymentCredentials } from "./credentials/deployment-credentials.ts";
-import { resolveEmbeddingModel } from "./model/pi-models.ts";
+import { isHarnessId, resolveEmbeddingModel } from "./model/pi-models.ts";
 import { createPostgresTeamStore, type TeamStore } from "./teams/teams.ts";
 import { brokerCredentialAuthHeader } from "./api/credential-broker.ts";
 import type { DecisionBackend } from "./decisions/decisions.ts";
@@ -9,6 +9,7 @@ import { createDecisionBackend } from "./decisions/providers.ts";
 import { createPostgresDecisionStore, type DecisionStore } from "./decisions/store.ts";
 import type { SlackSessionStatusState } from "./slack/session-status.ts";
 import { availableRuntimeError, type RuntimeDeps } from "./api/runtime-config.ts";
+import { setSessionRuntime } from "./api/session-runtime.ts";
 import { createApprovalStore } from "./core/approval-store.ts";
 import { createKeychainApprovals, type KeychainApprovals } from "./credentials/keychain-approval.ts";
 import { flushErrorReporting, startTiming } from "../plugins/chassis/src/error-reporting.ts";
@@ -2726,6 +2727,17 @@ export function buildApp(
   orchestratorDeps.control = createControlService(app, scheduler, admin);
   orchestratorDeps.validateScheduledRuntime = (scope, choice, purpose, actorId) =>
     availableRuntimeError({ deps: runtimeDeps }, scope, choice, purpose, actorId);
+  orchestratorDeps.pinSessionRuntime = async (session, principalId, runtime) => {
+    const harnessId = runtime?.harnessId;
+    if (runtime && !isHarnessId(harnessId)) return { ok: false, error: `harness ${harnessId} is not available` };
+    const saved = await setSessionRuntime(
+      { sessions, runtime: runtimeDeps, auditLog },
+      session,
+      principalId,
+      runtime && isHarnessId(harnessId) ? { ...runtime, harnessId } : null,
+    );
+    return saved.ok ? { ok: true, ...(saved.session.runtime ? { runtime: saved.session.runtime } : {}) } : saved;
+  };
   orchestratorDeps.runtime = createRuntimeService(runtimeDeps, app);
   const finishCredentials = (handle: SandboxHandle, processId: string) =>
     finishProcessCredentials({ sandbox, processes: processes!, ...(keychain ? { keychain } : {}) }, handle, processId);

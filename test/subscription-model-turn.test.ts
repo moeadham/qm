@@ -578,6 +578,12 @@ test("a session's saved model reaches a ChatGPT-subscription user's non-web turn
       { harnessId: webSession.runtime?.harnessId, modelId: webSession.runtime?.modelId },
       { harnessId: "pi", modelId: "codex/gpt-6-astra" },
     );
+    assert.equal(
+      (await built.auditLog.tail({ limit: 20, action: "session-runtime.update", resourceContains: webSession.id }))
+        .length,
+      1,
+      "a model picked with a web turn is saved through the audited session-runtime path",
+    );
     assert.equal((await built.app.turn({ ...web, text: "back to default", pinRuntime: false })).status, "ok");
     assert.equal((await built.sessions.getByThread(web.conversation.threadRef))?.runtime, undefined);
     assert.notEqual(

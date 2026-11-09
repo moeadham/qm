@@ -174,6 +174,7 @@ import { LRUCache } from "lru-cache";
 import type { SkillResolution } from "../skills/skill-store.ts";
 import type { Orchestrator, OrchestratorDeps, OrchestratorInput } from "./orchestrator/types.ts";
 import { codexSubscriptionModelId, isHarnessId, CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
+import { resolveTurnRuntime } from "../sessions/turn-runtime.ts";
 import type { ProviderKeys } from "../harness/pi-harness.ts";
 import { resolveIndividualAuthRouting } from "./individual-auth-routing.ts";
 import { createSessionTitles } from "./session-title.ts";
@@ -1290,44 +1291,27 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       );
       screenSession.id = session.id;
       leaseMs += Date.now() - sessionStart;
-      let savedRuntime = session.runtime;
-      if (input.surface === "web" && input.pinRuntime !== undefined && !automatedTurn) {
-        const pinned =
-          input.pinRuntime && input.model && input.harness
-            ? {
-                harnessId: input.harness,
-                modelId: input.model,
-                ...(input.thinkingLevel ? { effortLevel: input.thinkingLevel } : {}),
-                ...(typeof input.fastMode === "boolean" ? { fastMode: input.fastMode } : {}),
-              }
-            : undefined;
-        const same =
-          pinned && savedRuntime
-            ? pinned.harnessId === savedRuntime.harnessId &&
-              pinned.modelId === savedRuntime.modelId &&
-              pinned.effortLevel === savedRuntime.effortLevel &&
-              pinned.fastMode === savedRuntime.fastMode
-            : !pinned && !savedRuntime;
-        if (!same) await deps.sessions.setRuntime(session.id, pinned ?? null);
-        savedRuntime = pinned;
-      }
-      const sessionRuntimeProblem = async (runtime: NonNullable<typeof savedRuntime>): Promise<string | null> =>
-        isHarnessId(runtime.harnessId)
-          ? ((await deps.validateScheduledRuntime?.(
-              scopeId,
-              { ...runtime, harnessId: runtime.harnessId },
-              undefined,
-              actor.id,
-            )) ?? null)
-          : `harness ${runtime.harnessId} is not available`;
-      let sessionRuntime = !input.model && !input.harness ? savedRuntime : undefined;
-      const skipped = sessionRuntime ? await sessionRuntimeProblem(sessionRuntime) : null;
-      if (sessionRuntime && skipped) {
-        console.log(
-          `[session-runtime] session=${session.id} actor=${actor.id} skipped ${sessionRuntime.harnessId}/${sessionRuntime.modelId}: ${skipped}`,
-        );
-        sessionRuntime = undefined;
-      }
+      const pinSessionRuntime = deps.pinSessionRuntime;
+      const { runtime: sessionRuntime, problem: runtimeProblem } = await resolveTurnRuntime(
+        {
+          pin: (runtime) =>
+            pinSessionRuntime
+              ? pinSessionRuntime(session, actor.id, runtime)
+              : Promise.resolve({ ok: false as const, error: "pinning is not available" }),
+          problem: async (runtime) =>
+            isHarnessId(runtime.harnessId)
+              ? ((await deps.validateScheduledRuntime?.(
+                  scopeId,
+                  { ...runtime, harnessId: runtime.harnessId },
+                  undefined,
+                  actor.id,
+                )) ?? null)
+              : `harness ${runtime.harnessId} is not available`,
+        },
+        session.runtime,
+        input.surface === "web" && !automatedTurn ? input : { ...input, pinRuntime: undefined },
+      );
+      if (runtimeProblem) console.log(`[session-runtime] session=${session.id} actor=${actor.id} ${runtimeProblem}`);
       const turnModel = input.model ?? sessionRuntime?.modelId;
       const turnHarness = input.harness ?? sessionRuntime?.harnessId;
       const turnEffort = input.thinkingLevel ?? sessionRuntime?.effortLevel;

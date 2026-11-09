@@ -181,6 +181,11 @@ export interface OrchestratorDeps {
   webhooks?: WebhookStore;
   control?: ControlService;
   runtime?: RuntimeService;
+  pinSessionRuntime?: (
+    session: import("../../types.ts").Session,
+    principalId: string,
+    runtime: import("../../types.ts").SessionRuntime | null,
+  ) => Promise<{ ok: true; runtime?: import("../../types.ts").SessionRuntime } | { ok: false; error: string }>;
   validateScheduledRuntime?: (
     scope: import("../../types.ts").ScopeId,
     choice: import("../../harness/harness.ts").RuntimeChoice,

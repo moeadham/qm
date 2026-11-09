@@ -308,6 +308,17 @@ export async function availableRuntimeError(
   purpose?: RuntimePurpose,
   actorId?: string,
 ): Promise<string | null> {
+  const available = await availableRuntime(ctx, scope, choice, purpose, actorId);
+  return "error" in available ? available.error : null;
+}
+
+export async function availableRuntime(
+  ctx: { deps: RuntimeDeps },
+  scope: ScopeId,
+  choice: RuntimeChoice,
+  purpose?: RuntimePurpose,
+  actorId?: string,
+): Promise<{ choice: RuntimeChoice } | { error: string }> {
   await ctx.deps.refreshModels?.();
   const choices = actorId
     ? await userRuntimeConfigBody(ctx, scope, actorId, purpose, choice)
@@ -325,10 +336,11 @@ export async function availableRuntimeError(
     ...(subscriptionServiceable ? [codexProviderModelId(choice.modelId)] : []),
   ].find((id) => listed.includes(id));
   if (!availableModel || !(await webuiModelEnabled(ctx, choice.modelId, purpose)))
-    return "runtime is no longer available or enabled on this deployment";
-  return validateRuntimeChoice({
+    return { error: "runtime is no longer available or enabled on this deployment" };
+  const error = validateRuntimeChoice({
     ...choice,
     modelId: availableModel,
     effortLevel: choice.effortLevel === "adaptive" || choice.effortLevel === "default" ? choice.effortLevel : undefined,
   });
+  return error ? { error } : { choice: { ...choice, modelId: availableModel } };
 }
