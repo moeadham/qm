@@ -60,6 +60,8 @@ The OAuth redirect is `<portal URL>/v1/discord-link/callback`; core builds it fr
 
 Discord voice messages arrive as an audio attachment flagged as a voice message. When `TRANSCRIBE_MODEL` is set to `<custom provider id>:<model id>` (for example `allmodels:openai/gpt-transcribe`), the core sends the audio to that custom provider's OpenAI-style `/audio/transcriptions` endpoint with the provider's stored key, and QM receives `(voice note) <transcript>` as the message text, with the audio still attached. If transcription fails, the turn still runs with the audio attached and a note that it couldn't be transcribed. Unset, voice notes arrive as plain audio files.
 
+A voice message carries no text, so it can't mention QM and the relevance check runs before transcription. Voice notes are handled in DMs, in replies that ping QM, and in threads QM already follows. In a followed thread every linked participant's voice note is transcribed (and its audio sent to the provider) so the reply check can judge it, even when it turns out not to be meant for QM. Unlinked people's voice notes and voice notes QM ignores are never transcribed. An envelope replay of an unaccepted message transcribes again.
+
 ## Verification
 
 - Tests through real paths with a fake Discord REST client and gateway, in the style of `test/slack-*.test.ts`; each bug-fix test fails on old code.

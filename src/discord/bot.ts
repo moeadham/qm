@@ -317,10 +317,11 @@ export function createDiscordBot(deps: {
   async function voiceNote(m: DiscordMessage): Promise<{ transcript?: string; note?: string }> {
     const transcribe = core.transcribe;
     const audio = m.attachments?.find((a) => a.content_type?.startsWith("audio/"));
-    if (!transcribe || !audio || !((m.flags ?? 0) & MessageFlags.IsVoiceMessage)) return {};
+    const mimetype = audio?.content_type;
+    if (!transcribe || !audio || !mimetype || !((m.flags ?? 0) & MessageFlags.IsVoiceMessage)) return {};
     try {
       const bytes = await downloadDiscordFile({ id: audio.id, name: audio.filename, url_private: audio.url });
-      const spoken = await transcribe(bytes, audio.filename, audio.content_type ?? "audio/ogg");
+      const spoken = await transcribe(bytes, audio.filename, mimetype);
       return spoken ? { transcript: `(voice note) ${spoken}` } : {};
     } catch (error) {
       console.error(`[discord] voice note ${m.id} could not be transcribed: ${errMessage(error)}`);

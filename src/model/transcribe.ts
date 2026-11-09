@@ -1,3 +1,4 @@
+import type { CustomProviderStore } from "./custom-provider-store.ts";
 import { httpFailure } from "../util/errors.ts";
 
 export interface TranscriptionEndpoint {
@@ -30,11 +31,23 @@ export function createTranscriber(
       method: "POST",
       headers: { authorization: `Bearer ${target.apiKey}` },
       body: form,
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(60_000),
     });
     if (!res.ok) throw new Error(`transcription failed: ${await httpFailure(res)}`);
     const data = (await res.json()) as { text?: unknown };
     if (typeof data.text !== "string") throw new Error("transcription response had no text");
     return data.text.trim();
+  };
+}
+
+export function customProviderEndpoint(
+  providers: Pick<CustomProviderStore, "enabled" | "resolveKey">,
+  providerId: string,
+): () => Promise<TranscriptionEndpoint | null> {
+  return async () => {
+    const spec = (await providers.enabled()).find((p) => p.id === providerId);
+    if (!spec || spec.protocol === "anthropic") return null;
+    const apiKey = await providers.resolveKey(spec.id);
+    return apiKey ? { baseUrl: spec.baseUrl, apiKey } : null;
   };
 }

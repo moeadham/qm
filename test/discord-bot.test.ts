@@ -791,6 +791,52 @@ test("a voice note that can't be transcribed still reaches QM, with a note sayin
     globalThis.fetch = realFetch;
   }
   assert.match(h.turns[0]!.inboundNotes?.join(" ") ?? "", /voice note that couldn't be transcribed/);
+  assert.equal(h.turns[0]!.text, "");
+  assert.deepEqual(
+    h.turns[0]!.attachments?.map((a) => a.name),
+    ["voice-message.ogg"],
+  );
+});
+
+test("only a voice note QM handles is transcribed: not from unlinked people, unflagged audio, or unfollowed channels", async () => {
+  let calls = 0;
+  const h = harness({
+    transcribe: async () => {
+      calls++;
+      return "hello";
+    },
+  });
+  const api = new FakeDiscord();
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } })) as unknown as typeof fetch;
+  const audio = {
+    id: "v3",
+    filename: "voice-message.ogg",
+    size: 7,
+    url: "https://cdn.discordapp.com/attachments/1/2/voice-message.ogg",
+    content_type: "audio/ogg",
+  };
+  try {
+    const { handlers, plugin } = await boot(h, api);
+    handlers.onMessage({ ...dm(MALLORY, "", "800000000000000201"), flags: 8192, attachments: [audio] });
+    handlers.onMessage({ ...dm(ALICE, "", "800000000000000202"), attachments: [audio] });
+    handlers.onMessage({
+      ...dm(ALICE, "", "800000000000000203"),
+      channel_id: CHANNEL,
+      guild_id: GUILD,
+      flags: 8192,
+      attachments: [audio],
+    });
+    await until(() => h.turns.length === 1, "the unflagged DM file still reaches QM");
+    await new Promise((r) => setTimeout(r, 50));
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(calls, 0);
+  assert.equal(h.turns.length, 1);
 });
 
 test("markdown tables are sent as aligned code blocks", async () => {

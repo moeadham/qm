@@ -1,4 +1,5 @@
 import { discordConfigFromEnv } from "./discord/config.ts";
+import { parseTranscribeModel } from "./model/transcribe.ts";
 import { codexAuthFileForEnv, loadCodexAuthFile } from "./model/chatgpt-auth-file.ts";
 import {
   deploymentBrokerCredentialsFromEnv,
@@ -99,7 +100,7 @@ export interface Config {
   claudeBinPath?: string;
   claudeProcessEnv: NodeJS.ProcessEnv;
   detectModelId?: string;
-  transcribeModel?: string;
+  transcribeModel?: { providerId: string; modelId: string };
   titleModelId?: string;
   judgeModelId?: string;
   anthropicApiKey?: string;
@@ -1530,7 +1531,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.CLAUDE_BIN ? { claudeBinPath: env.CLAUDE_BIN } : {}),
     claudeProcessEnv,
     ...(env.PI_DETECT_MODEL ? { detectModelId: env.PI_DETECT_MODEL } : {}),
-    ...(env.TRANSCRIBE_MODEL?.trim() ? { transcribeModel: env.TRANSCRIBE_MODEL.trim() } : {}),
+    ...(env.TRANSCRIBE_MODEL?.trim() ? { transcribeModel: parseTranscribeModel(env.TRANSCRIBE_MODEL.trim()) } : {}),
     ...(env.PI_TITLE_MODEL ? { titleModelId: env.PI_TITLE_MODEL } : {}),
     ...(env.PI_JUDGE_MODEL ? { judgeModelId: env.PI_JUDGE_MODEL } : {}),
     ...(env.ANTHROPIC_API_KEY ? { anthropicApiKey: env.ANTHROPIC_API_KEY } : {}),

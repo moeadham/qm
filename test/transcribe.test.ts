@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createTranscriber, parseTranscribeModel } from "../src/model/transcribe.ts";
+import { createTranscriber, customProviderEndpoint, parseTranscribeModel } from "../src/model/transcribe.ts";
 
 test("the transcriber posts the audio to the provider's OpenAI-style transcription endpoint", async () => {
   const seen: Array<{ url: string; auth: string | null; model: unknown; file: File }> = [];
@@ -46,4 +46,27 @@ test("TRANSCRIBE_MODEL names a provider and a model", () => {
     modelId: "openai/gpt-transcribe",
   });
   assert.throws(() => parseTranscribeModel("openai/gpt-transcribe"), /provider id/);
+});
+
+test("the transcription endpoint is an enabled OpenAI-style custom provider with a stored key", async () => {
+  const providers = (specs: Array<{ id: string; protocol: "openai" | "anthropic" }>, key: string | null) => ({
+    enabled: async () => specs.map((s) => ({ ...s, name: s.id, baseUrl: `https://${s.id}.test/v1`, models: [] })),
+    resolveKey: async () => key,
+  });
+  assert.deepEqual(
+    await customProviderEndpoint(providers([{ id: "allmodels", protocol: "openai" }], "k"), "allmodels")(),
+    {
+      baseUrl: "https://allmodels.test/v1",
+      apiKey: "k",
+    },
+  );
+  assert.equal(await customProviderEndpoint(providers([], "k"), "allmodels")(), null);
+  assert.equal(
+    await customProviderEndpoint(providers([{ id: "allmodels", protocol: "openai" }], null), "allmodels")(),
+    null,
+  );
+  assert.equal(
+    await customProviderEndpoint(providers([{ id: "allmodels", protocol: "anthropic" }], "k"), "allmodels")(),
+    null,
+  );
 });
