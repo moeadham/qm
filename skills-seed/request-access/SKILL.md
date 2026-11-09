@@ -24,7 +24,7 @@ curl -fsS -X POST "$AGENT_API_URL/v1/keychain/asks" \
 
 ## Where the card shows up
 
-You don't choose. The card appears where this conversation is: the Slack thread or channel,
+You don't choose. The card appears where this conversation is: the thread or channel,
 inline in the web session (and in its parent when you are a sub-agent), or the scheduled job's
 destination. Only the credential's owner can click it; nothing said in chat is approval.
 

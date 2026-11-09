@@ -3363,6 +3363,9 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
   const surfaceName = opts?.surfaceName ?? "slack";
   const chat = chatSurface(surfaceName);
   const surfaceLabel = chat?.label ?? surfaceName;
+  const groupDms = chat?.groupDms ?? true;
+  const searchAsPerson = chat?.searchAsPerson ?? true;
+  const reachChannels = chat?.reachChannels ?? true;
   const surface = defineTool({
     name: surfaceName,
     label: surfaceName,
@@ -3388,9 +3391,11 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         {
           description:
             "What to do: post (reply HERE, in this conversation — the normal way to answer), reach " +
-            "(send to a DIFFERENT audience: a teammate DM, another channel, a group — the ONLY way to " +
-            "leave this conversation), react (emoji on a message), edit/delete (revise/retract your " +
-            "OWN message), read_thread (read stored thread messages, with live fallback for missing context), whats_new (pointers to what " +
+            (reachChannels
+              ? "(send to a DIFFERENT audience: a teammate DM, another channel, a group — the ONLY way to leave this conversation)"
+              : `(DM a teammate — the ONLY way to leave this conversation; ${surfaceLabel} can't send to other channels or groups)`) +
+            ", react (emoji on a message), edit/delete (revise/retract your " +
+            "OWN message), read_thread (read this conversation's recent messages), whats_new (pointers to what " +
             "changed), search (find messages), read_members (the roster), read_file (a shared file's " +
             "contents by reference).",
         },
@@ -3405,16 +3410,21 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       channel: Type.Optional(
         Type.String({
           description:
+            (reachChannels ? "" : `Not available on ${surfaceLabel}: reach can't post to other channels there. `) +
             "reach: send to THIS named channel (a channel you and the recipient can both see). EXTREMELY IMPORTANT: a channel post is a broadcast to everyone there — pick the narrowest audience that can act. A question or errand for one person (or a few) goes to their DM via `recipient`, NEVER to a public channel; use a channel only when the person you're helping explicitly named it as the destination, or the message genuinely concerns that whole room. react/edit/delete: which channel the target message is in (omit for the current one). NOT valid on post — post only ever replies in the current conversation.",
         }),
       ),
       recipient: Type.Optional(Type.String({ description: "reach: DM this teammate (by name). NOT valid on post." })),
-      participants: Type.Optional(
-        Type.Array(Type.String(), {
-          description:
-            "reach: send to the group DM whose other members are exactly these (a group DM has no name; it's opened if it doesn't exist yet, so never ask someone to create one). react/edit/delete: the group DM the target message is in.",
-        }),
-      ),
+      ...(groupDms
+        ? {
+            participants: Type.Optional(
+              Type.Array(Type.String(), {
+                description:
+                  "reach: send to the group DM whose other members are exactly these (a group DM has no name; it's opened if it doesn't exist yet, so never ask someone to create one). react/edit/delete: the group DM the target message is in.",
+              }),
+            ),
+          }
+        : {}),
       ts: Type.Optional(
         Type.String({
           description:
@@ -3444,18 +3454,22 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         }),
       ),
       query: Type.Optional(Type.String({ description: "search: words to look for in this place's messages." })),
-      source: Type.Optional(
-        Type.Union([Type.Literal("mirror"), Type.Literal("slack")], {
-          description:
-            "search: where to search — `mirror` (default) searches the local copy of recent messages: only channels I'm in, " +
-            "and only back to each channel's coverage date, so it can miss both very recent and older messages. " +
-            "`slack` runs Slack's own full-history search AS THE ASKING PERSON, via their connected Slack login — it sees " +
-            "exactly what they can see, including their own DMs and private channels (never anyone else's). Retry with " +
-            "`slack` when the mirror and this conversation's own history both come up empty; reading the conversation needs no personal login. " +
-            "A message neither lens can see may still exist — say what you couldn't search, don't declare it nonexistent. " +
-            "In a channel or group, hits from the asker's DMs or private channels are for their eyes: don't quote that content to the room — acknowledge you found it and take it to their DM.",
-        }),
-      ),
+      ...(searchAsPerson
+        ? {
+            source: Type.Optional(
+              Type.Union([Type.Literal("mirror"), Type.Literal("slack")], {
+                description:
+                  "search: where to search — `mirror` (default) searches the local copy of recent messages: only channels I'm in, " +
+                  "and only back to each channel's coverage date, so it can miss both very recent and older messages. " +
+                  "`slack` runs Slack's own full-history search AS THE ASKING PERSON, via their connected Slack login — it sees " +
+                  "exactly what they can see, including their own DMs and private channels (never anyone else's). Retry with " +
+                  "`slack` when the mirror and this conversation's own history both come up empty; reading the conversation needs no personal login. " +
+                  "A message neither lens can see may still exist — say what you couldn't search, don't declare it nonexistent. " +
+                  "In a channel or group, hits from the asker's DMs or private channels are for their eyes: don't quote that content to the room — acknowledge you found it and take it to their DM.",
+              }),
+            ),
+          }
+        : {}),
       since: Type.Optional(
         Type.String({
           description:
@@ -3464,6 +3478,8 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       ),
     }),
     async execute(callId, params) {
+      const participants = Array.isArray(params.participants) ? (params.participants as string[]) : undefined;
+      const source = params.source === "mirror" || params.source === "slack" ? params.source : undefined;
       const tc = ref.current;
       if (!tc) return text("[error] no active tool context");
       const missing = (field: string) =>
@@ -3475,12 +3491,12 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         );
       const routing = {
         ...(params.channel !== undefined ? { channel: params.channel } : {}),
-        ...(params.participants !== undefined ? { participants: params.participants } : {}),
+        ...(participants !== undefined ? { participants: participants } : {}),
       };
       switch (params.action) {
         case "post": {
           if (params.text === undefined) return missing("text");
-          if (params.channel !== undefined || params.recipient !== undefined || params.participants !== undefined) {
+          if (params.channel !== undefined || params.recipient !== undefined || participants !== undefined) {
             return recordResult(
               callId,
               { tool: surfaceName, action: "post", error: "post_cannot_address" },
@@ -3520,7 +3536,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           const selectors = [
             params.channel !== undefined,
             params.recipient !== undefined,
-            params.participants !== undefined,
+            participants !== undefined,
           ].filter(Boolean).length;
           if (selectors !== 1) {
             return recordResult(
@@ -3535,7 +3551,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           const target = {
             ...(params.channel !== undefined ? { channel: params.channel } : {}),
             ...(params.recipient !== undefined ? { recipient: params.recipient } : {}),
-            ...(params.participants !== undefined ? { participants: params.participants } : {}),
+            ...(participants !== undefined ? { participants: participants } : {}),
           };
           await recordCall(callId, {
             tool: surfaceName,
@@ -3684,11 +3700,11 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
             action: "search",
             query: params.query,
             ...(params.limit !== undefined ? { limit: params.limit } : {}),
-            ...(params.source !== undefined ? { source: params.source } : {}),
+            ...(source !== undefined ? { source } : {}),
           });
           const r = await tc.search(params.query, {
             ...(params.limit !== undefined ? { limit: params.limit } : {}),
-            ...(params.source !== undefined ? { source: params.source } : {}),
+            ...(source !== undefined ? { source } : {}),
           });
           if (!r.ok)
             return recordResult(
