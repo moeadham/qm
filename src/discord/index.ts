@@ -143,7 +143,7 @@ export async function startDiscordPlugin(
       return;
     }
     polling = (async () => {
-      let ranAsLeader = true;
+      let ranAsLeader: boolean;
       do {
         pollAgain = false;
         ranAsLeader = await deliveries.poll();
