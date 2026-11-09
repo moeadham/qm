@@ -21,7 +21,7 @@ import { createRateLimiter } from "../src/ratelimit/rate-limiter.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import type { LeaderLease } from "../src/persistence/leader-lease.ts";
 import type { StagedEnvelope } from "../src/surfaces/envelope-staging.ts";
-import type { Delivery, TurnRequest, TurnResult } from "../src/types.ts";
+import type { Delivery, SurfaceContextRequest, SurfaceContextResult, TurnRequest, TurnResult } from "../src/types.ts";
 import type { RunHooks, StoredApprovalView } from "../src/surfaces/surface-core-client.ts";
 import type { KeychainApprovalView } from "../src/credentials/keychain-approval.ts";
 import type { RuntimeDeps } from "../src/api/runtime-config.ts";
@@ -143,6 +143,11 @@ class FakeDiscord implements DiscordApi {
   async recentMessages(channelId: string) {
     return this.history.get(channelId) ?? [];
   }
+  async message(channelId: string, messageId: string) {
+    const found = (this.history.get(channelId) ?? []).find((m) => m.id === messageId);
+    if (!found) throw Object.assign(new Error("Unknown Message"), { code: 10008 });
+    return found;
+  }
   async registerCommands() {}
   failEdits = 0;
   async deferEphemeral() {}
@@ -194,6 +199,7 @@ interface Harness {
   decisions: unknown[][];
   channels: Array<[string, string]>;
   blobs: Map<string, Buffer>;
+  fulfilled: Array<{ id: string; result?: SurfaceContextResult; error?: string }>;
 }
 
 function harness(opts: {
@@ -208,6 +214,7 @@ function harness(opts: {
   deployRequests?: Record<string, { deploymentId: string; requesterId: string }>;
   runtime?: RuntimeDeps;
   sessions?: SessionStore;
+  contextRequests?: SurfaceContextRequest[];
 }): Harness {
   const linked = opts.linked ?? { [ALICE]: "alice@example.com" };
   const h: Harness = {
@@ -220,6 +227,7 @@ function harness(opts: {
     decisions: [],
     channels: [],
     blobs: new Map(),
+    fulfilled: [],
     core: undefined as unknown as DiscordCoreClient,
   };
   const real = createDiscordCoreClient({
@@ -272,6 +280,15 @@ function harness(opts: {
     async stopConversation(threadRef) {
       h.stopped.push(threadRef);
       return true;
+    },
+    async pendingContextRequests() {
+      return opts.contextRequests ?? [];
+    },
+    onContextRequest() {
+      return () => {};
+    },
+    async fulfillContextRequest(id, outcome) {
+      h.fulfilled.push({ id, ...outcome });
     },
     async stageBlob(bytes) {
       const blobId = `blob-${h.blobs.size + 1}`;
@@ -638,6 +655,41 @@ test("the agent's reply-under, edit and delete reach the Discord messages it nam
     [["thread-3", "800000000000000032", "fixed wording"]],
   );
   assert.deepEqual(api.removed, ["800000000000000033"]);
+});
+
+test("the agent can read its Discord thread: a pending request is answered from the thread's history", async () => {
+  const h = harness({
+    contextRequests: [
+      {
+        id: "ctx-1",
+        source: "discord",
+        createdAt: Date.now(),
+        status: "pending",
+        query: { conversationTarget: "thread-9", count: 10 },
+      },
+    ],
+  });
+  const api = new FakeDiscord();
+  api.history.set("thread-9", [
+    {
+      ...dm(BOT, "the earlier answer", "900000000000000002"),
+      channel_id: "thread-9",
+      author: { id: BOT, username: "qm", global_name: null, bot: true },
+    },
+    { ...dm(ALICE, "what's the plan?", "900000000000000001"), channel_id: "thread-9" },
+  ]);
+  const { plugin } = await boot(h, api);
+  await until(() => h.fulfilled.length === 1, "context answered");
+  await plugin.stop();
+
+  const result = h.fulfilled[0]!.result as { messages: Array<{ ts: string; author: string; text: string }> };
+  assert.deepEqual(
+    result.messages.map((m) => [m.ts, m.author, m.text]),
+    [
+      ["900000000000000001", "alice", "what's the plan?"],
+      ["900000000000000002", "you", "the earlier answer"],
+    ],
+  );
 });
 
 test("a file sent to a person by DM is uploaded to their DM", async () => {

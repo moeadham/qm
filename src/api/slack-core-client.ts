@@ -16,14 +16,13 @@ import {
   type SurfaceCoreClient,
   type SurfaceCoreClientDeps,
 } from "../surfaces/surface-core-client.ts";
-import type { ScopeId, SurfaceContextRequest, SurfaceContextResult, TurnRequest } from "../types.ts";
+import type { ScopeId, SurfaceContextRequest, TurnRequest } from "../types.ts";
 import { scopeId } from "../types.ts";
 import type { MemoryService } from "../memory/memory-service.ts";
 import type { CachedMessage, ReadMessagesOpts, SurfaceCache, IngestEvent } from "../surface-cache/surface-cache.ts";
 import type { AckEmojiPickStore } from "../surface-cache/ack-emoji-pick-store.ts";
 import type { OrgBranding, ScopedConfigStore } from "../resolution/config-store.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
-import { swallowAs } from "../util/errors.ts";
 import { resolveRuntimeChoiceDurable } from "../harness/harness-router.ts";
 import type { RuntimeChoice } from "../harness/harness.ts";
 import { modelDisplayName } from "../model/pi-models.ts";
@@ -67,9 +66,6 @@ export interface SlackCoreClient extends SurfaceCoreClient {
   holdDeliveryDispatch<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   holdEnvelopeReplay<T>(account: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   holdDirectorySync<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
-  pendingContextRequests(): Promise<SurfaceContextRequest[]>;
-  onContextRequest(listener: (request: SurfaceContextRequest) => void): () => void;
-  fulfillContextRequest(id: string, outcome: { result?: SurfaceContextResult; error?: string }): Promise<void>;
   pickAckEmoji(text: string, candidates: readonly string[]): Promise<string | undefined>;
   recordAckPick(pick: AckPickInput): Promise<void>;
   inboxSlackMessage(msg: {
@@ -236,16 +232,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       return base.holdLease(`envelope-replay:${account}`, fn);
     },
 
-    pendingContextRequests() {
-      return deps.app.pendingContextRequests("slack");
-    },
-
-    onContextRequest(listener) {
-      return deps.app.onContextRequestCreated((request) => {
-        if (request.source === "slack") listener(request);
-      });
-    },
-
     pickAckEmoji(text, candidates) {
       return deps.pickAckEmoji?.(text, candidates) ?? Promise.resolve(undefined);
     },
@@ -279,15 +265,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
           createdAt: Date.now(),
         })
         .catch(() => {});
-    },
-
-    async fulfillContextRequest(id, outcome) {
-      await deps.app
-        .fulfillContextRequest(id, outcome)
-        .then((ok) => {
-          if (!ok) return;
-        })
-        .catch(swallowAs("slack-core-client: fulfill context request", undefined));
     },
   };
 }

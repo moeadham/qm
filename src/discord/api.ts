@@ -78,7 +78,8 @@ export interface DiscordApi {
   openDm(userId: string): Promise<string>;
   startThread(channelId: string, messageId: string, name: string): Promise<string>;
   channel(channelId: string): Promise<DiscordChannel>;
-  recentMessages(channelId: string, limit: number): Promise<DiscordMessage[]>;
+  recentMessages(channelId: string, limit: number, before?: string): Promise<DiscordMessage[]>;
+  message(channelId: string, messageId: string): Promise<DiscordMessage>;
   registerCommands(commands: RESTPutAPIApplicationCommandsJSONBody): Promise<void>;
   deferEphemeral(interactionId: string, token: string): Promise<void>;
   editReply(
@@ -256,8 +257,11 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
     async channel(channelId) {
       return toChannel(await api.channels.get(channelId));
     },
-    async recentMessages(channelId, limit) {
-      return (await api.channels.getMessages(channelId, { limit })) as DiscordMessage[];
+    async recentMessages(channelId, limit, before) {
+      return (await api.channels.getMessages(channelId, { limit, ...(before ? { before } : {}) })) as DiscordMessage[];
+    },
+    async message(channelId, messageId) {
+      return (await api.channels.getMessage(channelId, messageId)) as DiscordMessage;
     },
     async registerCommands(commands) {
       await api.applicationCommands.bulkOverwriteGlobalCommands(applicationId, commands);

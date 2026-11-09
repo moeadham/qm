@@ -16,6 +16,8 @@ import { handleInteraction, QM_COMMANDS } from "./commands.ts";
 import type { DiscordConfig } from "./config.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import { createDiscordDeliveryPoller } from "./deliveries.ts";
+import { createDiscordContextFulfiller } from "./context.ts";
+import type { SurfaceContextRequest } from "../types.ts";
 
 export { discordConfigFromEnv, assertOneChatPlatform, type DiscordConfig } from "./config.ts";
 
@@ -44,6 +46,20 @@ export async function startDiscordPlugin(
   const bot = createDiscordBot({ api, core, flow, guildIds: cfg.guildIds, self });
   const deliveries = createDiscordDeliveryPoller({ api, core, flow });
   const buttons = createApprovalButtons({ api, core, resumeTurn: bot.resumeTurn });
+  const fulfillContext = createDiscordContextFulfiller({ api, core, selfId: self.id });
+  const contextInFlight = new Set<string>();
+  const serveContext = (request: SurfaceContextRequest): void => {
+    if (contextInFlight.has(request.id)) return;
+    contextInFlight.add(request.id);
+    void fulfillContext(request)
+      .catch(reportFailureAs("discord: context request", undefined))
+      .finally(() => contextInFlight.delete(request.id));
+  };
+  const stopContext = core.onContextRequest(serveContext);
+  void core
+    .pendingContextRequests()
+    .then((pending) => pending.forEach(serveContext))
+    .catch(reportFailureAs("discord: context request drain", undefined));
   const staging = core.stagedEnvelopes
     ? createEnvelopeStaging(core.stagedEnvelopes, { account: "discord", keyFor: messageKey })
     : undefined;
@@ -155,6 +171,7 @@ export async function startDiscordPlugin(
       stopped = true;
       release();
       unsubscribe();
+      stopContext();
       await Promise.all(sweepers.map((sweeper) => sweeper.stop()));
       await polling;
     },

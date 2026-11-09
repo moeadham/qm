@@ -238,6 +238,27 @@ describe("surface-context pulls", async () => {
     assert.equal(((await noDest.json()) as any).error, "no_conversation");
   });
 
+  it("a Discord conversation's request is parked for the Discord surface, not Slack", async () => {
+    const asking = post(
+      "/v1/surface-context",
+      { count: 5 },
+      {
+        "x-agent-capability": await cap({
+          destination: { type: "discord", target: "800000000000000001", audienceScopeId: scopeId("channel", "600") },
+        }),
+      },
+    );
+    let parked: Array<{ id: string; query: { conversationTarget?: string } }> = [];
+    for (let i = 0; i < 100 && !parked.length; i++) {
+      parked = await built.app.pendingContextRequests("discord");
+      if (!parked.length) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(parked[0]?.query.conversationTarget, "800000000000000001");
+    assert.deepEqual(await built.app.pendingContextRequests("slack"), []);
+    await built.app.fulfillContextRequest(parked[0]!.id, { result: { messages: [] } });
+    assert.equal((await asking).status, 200);
+  });
+
   it("requires auth: no capability and no source signature → rejected", async () => {
     const res = await post("/v1/surface-context", { channel: "eng" });
     assert.notEqual(res.status, 200);

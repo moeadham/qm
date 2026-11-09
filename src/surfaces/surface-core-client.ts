@@ -12,7 +12,16 @@ import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-l
 import type { RunStore } from "../runs/run-store.ts";
 import { isTerminal } from "../runs/run-store.ts";
 import type { GoalView, TurnStream } from "../runs/turn-stream.ts";
-import type { ActorAssertion, Delivery, PendingApproval, ScopeId, TurnRequest, TurnResult } from "../types.ts";
+import type {
+  ActorAssertion,
+  Delivery,
+  PendingApproval,
+  ScopeId,
+  SurfaceContextRequest,
+  SurfaceContextResult,
+  TurnRequest,
+  TurnResult,
+} from "../types.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
 import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import { swallowAs } from "../util/errors.ts";
@@ -37,6 +46,9 @@ export interface SurfaceCoreClient {
   stageBlob(bytes: Uint8Array): Promise<{ blobId: string; sizeBytes: number }>;
   readBlob(blobId: string): Promise<Buffer>;
   readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
+  pendingContextRequests(): Promise<SurfaceContextRequest[]>;
+  onContextRequest(listener: (request: SurfaceContextRequest) => void): () => void;
+  fulfillContextRequest(id: string, outcome: { result?: SurfaceContextResult; error?: string }): Promise<void>;
   submitTurn(body: Omit<TurnRequest, "surface">): Promise<TurnResult>;
   waitRun(runId: string, hooks?: RunHooks): Promise<TurnResult | null>;
   activeRunForThread(threadRef: string): Promise<string | undefined>;
@@ -118,6 +130,22 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
       const blob = await deps.blobTransfer.open(blobId);
       if (!blob) throw new Error(`blob ${blobId} not found`);
       return buffer(blob.stream);
+    },
+
+    pendingContextRequests() {
+      return deps.app.pendingContextRequests(surface);
+    },
+
+    onContextRequest(listener) {
+      return deps.app.onContextRequestCreated((request) => {
+        if (request.source === surface) listener(request);
+      });
+    },
+
+    async fulfillContextRequest(id, outcome) {
+      await deps.app
+        .fulfillContextRequest(id, outcome)
+        .catch(swallowAs(`${surface}-core-client: fulfill context request`, undefined));
     },
 
     async readFileArtifact(artifactId, viewerId) {

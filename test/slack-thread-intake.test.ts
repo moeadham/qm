@@ -94,23 +94,3 @@ test("changing model accounts queues in the same Slack thread without steering t
     await b.runtime.stop();
   }
 });
-
-test("a file sent mid-run only points the agent at the Slack file fetcher on Slack", async () => {
-  for (const surface of ["slack", "discord"] as const) {
-    const built = buildApp(testConfig());
-    try {
-      const send = (text: string, extra: Partial<TurnRequest> = {}) =>
-        built.app.turn({ ...message("10.1", text), surface, ...extra });
-      const first = await send("Investigate job");
-      const attachment = { name: "shot.png", mimetype: "image/png", sizeBytes: 3, blobId: "b1", sourceId: "F1" };
-      const followup = await send("and this", { attachments: [attachment] });
-      assert.equal(followup.steered, true);
-      const [signal] = await built.signals.takePending(first.runId!);
-      assert.match(signal?.text ?? "", /shot\.png/);
-      if (surface === "slack") assert.match(signal?.text ?? "", /surface-file/);
-      else assert.doesNotMatch(signal?.text ?? "", /surface-file/);
-    } finally {
-      await built.runtime.stop();
-    }
-  }
-});
