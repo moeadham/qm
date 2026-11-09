@@ -40,7 +40,11 @@ export function beginOAuthFlow(deps: ServerDeps, secret: string | undefined, sta
   return sealOAuthState(state, { secret: oauthStateSecret(deps, secret) });
 }
 
-export async function resumeOAuthFlow(deps: ServerDeps, secret: string | undefined, param: string): Promise<OAuthState> {
+export async function resumeOAuthFlow(
+  deps: ServerDeps,
+  secret: string | undefined,
+  param: string,
+): Promise<OAuthState> {
   const state =
     (deps.oauthFlows ? await deps.oauthFlows.finish(param) : null) ??
     (await openOAuthState(param, { secret: oauthStateSecret(deps, secret), maxAgeMs: OAUTH_STATE_MAX_AGE_MS }));
