@@ -203,7 +203,6 @@ export interface Config {
   reachExecEnabled: boolean;
   surfaceDebugFooter: boolean;
   eagerProvisionEnabled: boolean;
-  eagerProvisionDuringCheck: boolean;
   awsSandbox: AwsSandboxEnv;
   localSandbox: LocalSandboxEnv;
   spritesSandbox: SpritesSandboxEnv;
@@ -1685,7 +1684,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reachExecEnabled: boolEnvStrict("REACH_EXEC", env.REACH_EXEC) ?? false,
     surfaceDebugFooter: boolEnvStrict("SURFACE_DEBUG_FOOTER", env.SURFACE_DEBUG_FOOTER) ?? false,
     eagerProvisionEnabled: boolEnvStrict("EAGER_PROVISION", env.EAGER_PROVISION) ?? true,
-    eagerProvisionDuringCheck: boolEnvStrict("EAGER_PROVISION_DURING_CHECK", env.EAGER_PROVISION_DURING_CHECK) ?? false,
     awsSandbox: awsSandboxEnv(env),
     localSandbox: localSandboxEnv(env),
     spritesSandbox: spritesSandboxEnv(env),

@@ -2457,7 +2457,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           );
           const detectStart = Date.now();
           const earlyWake =
-            deps.eagerProvisionDuringCheck && input.origin.kind === "ambient" && input.origin.live === true
+            deps.eagerProvision && input.origin.kind === "ambient" && input.origin.live === true
               ? wakeComputerEarly(filterHistory(forModelContext(contextWindow))).catch(
                   swallowAs("orchestrator: wake computer during detection", undefined),
                 )

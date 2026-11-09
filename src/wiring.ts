@@ -2185,7 +2185,6 @@ export function buildApp(
     ...(config.reachExecEnabled ? { reachExec: true } : {}),
     ...(config.surfaceDebugFooter ? { surfaceDebugFooter: true } : {}),
     ...(config.eagerProvisionEnabled ? { eagerProvision: true } : {}),
-    ...(config.eagerProvisionEnabled && config.eagerProvisionDuringCheck ? { eagerProvisionDuringCheck: true } : {}),
     ...(config.discordTrustServerMembers
       ? {
           trustedChatRoom: async (surface: string, channelRef: string) =>
