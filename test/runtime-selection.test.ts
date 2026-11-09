@@ -239,3 +239,33 @@ test("runtime availability preserves the existing harness normalization of inher
   assert.equal(resolved.modelId, choice.modelId);
   assert.equal(resolved.effortLevel, undefined);
 });
+
+test("a model saved under its ChatGPT-login id stays available on the org's own ChatGPT login", async () => {
+  const config = createMemoryConfigStore("default-org");
+  config.setApprovedHarnesses(["pi"]);
+  config.setWebuiModels(ORG, ["gpt-6-astra"]);
+  await config.flushScope(ORG);
+  const ctx = {
+    deps: {
+      config,
+      harnessId: "pi",
+      providerKeys: { anthropic: false, openai: false, openrouter: false, codexOAuth: true },
+    },
+  };
+  assert.equal(await availableRuntimeError(ctx, PERSONAL, { harnessId: "pi", modelId: "codex/gpt-6-astra" }), null);
+  assert.equal(await availableRuntimeError(ctx, PERSONAL, { harnessId: "pi", modelId: "gpt-6-astra" }), null);
+
+  const apiKeyOnly = {
+    deps: {
+      config,
+      harnessId: "pi",
+      providerKeys: { anthropic: false, openai: true, openrouter: false, codexOAuth: false },
+    },
+  };
+  assert.equal(await availableRuntimeError(apiKeyOnly, PERSONAL, { harnessId: "pi", modelId: "gpt-6-astra" }), null);
+  assert.match(
+    (await availableRuntimeError(apiKeyOnly, PERSONAL, { harnessId: "pi", modelId: "codex/gpt-6-astra" }))!,
+    /no longer available/,
+    "without an org ChatGPT login a ChatGPT-login model still falls back",
+  );
+});

@@ -67,6 +67,19 @@ test("web approvals remain on their native surface", async () => {
   assert.equal((await deliveries.pending("principal")).length, 0);
 });
 
+test("Discord approvals deliver a native request to the requester like Slack approvals", async () => {
+  const deliveries = createDeliveryStore();
+  const approvals = createApprovalStore(createMemoryMap<PendingApprovalRecord>(), deliveries);
+  const approval = record("discord:dm:D1");
+  approval.request!.surface = "discord";
+  approval.request!.actor.externalId = "alice@example.com";
+  await approvals.put("A1", approval);
+  const [delivery] = await deliveries.pending("principal");
+  assert.equal(delivery?.destination.commandApprovalId, "A1");
+  assert.equal(delivery?.destination.target, "alice@example.com");
+  assert.equal(delivery?.destination.threadTs, undefined);
+});
+
 test("system approvals stay pending without enqueuing or reviving an impossible Slack DM", async () => {
   const backing = createMemoryMap<PendingApprovalRecord>();
   const deliveries = createDeliveryStore({ maxAgeMs: 0 });

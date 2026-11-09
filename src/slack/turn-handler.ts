@@ -7,7 +7,7 @@ import {
 import type { SlackRateLimitNotice } from "./rate-limit-notice.ts";
 import type { SlackHistoryReader } from "./history.ts";
 import { performance } from "node:perf_hooks";
-import { slackFailureText } from "./turn-flow.ts";
+import { turnFailureText } from "../surfaces/turn-flow.ts";
 import { errMessage, reportFailure, reportFailureAs, swallowAs } from "../util/errors.ts";
 import {
   type ActorAssertion,
@@ -65,7 +65,7 @@ import type { GatewayContext, TurnResult } from "../types.ts";
 import type { AckGate } from "./deferred-ack.ts";
 import type { AckPresenter } from "./presenters.ts";
 import type { SlackCoreClient } from "../api/slack-core-client.ts";
-import type { CoreTurnBody, TurnFlow } from "./turn-flow.ts";
+import type { CoreTurnBody, TurnFlow } from "../surfaces/turn-flow.ts";
 import type { BotIdentity, Directory } from "./directory.ts";
 import type { Mirror } from "./mirror.ts";
 import type { ConversationSerializer } from "./conversation-view.ts";
@@ -190,7 +190,7 @@ export function createTurnHandler(deps: {
           ).messages ?? []);
       const present = threadHasBotStake(messages, ids.botUserId, ids.ownBotId);
       threads.mark(channel, threadTs, present);
-      return present;
+      return threads.get(channel, threadTs) === true;
     } catch {
       return false;
     }
@@ -620,7 +620,7 @@ export function createTurnHandler(deps: {
         );
       } else {
         console.error(`[slack-plugin] turn errored ch=${inc.channel} ts=${inc.ts}: ${errMessage(err)}`);
-        const note = `⚠️ ${slackFailureText(err)}`;
+        const note = `⚠️ ${turnFailureText(err)}`;
         if (ack?.postedAck()) await postReply(note);
         else await ephemeralOrSay(note);
       }

@@ -61,8 +61,29 @@ export interface PersistedEgressPolicy {
 }
 export type ModelAccount = "company" | "personal" | "anthropic" | "openai";
 
-export interface PersistedModelAccount extends PersistedScopedFlag {
+export const INDIVIDUAL_MODEL_AUTH_MODES = ["org-only", "optional", "required"] as const;
+export type IndividualModelAuthMode = (typeof INDIVIDUAL_MODEL_AUTH_MODES)[number];
+
+export interface PersistedModelAccount {
+  scopeId: ScopeId;
+  on?: boolean;
   provider?: "anthropic" | "openai";
+  mode?: IndividualModelAuthMode;
+}
+
+function individualModelAuthMode(row: PersistedModelAccount | null | undefined): IndividualModelAuthMode {
+  return row?.mode ?? "optional";
+}
+
+async function migrateIndividualModelAuthMode(
+  store: DurableMap<PersistedModelAccount>,
+  org: ScopeId,
+): Promise<PersistedModelAccount | null> {
+  const row = await store.get(org);
+  if (!row || row.mode) return row ?? null;
+  const migrated = { scopeId: org, mode: row.on ? ("required" as const) : ("optional" as const) };
+  await store.put(org, migrated);
+  return migrated;
 }
 
 export interface PersistedScopedFlag {
@@ -238,11 +259,12 @@ export interface ScopedConfigStore {
   getInteractiveFastMode(): boolean;
   setInteractiveFastMode(on: boolean): void;
   getInteractiveFastModeDurable(): Promise<boolean>;
-  getIndividualModelAuth(): boolean;
-  setIndividualModelAuth(on: boolean): void;
-  getIndividualModelAuthDurable(principalId?: string): Promise<boolean>;
+  getIndividualModelAuthMode(): IndividualModelAuthMode;
+  setIndividualModelAuthMode(mode: IndividualModelAuthMode): void;
+  getIndividualModelAuthModeDurable(): Promise<IndividualModelAuthMode>;
+  getIndividualModelAuthDurable(principalId: string): Promise<boolean>;
   setPersonalModelAuth(principalId: string, on: boolean, provider?: "anthropic" | "openai"): Promise<void>;
-  getModelAccountDurable(principalId: string): Promise<ModelAccount>;
+  getModelAccountDurable(principalId: string, requested?: ModelAccount): Promise<ModelAccount>;
   getBaseModelOwnDurable(id: ScopeId): Promise<string | null>;
   getWebuiModels(id: ScopeId): string[] | null;
   setWebuiModels(id: ScopeId, ids: string[] | null): void;
@@ -329,7 +351,7 @@ export function createMemoryConfigStore(
   let internalMemberOverrides: string[] = [];
   let orgAmbient = true;
   let interactiveFastMode = false;
-  let individualModelAuth = false;
+  let individualModelAuthModeCache: IndividualModelAuthMode = "optional";
   const webuiModels = new Map<ScopeId, string[]>();
   const peopleDirectoryUrls = new Map<ScopeId, string>();
   const ackEmoji = new Map<ScopeId, string[]>();
@@ -563,7 +585,9 @@ export function createMemoryConfigStore(
           internalMemberOverrides = (await internalMemberOverridesStore.get(org))?.members ?? [];
           orgAmbient = (await orgAmbientStore.get(org))?.on ?? true;
           interactiveFastMode = (await interactiveFastModeStore.get(org))?.on ?? false;
-          individualModelAuth = (await individualModelAuthStore.get(org))?.on ?? false;
+          individualModelAuthModeCache = individualModelAuthMode(
+            await migrateIndividualModelAuthMode(individualModelAuthStore, org),
+          );
           for (const r of await webuiModelStore.all()) webuiModels.set(r.scopeId, r.ids);
           for (const r of await peopleDirectoryUrlStore.all()) peopleDirectoryUrls.set(r.scopeId, r.url);
           for (const r of await ackEmojiStore.all()) ackEmoji.set(r.scopeId, r.names);
@@ -1004,23 +1028,27 @@ export function createMemoryConfigStore(
       );
     },
     getInteractiveFastModeDurable: async () => (await interactiveFastModeStore.get(org))?.on ?? false,
-    getIndividualModelAuth: () => individualModelAuth,
-    setIndividualModelAuth(on) {
-      individualModelAuth = on;
-      persist(`individualModelAuth:${org}`, "individual model auth switch", () =>
-        individualModelAuthStore.put(org, { scopeId: org, on }),
+    getIndividualModelAuthMode: () => individualModelAuthModeCache,
+    setIndividualModelAuthMode(mode) {
+      individualModelAuthModeCache = mode;
+      persist(`individualModelAuth:${org}`, "individual model auth mode", () =>
+        individualModelAuthStore.put(org, { scopeId: org, mode }),
       );
     },
+    getIndividualModelAuthModeDurable: async () =>
+      individualModelAuthMode(await migrateIndividualModelAuthMode(individualModelAuthStore, org)),
     async getIndividualModelAuthDurable(principalId) {
-      if ((await individualModelAuthStore.get(org))?.on) return true;
-      return principalId
-        ? ((await individualModelAuthStore.get(scopeId("personal", principalId)))?.on ?? false)
-        : false;
+      const mode = individualModelAuthMode(await migrateIndividualModelAuthMode(individualModelAuthStore, org));
+      if (mode !== "optional") return mode === "required";
+      return (await individualModelAuthStore.get(scopeId("personal", principalId)))?.on ?? false;
     },
-    async getModelAccountDurable(principalId) {
+    async getModelAccountDurable(principalId, requested) {
+      const mode = individualModelAuthMode(await migrateIndividualModelAuthMode(individualModelAuthStore, org));
+      if (mode === "org-only") return "company";
+      if (requested) return requested;
       const row = await individualModelAuthStore.get(scopeId("personal", principalId));
       if (row?.on) return row.provider ?? "personal";
-      return (await individualModelAuthStore.get(org))?.on ? "personal" : "company";
+      return mode === "required" ? "personal" : "company";
     },
     async setPersonalModelAuth(principalId, on, provider) {
       const id = scopeId("personal", principalId);
@@ -1241,7 +1269,7 @@ export function createMemoryConfigStore(
         brandingStore.get(id),
         id === org ? orgAmbientStore.get(org) : null,
         id === org ? interactiveFastModeStore.get(org) : null,
-        id === org ? individualModelAuthStore.get(org) : null,
+        id === org ? migrateIndividualModelAuthMode(individualModelAuthStore, org) : null,
         channelHeaderPinStore.get(id),
         id === org ? autoFlaggerStore.get(org) : null,
         id === org ? internalMemberOverridesStore.get(org) : null,
@@ -1286,7 +1314,7 @@ export function createMemoryConfigStore(
       if (id === org) internalMemberOverrides = internalOverridesRow?.members ?? [];
       if (id === org) orgAmbient = orgAmbientRow?.on ?? true;
       if (id === org) interactiveFastMode = interactiveFastModeRow?.on ?? false;
-      if (id === org) individualModelAuth = individualModelAuthRow?.on ?? false;
+      if (id === org) individualModelAuthModeCache = individualModelAuthMode(individualModelAuthRow);
       if (id === org)
         autoFlaggerConfig = autoFlaggerRow
           ? { harnessId: autoFlaggerRow.harnessId, modelId: autoFlaggerRow.modelId, rubric: autoFlaggerRow.rubric }

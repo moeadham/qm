@@ -58,7 +58,7 @@ async function membershipDenial(
       status: 403,
       error: "identity_unverified",
       message:
-        "I can't confirm your membership here — your account isn't in this workspace's directory, so your login may not be linked to Slack (or it hasn't synced yet). Connecting / signing in with Slack should link it.",
+        "I can't confirm your membership here — your account isn't in this workspace's directory, so your login may not be linked to your chat account yet (or it hasn't synced). Linking your chat account should fix it.",
     };
   }
   return {

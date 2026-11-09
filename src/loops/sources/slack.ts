@@ -4,7 +4,7 @@ import { normalizeSlackApiUrl } from "../../slack/config.ts";
 import { SLACK_POST_SPLIT_LIMIT } from "../../slack/delivery.ts";
 import { neutralizeMentions, wireMentionKeys } from "../../slack/mrkdwn.ts";
 import { agentDraftsOf } from "../item-ledger.ts";
-import { safeChunks } from "../../slack/safe-cut.ts";
+import { safeChunks } from "../../surfaces/safe-cut.ts";
 import { applyReactions, normalizeReaction } from "../../slack/reactions.ts";
 import { slackErrorCode } from "../../slack/payloads.ts";
 import { errMessage } from "../../util/errors.ts";

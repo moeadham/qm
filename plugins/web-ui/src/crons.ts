@@ -170,7 +170,7 @@ function cronTitle(c: CronView): string {
 function cronScopeLabel(c: CronView): string {
   const sep = c.ownerScopeId.indexOf(":");
   const kind = sep === -1 ? c.ownerScopeId : c.ownerScopeId.slice(0, sep);
-  if (kind === "channel") return c.scopeName ? `#${c.scopeName}` : "a Slack channel";
+  if (kind === "channel") return c.scopeName ? `#${c.scopeName}` : "a channel";
   if (kind === "org") return "org-wide";
   if (kind === "group") return "group";
   return c.owner;

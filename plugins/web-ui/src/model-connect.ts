@@ -66,9 +66,9 @@ interface DevicePrompt {
 }
 
 export interface StatusResponse {
+  mode: "org-only" | "optional" | "required";
   account: "company" | "personal" | "anthropic" | "openai";
   individualModelAuth: boolean;
-  required: boolean;
   connections: { provider: "anthropic" | "openai"; kind: ConnKind; needsReconnect?: boolean }[];
 }
 
@@ -158,7 +158,7 @@ function current(state: State, revision = state.revision): boolean {
 }
 
 function applyStatus(status: StatusResponse): void {
-  s.required = status.required === true;
+  s.required = status.mode === "required";
   s.personal = status.individualModelAuth === true;
   s.account = status.account;
   s.connections = {};

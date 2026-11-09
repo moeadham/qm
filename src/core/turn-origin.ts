@@ -108,6 +108,10 @@ export function isPersonAuthored(kind: TurnOrigin["kind"]): boolean {
   return kind === "human" || kind === "direct";
 }
 
+export function isLiveSpeaker(origin: TurnOrigin): boolean {
+  return origin.kind === "human" || (origin.kind === "ambient" && origin.live === true);
+}
+
 export function isSessionTurn(input: Pick<TurnRequest, "sessionSenderId" | "delegatingRunId">): boolean {
   return !!input.sessionSenderId || !!input.delegatingRunId;
 }

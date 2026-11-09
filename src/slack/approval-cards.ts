@@ -1,5 +1,6 @@
 import { clip, inlineCode } from "./util.ts";
 import { parseDeliveryTarget } from "./delivery.ts";
+import { approvalReplayTurn } from "../core/approval-store.ts";
 
 export const APPROVAL_ACTION_IDS = ["hilo_allow_once", "hilo_allow_session", "hilo_allow_always", "hilo_deny"] as const;
 export type ApprovalActionId = (typeof APPROVAL_ACTION_IDS)[number];
@@ -126,17 +127,7 @@ export function recoveredApprovalContext(
   if (!req || typeof req.actor?.externalId !== "string" || typeof req.text !== "string") return null;
   const kind = req.conversation?.kind;
   if (kind !== "dm" && kind !== "channel" && kind !== "group") return null;
-  const {
-    surface: _surface,
-    async: _async,
-    idempotencyKey: _idempotencyKey,
-    redeliveryKey: _redeliveryKey,
-    approval: _approval,
-    relayInput: _relayInput,
-    intakePreambleMs: _intakePreambleMs,
-    clientSentAt: _clientSentAt,
-    ...turn
-  } = req;
+  const turn = approvalReplayTurn(req);
   const origin =
     typeof req.deliveryTarget === "string" && req.deliveryTarget
       ? parseDeliveryTarget(req.deliveryTarget)

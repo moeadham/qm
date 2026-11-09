@@ -793,6 +793,28 @@ async function handleSelfConnect(res: ServerResponse, o: { provider: string; ses
   }
 }
 
+async function handleDiscordConnect(
+  res: ServerResponse,
+  o: { session: SessionClaims; ticket: string | null },
+): Promise<void> {
+  const qs = o.ticket ? `?${new URLSearchParams({ t: o.ticket }).toString()}` : "";
+  const path = withSourceAuthNonce(`/v1/discord-link/start${qs}`, CORE_SIGNING_SECRET);
+  try {
+    const r = await fetch(`${CORE}${path}`, {
+      headers: { ...signedHeaders(CORE_SIGNING_SECRET, "GET", path), ...portalIdentityHeaders(o.session.sub) },
+    });
+    const data = (await r.json().catch(() => ({}))) as { authorizeUrl?: string; message?: string };
+    if (data.authorizeUrl) {
+      res.writeHead(302, { location: data.authorizeUrl, "cache-control": "no-store" });
+      return void res.end();
+    }
+    return sendHtml(res, 200, connectErrorHtml(data.message ?? "We couldn't start linking your Discord account."));
+  } catch (error) {
+    console.warn(`[portal] discord connect start failed: ${errMessage(error)}`);
+    return sendHtml(res, 502, connectErrorHtml("We couldn't reach QM. Please try again in a moment."));
+  }
+}
+
 async function coreImpersonate(
   action: "start" | "stop",
   admin: string,
@@ -1209,6 +1231,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       corePath: `/v1/connectors/oauth/consent/redeem/${redeem[1]}${url.search}`,
       session,
     });
+  }
+  if (method === "GET" && pathname === "/connect/discord") {
+    if (!session) return consentBounce();
+    if (session.anon) return sendHtml(res, 403, playgroundRestrictedHtml());
+    return handleDiscordConnect(res, { session, ticket: url.searchParams.get("t") });
+  }
+  if (method === "GET" && pathname === "/v1/discord-link/callback") {
+    if (!session) return consentBounce();
+    if (session.anon) return sendHtml(res, 403, playgroundRestrictedHtml());
+    return proxyToUpstream(
+      req,
+      res,
+      { baseUrl: CORE, path: pathname, search: url.search },
+      FORWARD_OAUTH_HEADERS,
+      portalIdentityHeaders(session.sub),
+    );
   }
   const selfConnect = /^\/connect\/([^/]+)\/self-connect$/.exec(pathname);
   if (method === "GET" && selfConnect) {

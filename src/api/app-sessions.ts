@@ -86,6 +86,7 @@ export function createSessionMethods(
   | "membershipControlsScope"
   | "authorizesCapabilityScope"
   | "updateSession"
+  | "writableSession"
   | "detachSession"
   | "cancelSessionGoal"
   | "regenerateTitle"
@@ -883,6 +884,11 @@ export function createSessionMethods(
 
     async authorizesCapabilityScope(claims) {
       return authorizesCapabilityScope(claims);
+    },
+
+    async writableSession(sessionId, principalId) {
+      const session = await sessionForViewer(sessionId, principalId);
+      return session && (await mayWriteSession(principalId, session)) ? session : null;
     },
 
     async updateSession(sessionId, principalId, patch) {

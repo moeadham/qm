@@ -1,6 +1,6 @@
 import { memoryContextPayload } from "../memory/context-boundary.ts";
 import { createHash } from "node:crypto";
-import type { EntryType, ScopeId, Session, SessionEntry, SessionType, SpawnMeta } from "../types.ts";
+import type { EntryType, ScopeId, Session, SessionEntry, SessionRuntime, SessionType, SpawnMeta } from "../types.ts";
 import { sleep } from "../util/async.ts";
 import type { GoalRecord } from "../harness/goal.ts";
 
@@ -569,6 +569,7 @@ export interface SessionStore {
   updateTitle(sessionId: string, title: string): Promise<void>;
   setParentSession(sessionId: string, parentSessionId: string | null): Promise<void>;
   setSpawnMeta(sessionId: string, meta: SpawnMeta): Promise<void>;
+  setRuntime(sessionId: string, runtime: SessionRuntime | null): Promise<void>;
   childrenOf(parentSessionId: string): Promise<Session[]>;
   updateForkProvenance(
     sessionId: string,

@@ -9,7 +9,13 @@ import { scopeId } from "../types.ts";
 import { rosterAdmits } from "../resolution/scope-membership.ts";
 import { isHalt, routeWake, type Wake } from "../wake/wake.ts";
 import type { OrchestratorInput } from "../core/orchestrator.ts";
-import { desktopClientForTurn, isPersonAuthored, isSessionTurn, resolveTurnOrigin } from "../core/turn-origin.ts";
+import {
+  desktopClientForTurn,
+  isLiveSpeaker,
+  isPersonAuthored,
+  isSessionTurn,
+  resolveTurnOrigin,
+} from "../core/turn-origin.ts";
 import { conversationScope } from "../resolution/resolution-service.ts";
 import { isTerminal, leaseLapsed } from "../runs/run-store.ts";
 import type { SessionStateEvent } from "../runs/session-state-bus.ts";
@@ -208,7 +214,7 @@ export function createTurnMethods(
       const modelAccount =
         !req.externalSlack &&
         deps.userModelCredentials &&
-        ((origin.kind === "human" && !sessionTurn) || (origin.kind === "automation" && origin.useOwnerModelAuth))
+        ((isLiveSpeaker(origin) && !sessionTurn) || (origin.kind === "automation" && origin.useOwnerModelAuth))
           ? await deps.config.getModelAccountDurable(actor.id)
           : "company";
       const individualAuth = modelAccount !== "company";
@@ -411,6 +417,7 @@ export function createTurnMethods(
         ...(preserveRuntime && requestedHarness ? { harness: requestedHarness } : {}),
         ...(preserveRuntime && requestedModel ? { model: requestedModel } : {}),
         ...turnModelOptions(req),
+        ...(req.surface === "web" && typeof req.pinRuntime === "boolean" ? { pinRuntime: req.pinRuntime } : {}),
         ...(req.readOnly ? { readOnly: true } : {}),
         ...(privateRequest
           ? {
@@ -918,11 +925,10 @@ export function createTurnMethods(
       if (signal.kind === "steer") {
         const principal = viewer ?? signal.request?.actor.externalId ?? run.request.actor.id;
         const account = principal ? await deps.config.getModelAccountDurable(principal) : undefined;
-        if (
-          !account ||
-          run.request.modelAccount !== account ||
-          (account !== "company" && run.request.actor.id !== principal)
-        ) {
+        const runAccount =
+          run.request.modelAccount &&
+          (await deps.config.getModelAccountDurable(run.request.actor.id, run.request.modelAccount));
+        if (!account || runAccount !== account || (account !== "company" && run.request.actor.id !== principal)) {
           return { accepted: false, reason: "account_changed: send a new message to use your selected AI account" };
         }
       }

@@ -1,0 +1,20 @@
+qm-discord-account {
+  display: block;
+}
+
+.discord-account-notice {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin: 0 0 12px;
+}
+
+.settings-discord-account:has(> qm-discord-account[hidden]) {
+  display: none;
+}
+.settings-discord-account qm-discord-account {
+  width: 100%;
+}
+.settings-discord-account .slack-connected,
+.settings-discord-account .welcome-slack {
+  margin-bottom: 0;
+}

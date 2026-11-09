@@ -1,5 +1,6 @@
 import "./onboarding-welcome";
 import "./slack-account";
+import "./discord-account";
 import { openModelConnectManager, type StatusResponse } from "./model-connect";
 import {
   alwaysSteer,
@@ -467,7 +468,8 @@ async function chooseAiAccount(account: "company" | "personal"): Promise<void> {
   drawSettings();
 }
 
-function aiAccountsRow(): TemplateResult {
+function aiAccountsRow(): TemplateResult | typeof nothing {
+  if (aiStatus?.mode === "org-only") return nothing;
   return html`
     <div class="settings-row">
       <div class="settings-row-copy">
@@ -488,7 +490,7 @@ function aiAccountsRow(): TemplateResult {
                 type="button"
                 class="settings-choice-option ${aiStatus?.account === value ? "selected" : ""}"
                 aria-pressed=${aiStatus?.account === value}
-                ?disabled=${aiBusy || aiSaving || !aiStatus || (value === "company" && aiStatus.required)}
+                ?disabled=${aiBusy || aiSaving || !aiStatus || (value === "company" && aiStatus.mode === "required")}
                 @click=${() => void chooseAiAccount(value)}
               >
                 ${label}
@@ -559,6 +561,9 @@ function settingsPane(): TemplateResult {
       ${sidebarSurfaceRow()} ${can("admin") ? adminRow() : nothing} ${desktopRow()} ${accountRow()}
       <div class="settings-row settings-slack-account">
         <qm-slack-account .user=${`${appState.me?.org}:${appState.me?.user}`}></qm-slack-account>
+      </div>
+      <div class="settings-row settings-discord-account">
+        <qm-discord-account></qm-discord-account>
       </div>
       <div class="settings-row">
         <qm-onboarding-welcome

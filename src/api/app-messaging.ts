@@ -20,7 +20,7 @@ import { pickMatch, type DirectoryMember } from "../directory/directory-store.ts
 import { externalMemberActive } from "../identity/external-members.ts";
 import { hasRevisionEvents, recordMessageRevisions } from "../core/message-revisions.ts";
 import { answerWebContextRequest } from "./web-context.ts";
-import { availableRuntimeError, validateRuntimeChoice } from "./runtime-config.ts";
+import { availableRuntime, validateRuntimeChoice } from "./runtime-config.ts";
 import { assertCronRuntime } from "../cron/runtime.ts";
 import type { Cron } from "../types.ts";
 import { validateUserSchedule } from "../cron/schedule.ts";
@@ -161,24 +161,25 @@ export function createMessagingMethods(
     cron: Pick<Cron, "runtime" | "ownerScopeId" | "loopId" | "action" | "message" | "owner">,
   ) => {
     assertCronRuntime(cron);
-    if (!cron.runtime) return;
-    const error =
-      validateRuntimeChoice(cron.runtime) ??
-      (await availableRuntimeError(
-        { deps },
-        cron.ownerScopeId,
-        cron.runtime,
-        "cron",
-        actsAsScope(cron.owner, cron.ownerScopeId) ? undefined : cron.owner,
-      ));
-    if (error) throw new Error(error);
+    if (!cron.runtime) return cron.runtime;
+    const invalid = validateRuntimeChoice(cron.runtime);
+    if (invalid) throw new Error(invalid);
+    const available = await availableRuntime(
+      { deps },
+      cron.ownerScopeId,
+      cron.runtime,
+      "cron",
+      actsAsScope(cron.owner, cron.ownerScopeId) ? undefined : cron.owner,
+    );
+    if ("error" in available) throw new Error(available.error);
+    return available.choice;
   };
 
   return {
     async createCron(input) {
-      await validateRuntime(input);
+      const runtime = await validateRuntime(input);
       validateUserSchedule(input.schedule);
-      const cron = await deps.crons.create(input);
+      const cron = await deps.crons.create(runtime ? { ...input, runtime } : input);
       deps.auditLog.record({
         at: Date.now(),
         principalId: cron.createdBy,
@@ -219,7 +220,8 @@ export function createMessagingMethods(
     async updateCron(id, patch) {
       const before = await deps.crons.get(id);
       if (!before) return null;
-      if (patch.runtime !== undefined) await validateRuntime({ ...before, ...patch });
+      if (patch.runtime) patch = { ...patch, runtime: await validateRuntime({ ...before, ...patch }) };
+      else if (patch.runtime !== undefined) await validateRuntime({ ...before, ...patch });
       if (patch.schedule) validateUserSchedule(patch.schedule);
       const grantsReaffirmed = patch.unattendedGrants !== undefined;
       const guardedPatch =
@@ -267,8 +269,8 @@ export function createMessagingMethods(
     async setCronRuntime(id, runtime) {
       const before = await deps.crons.get(id);
       if (!before) return null;
-      await validateRuntime({ ...before, runtime });
-      return deps.crons.update(id, { runtime });
+      const stored = runtime ? await validateRuntime({ ...before, runtime }) : runtime;
+      return deps.crons.update(id, { runtime: stored });
     },
     async setCronDestination(id, destination) {
       const before = await deps.crons.get(id);

@@ -126,7 +126,9 @@ export function createThreadTracker(opts: { negativeTtlMs?: number } = {}): Thre
       return cache.get(keyOf(channel, threadTs));
     },
     mark(channel, threadTs, present) {
-      cache.set(keyOf(channel, threadTs), present, present ? undefined : { ttl: negativeTtlMs });
+      const key = keyOf(channel, threadTs);
+      if (!present && cache.get(key) === true) return;
+      cache.set(key, present, present ? undefined : { ttl: negativeTtlMs });
     },
   };
 }
@@ -205,21 +207,6 @@ export function isBareStop(text: string, botHandle = ""): boolean {
   const afterTag = tag && trimmed.startsWith(tag) ? trimmed.slice(tag.length) : undefined;
   const rest = afterTag !== undefined && /^\s/.test(afterTag) ? afterTag : trimmed;
   return /^stop[.!]?$/i.test(rest.trim());
-}
-
-export function createInFlightThreadMap(): {
-  set(threadRef: string, runId: string): void;
-  get(threadRef: string): string | undefined;
-  clear(threadRef: string, runId: string): void;
-} {
-  const byThread = new Map<string, string>();
-  return {
-    set: (threadRef, runId) => byThread.set(threadRef, runId),
-    get: (threadRef) => byThread.get(threadRef),
-    clear: (threadRef, runId) => {
-      if (byThread.get(threadRef) === runId) byThread.delete(threadRef);
-    },
-  };
 }
 
 export async function maybeInterceptStop(opts: {

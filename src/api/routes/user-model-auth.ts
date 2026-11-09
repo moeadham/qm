@@ -24,11 +24,11 @@ function connectProvider(raw: unknown): ModelProvider | null {
 async function getStatus(ctx: ApiCtx): Promise<void> {
   const principal = caller(ctx);
   if (!principal) return sendJson(ctx.res, 401, { error: "unauthorized" });
-  const required = (await ctx.deps.config?.getIndividualModelAuthDurable()) ?? false;
+  const mode = (await ctx.deps.config?.getIndividualModelAuthModeDurable()) ?? "optional";
   const connections = (await ctx.deps.userModelCredentials?.connections(principal)) ?? [];
   const individualModelAuth = (await ctx.deps.config?.getIndividualModelAuthDurable(principal)) ?? false;
   const account = (await ctx.deps.config?.getModelAccountDurable(principal)) ?? "company";
-  return sendJson(ctx.res, 200, { individualModelAuth, required, account, connections });
+  return sendJson(ctx.res, 200, { mode, individualModelAuth, account, connections });
 }
 
 async function setAccount(ctx: ApiCtx): Promise<void> {
@@ -37,7 +37,7 @@ async function setAccount(ctx: ApiCtx): Promise<void> {
   if (!ctx.deps.config || !ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
   const account = bodyObj(ctx).account;
   if (account !== "personal" && account !== "company") return sendJson(ctx.res, 400, { error: "bad_request" });
-  if (account === "company" && (await ctx.deps.config.getIndividualModelAuthDurable())) {
+  if (account === "company" && (await ctx.deps.config.getIndividualModelAuthModeDurable()) === "required") {
     return sendJson(ctx.res, 403, { error: "Your organization requires a personal AI account." });
   }
   if (account === "personal" && !(await ctx.deps.userModelCredentials.connections(principal)).length) {
@@ -164,13 +164,44 @@ async function claudeComplete(ctx: ApiCtx): Promise<void> {
   }
 }
 
+function personalAccountsAllowed(handle: (ctx: ApiCtx) => Promise<void>): (ctx: ApiCtx) => Promise<void> {
+  return async (ctx) => {
+    if ((await ctx.deps.config?.getIndividualModelAuthModeDurable()) === "org-only")
+      return sendJson(ctx.res, 403, {
+        error: "personal_accounts_disabled",
+        message: "Your organization runs QM on its own AI accounts.",
+      });
+    return handle(ctx);
+  };
+}
+
 export const userModelAuthRoutes: ReadonlyArray<Route<ApiCtx>> = [
-  { method: "POST", path: "/v1/user-model-auth/account", auth: "source", handle: setAccount },
+  { method: "POST", path: "/v1/user-model-auth/account", auth: "source", handle: personalAccountsAllowed(setAccount) },
   { method: "GET", path: "/v1/user-model-auth/status", auth: "source", handle: getStatus },
-  { method: "POST", path: "/v1/user-model-auth/api-key", auth: "source", handle: putApiKey },
+  { method: "POST", path: "/v1/user-model-auth/api-key", auth: "source", handle: personalAccountsAllowed(putApiKey) },
   { method: "POST", path: "/v1/user-model-auth/disconnect", auth: "source", handle: disconnect },
-  { method: "POST", path: "/v1/user-model-auth/chatgpt/start", auth: "source", handle: chatgptStart },
-  { method: "POST", path: "/v1/user-model-auth/chatgpt/poll", auth: "source", handle: chatgptPoll },
-  { method: "POST", path: "/v1/user-model-auth/claude/start", auth: "source", handle: claudeStart },
-  { method: "POST", path: "/v1/user-model-auth/claude/complete", auth: "source", handle: claudeComplete },
+  {
+    method: "POST",
+    path: "/v1/user-model-auth/chatgpt/start",
+    auth: "source",
+    handle: personalAccountsAllowed(chatgptStart),
+  },
+  {
+    method: "POST",
+    path: "/v1/user-model-auth/chatgpt/poll",
+    auth: "source",
+    handle: personalAccountsAllowed(chatgptPoll),
+  },
+  {
+    method: "POST",
+    path: "/v1/user-model-auth/claude/start",
+    auth: "source",
+    handle: personalAccountsAllowed(claudeStart),
+  },
+  {
+    method: "POST",
+    path: "/v1/user-model-auth/claude/complete",
+    auth: "source",
+    handle: personalAccountsAllowed(claudeComplete),
+  },
 ];

@@ -115,6 +115,7 @@ export interface ServerDeps {
   slackEnvBotToken?: string;
   oauthStateSecret?: string;
   oauthFetch?: FetchLike;
+  discordApiUrl?: string;
   oauthEnv?: NodeJS.ProcessEnv;
   resolveClient?: OAuthClientResolver;
   consentLinks?: ConsentLinkStore;

@@ -249,7 +249,7 @@ test("an autonomous turn's token cannot act as an admin, even when its actor hol
       body: JSON.stringify({ facts: [{ id: "1", text: "planted by a 3am cron" }] }),
     });
     assert.equal(write.status, 403);
-    assert.match(((await write.json()) as any).message, /turn the admin started themselves/);
+    assert.match(((await write.json()) as any).message, /send QM a direct message/);
     assert.doesNotMatch(await s.built.memory.read(ORG), /planted/);
   } finally {
     await s.close();

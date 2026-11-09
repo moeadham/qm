@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { App as BoltApp, Receiver } from "@slack/bolt";
 import type { SlackInstallationStore } from "./slack-installation.ts";
-import type { EnvelopeStaging } from "../slack/envelope-staging.ts";
+import type { EnvelopeStaging } from "../surfaces/envelope-staging.ts";
 import {
   createDeferredEnvelopeAck,
   describeEnvelope,

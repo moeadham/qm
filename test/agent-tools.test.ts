@@ -4519,3 +4519,16 @@ test("installing a shared sidebar always waits for the person's approval", async
   const plain = createAgentTools(ref).find((t) => t.name === "files")!;
   assert.doesNotMatch(JSON.stringify(plain.parameters), /install_canvas/);
 });
+
+test("the Discord tool only offers what Discord can do; Slack keeps group DMs and search as the person", () => {
+  const tool = (surfaceName: string) =>
+    createAgentTools({ current: fakeToolContext() }, { surfaceTools: true, surfaceName }).find(
+      (t) => t.name === surfaceName,
+    )!;
+  const params = (surfaceName: string) =>
+    Object.keys((tool(surfaceName).parameters as { properties: Record<string, unknown> }).properties);
+  assert.ok(params("slack").includes("participants"));
+  assert.ok(params("slack").includes("source"));
+  assert.ok(!params("discord").includes("participants"));
+  assert.ok(!params("discord").includes("source"));
+});

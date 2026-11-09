@@ -6,6 +6,7 @@ import { loopIngressRoutes, loopIngressRawRoutes } from "./loop-ingress.ts";
 import { sendJson } from "../http.ts";
 import { type ApiCtx, type BaseCtx, type Route } from "./route.ts";
 import { connectorRawRoutes, connectorRoutes } from "./connectors.ts";
+import { discordLinkRawRoutes, discordLinkRoutes } from "./discord-link.ts";
 import { deploymentRawRoutes, deploymentRoutes } from "./deployments.ts";
 import { blobRoutes } from "./blobs.ts";
 import { sessionStateRawRoutes } from "./session-state.ts";
@@ -73,6 +74,7 @@ export const rawRoutes: ReadonlyArray<Route<BaseCtx>> = [
   { method: "GET", path: "/v1/spend/export", auth: "public", handle: spendExport },
   { match: (_m, p) => p.startsWith(GIT_HTTP_BROKER_PREFIX), auth: { aud: "credential-broker" }, handle: brokerGitHttp },
   ...connectorRawRoutes,
+  ...discordLinkRawRoutes,
   ...deploymentRawRoutes,
   ...blobRoutes,
   ...sessionStateRawRoutes,
@@ -94,6 +96,7 @@ export const apiRoutes: ReadonlyArray<Route<ApiCtx>> = [
   ...keychainRoutes,
   ...secretDropRoutes,
   ...connectorRoutes,
+  ...discordLinkRoutes,
   ...composioRoutes,
   ...adminRoutes,
   ...skillPackRoutes,

@@ -59,8 +59,8 @@ test("AI account modal interactions", async (t) => {
     connections: { provider: string; kind: string; needsReconnect?: boolean }[] = [],
   ) => ({
     account,
+    mode: "optional",
     individualModelAuth: account !== "company",
-    required: false,
     connections,
   });
   const pendingDevice = {
@@ -581,6 +581,19 @@ test("AI account modal interactions", async (t) => {
     assert.equal(choice("Company").disabled, false);
     assert.equal(choice("Personal accounts").getAttribute("aria-pressed"), "true");
     assert.equal(manage().disabled, false);
+    appState.currentView = "chats";
+    appState.mainEl = null;
+  });
+
+  await t.test("settings shows no AI access choice when the org runs only on its own accounts", async () => {
+    const { renderSettings } = await vite.ssrLoadModule("/src/settings.ts");
+    fetcher = async () => Response.json({ ...status("company"), mode: "org-only" });
+    appState.currentView = "settings";
+    appState.mainEl = doc.querySelector("#app");
+    renderSettings();
+    await tick();
+    assert.equal(doc.querySelector('[aria-label="AI access"]'), null);
+    assert.equal(doc.querySelector(".settings-ai-controls"), null);
     appState.currentView = "chats";
     appState.mainEl = null;
   });

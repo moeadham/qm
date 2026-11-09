@@ -1,8 +1,17 @@
-import { resolveMentions } from "./mrkdwn.ts";
-export { resolveMentions } from "./mrkdwn.ts";
-import { encodeTs, summarizeReactions, type ReactionTally } from "./reactions.ts";
+import { encodeTs, summarizeReactions, type ReactionTally } from "../slack/reactions.ts";
+import { isDiscordSnowflake, messageTimeMs } from "../util/message-tag.ts";
 import { utcMinute } from "../util/time.ts";
-import { MAX_ATTACHMENTS_PER_TURN } from "./attachments.ts";
+import { MAX_ATTACHMENTS_PER_TURN } from "../slack/attachments.ts";
+
+const MENTION = /<@([A-Z0-9]+)(?:\|[^>]*)?>/g;
+
+export function resolveMentions(text: string, nameById: ReadonlyMap<string, string> | undefined): string {
+  if (!nameById || !text.includes("<@")) return text;
+  return text.replace(MENTION, (m, id) => {
+    const name = nameById.get(id);
+    return name ? `@${name}` : m;
+  });
+}
 
 export interface ContextWireMessage {
   ts: string;
@@ -155,9 +164,12 @@ const clipMessage = (t: string, max: number = MAX_RECENT_MESSAGE_CHARS): string 
 };
 
 export function formatSlackTs(ts: string): string {
-  const sec = Number(ts);
-  if (!Number.isFinite(sec) || sec <= 0) return "";
-  return utcMinute(sec * 1000);
+  const ms = messageTimeMs(ts);
+  return ms === undefined ? "" : utcMinute(ms);
+}
+
+export function messageRef(ts: string): string {
+  return isDiscordSnowflake(ts) ? ts : encodeTs(ts);
 }
 
 function messageTurnText(
@@ -165,7 +177,7 @@ function messageTurnText(
   isReply: boolean,
   nameById: ReadonlyMap<string, string> | undefined,
 ): string {
-  const id = encodeTs(m.ts);
+  const id = messageRef(m.ts);
   const idTag = id ? `[${id}] ` : "";
   const replyTag = isReply ? "(reply) " : "";
   const body = clipMessage(resolveMentions(m.text ?? "", nameById), MAX_TURN_MESSAGE_CHARS);

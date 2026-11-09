@@ -779,3 +779,21 @@ test("mention, DM and thread dispatch preserve bot identity and presentation nam
     assert.equal(f.dispatches[0][1].botAuthored, true, path);
   }
 });
+
+test("a thread gaining a stake while its history is being read is treated as followed", async () => {
+  const threads = createThreadTracker();
+  let release!: (v: { raw: unknown[] }) => void;
+  const readHistory = () => new Promise<{ raw: unknown[] }>((r) => (release = r));
+  const handler = createTurnHandler({
+    directory: {},
+    mirror: {},
+    flow: {},
+    ids: { botUserId: "UBOT", ownBotId: "BBOT" },
+    threads,
+    readHistory,
+  } as any);
+  const pending = handler.botHasStakeInThread({}, "C9", "9.000001");
+  threads.mark("C9", "9.000001", true);
+  release({ raw: [] });
+  assert.equal(await pending, true);
+});

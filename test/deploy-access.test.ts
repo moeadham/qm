@@ -13,12 +13,8 @@ import { createIdentityService } from "../src/identity/identity-service.ts";
 import { createMemorySessionStore } from "../src/sessions/memory-session-store.ts";
 import { createDeliveryStore } from "../src/delivery/delivery-store.ts";
 import { createControlService } from "../src/api/control-service.ts";
-import {
-  decideDeploymentAccess,
-  deployAccessMessage,
-  parseDeployAccess,
-  registerDeployAccessActions,
-} from "../src/slack/deploy-access.ts";
+import { deployAccessMessage, parseDeployAccess, registerDeployAccessActions } from "../src/slack/deploy-access.ts";
+import { decideDeploymentAccess, type DeploymentAccessRequest } from "../src/surfaces/deploy-access.ts";
 import type { CapabilityClaims } from "../src/auth/capability-token.ts";
 import { scopeId, type ActorAssertion, type Permission } from "../src/types.ts";
 
@@ -90,7 +86,7 @@ async function fixture(t: { after(fn: () => void): void }) {
     value,
     auditLog,
     decide: (id = owner, approve = true, extra: Partial<ActorAssertion> = {}) =>
-      decideDeploymentAccess(app, identity, value, { externalId: id, ...extra }, approve),
+      decideDeploymentAccess(app, identity, parseDeployAccess(value), { externalId: id, ...extra }, approve),
   };
 }
 
@@ -171,7 +167,10 @@ test("tampering the deployment ID cannot authorize another owner's app", async (
   const other = await f.app.deploy(publishInput(requester, "other"));
   const value = JSON.stringify({ ...request, deploymentId: other.id });
   for (const approve of [true, false])
-    await assert.rejects(decideDeploymentAccess(f.app, f.identity, value, { externalId: owner }, approve), /owner/);
+    await assert.rejects(
+      decideDeploymentAccess(f.app, f.identity, parseDeployAccess(value), { externalId: owner }, approve),
+      /owner/,
+    );
 });
 
 test("decline only notifies and leaves access unchanged; duplicate clicks dedupe", async (t) => {
@@ -218,8 +217,8 @@ test("button dispatch classifies the clicker, settles the card, and keeps failed
     {
       directory: { classifyActor: async (_c: unknown, id: string) => ({ externalId: id }) } as never,
       core: {
-        decideDeploymentAccess: (value: string, actor: ActorAssertion, approve: boolean) =>
-          decideDeploymentAccess(f.app, f.identity, value, actor, approve),
+        decideDeploymentAccess: (request: DeploymentAccessRequest, actor: ActorAssertion, approve: boolean) =>
+          decideDeploymentAccess(f.app, f.identity, request, actor, approve),
       } as never,
     },
   );

@@ -17,8 +17,8 @@ import {
   dedupeKey,
   isBareStop,
   maybeInterceptStop,
-  createInFlightThreadMap,
 } from "../src/slack/lib.ts";
+import { createInFlightThreadMap } from "../src/surfaces/turn-flow.ts";
 
 test("shouldProcessMessage allows file_share and thread_broadcast but drops other subtypes and the bot's own", () => {
   assert.equal(shouldProcessMessage({ subtype: "file_share", user: "U1" }, "BOT"), true);
@@ -121,6 +121,13 @@ test("createThreadTracker caches participation and never time-expires a positive
   t.mark("C", "3", true);
   assert.equal(t.get("C", "1"), true);
   assert.equal(t.get("C", "3"), true);
+});
+
+test("createThreadTracker: a history scan that finishes late doesn't undo a stake gained meanwhile", () => {
+  const t = createThreadTracker();
+  t.mark("C", "1", true);
+  t.mark("C", "1", false);
+  assert.equal(t.get("C", "1"), true);
 });
 
 test("createThreadTracker expires a NEGATIVE entry after its TTL (the bot can gain a stake later, e.g. a cron delivery)", async () => {

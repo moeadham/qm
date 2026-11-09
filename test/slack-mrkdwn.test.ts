@@ -11,6 +11,7 @@ import {
   setMentionIndex,
   inlineCode,
 } from "../src/slack/lib.ts";
+import { alignMarkdownTables } from "../src/slack/mrkdwn.ts";
 
 test("inlineCode clamps long text and neutralizes backticks", () => {
   const clamped = inlineCode("`echo hi`" + "y".repeat(60000));
@@ -273,4 +274,39 @@ test("a label-less wire mention is disarmed to the person's name when the direct
   } finally {
     setMentionIndex(new Map());
   }
+});
+
+test("alignMarkdownTables splits cells like GitHub does: escaped pipes stay, lone backticks are text", () => {
+  assert.equal(
+    alignMarkdownTables("| cmd | desc |\n|---|---|\n| `x \\| y` | pipe |\n| it`s | `z` |"),
+    "```\ncmd     | desc\n--------+-----\n`x | y` | pipe\nit`s    | `z`\n```",
+  );
+});
+
+test("alignMarkdownTables only holds back tables after a code fence that opens a line", () => {
+  assert.equal(
+    alignMarkdownTables("Wrap in ``` fences\n| a | b |\n|---|---|\n| 1 | 2 |"),
+    "Wrap in ``` fences\n```\na | b\n--+--\n1 | 2\n```",
+  );
+  assert.equal(alignMarkdownTables("| a | b |\n|---|---|\n| x | ```y |"), "```\na | b\n--+-----\nx | ```y\n```");
+  const tilde = "~~~\n| a | b |\n|---|---|";
+  assert.equal(alignMarkdownTables(tilde), tilde);
+});
+
+test("toSlackMrkdwn: inline code in a table cell is shown, not a placeholder", () => {
+  assert.equal(toSlackMrkdwn("| `a` | b |\n|---|---|\n| `x` | 2 |"), "```\n`a` | b\n----+--\n`x` | 2\n```");
+});
+
+test("alignMarkdownTables leaves a table inside a code block that hasn't closed yet alone", () => {
+  const partial = "Here:\n```\na | b\n--|--\n1 | 2";
+  assert.equal(alignMarkdownTables(partial), partial);
+});
+
+test("alignMarkdownTables treats an unpaired backtick in a cell as a literal", () => {
+  assert.equal(alignMarkdownTables("| word | n |\n|---|---|\n| it`s | 2 |"), "```\nword | n\n-----+--\nit`s | 2\n```");
+});
+
+test("toSlackMrkdwn: a stray ``` doesn't stop mass mentions being neutralized or text being formatted after it", () => {
+  const out = toSlackMrkdwn("Wrap code in ``` fences. **Bold** and [link](https://x.com) <!channel>");
+  assert.equal(out, "Wrap code in ``` fences. *Bold* and <https://x.com|link> @\u200bchannel");
 });
