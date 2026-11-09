@@ -190,7 +190,7 @@ export function createTurnHandler(deps: {
           ).messages ?? []);
       const present = threadHasBotStake(messages, ids.botUserId, ids.ownBotId);
       threads.mark(channel, threadTs, present);
-      return present;
+      return threads.get(channel, threadTs) === true;
     } catch {
       return false;
     }
