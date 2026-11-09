@@ -3,6 +3,7 @@ import { verifyPortalIdentity, PORTAL_IDENTITY_HEADER } from "../../auth/portal-
 import { codeChallengeS256, generateCodeVerifier } from "../../connectors/oauth.ts";
 import { createEnvSecretSource } from "../../credentials/secret-source.ts";
 import { canonicalPerson, foldPrincipalId, samePerson } from "../../directory/person.ts";
+import { reportFailure } from "../../util/errors.ts";
 import { PrincipalLinkError } from "../../identity/principal-links.ts";
 import {
   DISCORD_LINK_CALLBACK_PATH,
@@ -13,7 +14,6 @@ import {
   verifiedDiscordUser,
   unlinkDiscordAccount,
   verifyDiscordLinkTicket,
-  type DiscordFetch,
   type DiscordOAuthClient,
 } from "../../identity/discord-link.ts";
 import type { ServerDeps } from "../deps.ts";
@@ -33,11 +33,6 @@ function callbackUrl(deps: ServerDeps): string | null {
   return base ? `${base}${DISCORD_LINK_CALLBACK_PATH}` : null;
 }
 
-function discordFetch(deps: ServerDeps): DiscordFetch {
-  const injected = deps.oauthFetch;
-  return injected ? (url, init) => injected(url, { ...init, body: init.body ?? "" }) : (url, init) => fetch(url, init);
-}
-
 function signedInPrincipal(ctx: ApiCtx): string | null {
   if (!ctx.actor || ctx.actor.imp || ctx.capability) {
     sendJson(ctx.res, 403, { error: "forbidden", message: "Sign in to QM as yourself to manage your Discord link." });
@@ -55,6 +50,11 @@ async function browserPrincipal(ctx: BaseCtx): Promise<string | null> {
 
 function finish(res: BaseCtx["res"], status: string): void {
   return sendRedirect(res, `/settings?${new URLSearchParams({ discord: status }).toString()}`);
+}
+
+function failed(res: BaseCtx["res"], cause: unknown): void {
+  reportFailure("discord link callback", cause);
+  return finish(res, "failed");
 }
 
 async function discordLinkStatus(ctx: ApiCtx): Promise<void> {
@@ -126,18 +126,24 @@ async function discordLinkCallback(ctx: BaseCtx): Promise<void> {
   const stateParam = url.searchParams.get("state") ?? "";
   const links = deps.principalLinks;
   const client = await discordClient(deps);
-  if (!code || !stateParam || !links || !client) return finish(res, "failed");
+  if (!code || !stateParam) return finish(res, "failed");
+  if (!links || !client) return failed(res, new Error("Discord linking is not configured"));
   try {
     const state = await resumeOAuthFlow(deps, secret, stateParam);
     if (state.provider !== DISCORD_LINK_PROVIDER || state.orgId !== configOrgId() || !state.codeVerifier)
-      return finish(res, "failed");
+      return failed(
+        res,
+        new Error(
+          `OAuth state is not a Discord link flow for this org (provider=${state.provider} org=${state.orgId} pkce=${Boolean(state.codeVerifier)})`,
+        ),
+      );
     if (!samePerson(await browserPrincipal(ctx), state.principalId)) return finish(res, "wrong_session");
     const user = await verifiedDiscordUser({
       client,
       code,
       redirectUri: state.redirectUri,
       codeVerifier: state.codeVerifier,
-      fetchImpl: discordFetch(deps),
+      apiUrl: deps.discordApiUrl,
     });
     if (state.subject && state.subject !== user.id) return finish(res, "wrong_account");
     if (!(await activePrincipal(deps, state.principalId))) return finish(res, "inactive");
@@ -164,8 +170,8 @@ async function discordLinkCallback(ctx: BaseCtx): Promise<void> {
       scopeLabel: state.principalId,
     });
     return finish(res, "connected");
-  } catch {
-    return finish(res, "failed");
+  } catch (error) {
+    return failed(res, error);
   }
 }
 

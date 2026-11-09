@@ -1,16 +1,16 @@
 import "./support/auto-fake-sprites.ts";
 
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createServer } from "../src/api/server.ts";
 import { buildApp, type BuiltApp } from "../src/wiring.ts";
 import { signRequest } from "../src/auth/source-auth.ts";
 import { mintSignedPayload } from "../src/auth/signed-token.ts";
-import type { FetchLike } from "../src/connectors/oauth.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { mintDiscordLinkTicket } from "../src/identity/discord-link.ts";
 import { orgId } from "../src/config.ts";
@@ -22,15 +22,26 @@ const CASEY = "casey@acme.test";
 const DISCORD_A = "111111111111111111";
 const DISCORD_B = "222222222222222222";
 
-function discordApi(userId: () => string): FetchLike {
-  return async (url) => {
-    if (url.endsWith("/oauth2/token"))
-      return { ok: true, status: 200, json: async () => ({ access_token: "discord-at" }) };
-    if (url.endsWith("/users/@me"))
-      return { ok: true, status: 200, json: async () => ({ id: userId(), username: "jordo" }) };
-    throw new Error(`unexpected Discord call ${url}`);
-  };
+function fakeDiscord(userId: () => string, tokenStatus: () => number): Server {
+  const server = createHttpServer((req, res) => {
+    const reply = (status: number, body: unknown): void => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    const path = decodeURIComponent(req.url ?? "");
+    if (req.method === "POST" && path === "/v10/oauth2/token")
+      return tokenStatus() === 200
+        ? reply(200, { access_token: "discord-at", token_type: "Bearer", expires_in: 604800, scope: "identify" })
+        : reply(tokenStatus(), { error: "invalid_grant" });
+    if (req.method === "GET" && path === "/v10/users/@me" && req.headers.authorization === "Bearer discord-at")
+      return reply(200, { id: userId(), username: "jordo" });
+    return reply(404, { message: "Unknown route", code: 0 });
+  });
+  server.listen(0);
+  return server;
 }
+
+const urlOf = (server: Server): string => `http://localhost:${(server.address() as AddressInfo).port}`;
 
 async function headers(method: string, path: string, principal?: string): Promise<Record<string, string>> {
   const ts = Math.floor(Date.now() / 1000);
@@ -43,7 +54,11 @@ async function headers(method: string, path: string, principal?: string): Promis
   };
 }
 
-function start(discordUser: () => string): { base: string; built: BuiltApp; close: () => Promise<void> } {
+function start(
+  discordUser: () => string,
+  tokenStatus: () => number = () => 200,
+): { base: string; built: BuiltApp; close: () => Promise<void> } {
+  const discord = fakeDiscord(discordUser, tokenStatus);
   const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "discord-link-")) }));
   const server = createServer(built.app, {
     signingSecret: SECRET,
@@ -54,15 +69,15 @@ function start(discordUser: () => string): { base: string; built: BuiltApp; clos
     principalLinks: built.principalLinks,
     portalUrl: "https://qm.example.test",
     oauthEnv: { DISCORD_APPLICATION_ID: "app-1", DISCORD_CLIENT_SECRET: "app-secret" } as NodeJS.ProcessEnv,
-    oauthFetch: discordApi(discordUser),
+    discordApiUrl: urlOf(discord),
   });
   server.listen(0);
-  const base = `http://localhost:${(server.address() as AddressInfo).port}`;
   return {
-    base,
+    base: urlOf(server),
     built,
     close: async () => {
       await new Promise<void>((r) => server.close(() => r()));
+      await new Promise<void>((r) => discord.close(() => r()));
       installPrincipalLinks(null);
     },
   };
@@ -201,6 +216,22 @@ test("a QM user keeps one Discord account until they unlink it", async () => {
     assert.match((await linkAs(srv, JORDAN)).location ?? "", /^\/settings\?discord=already_linked/);
     assert.equal(srv.built.identity.classify(`discord:${DISCORD_B}`).type, "guest");
   } finally {
+    await srv.close();
+  }
+});
+
+test("a rejected Discord code fails the link and reports why", async () => {
+  const srv = start(
+    () => DISCORD_A,
+    () => 400,
+  );
+  const errors = mock.method(console, "error", () => {});
+  try {
+    assert.match((await linkAs(srv, JORDAN)).location ?? "", /^\/settings\?discord=failed/);
+    assert.equal(errors.mock.callCount(), 1);
+    assert.equal(srv.built.identity.classify(`discord:${DISCORD_A}`).type, "guest");
+  } finally {
+    errors.mock.restore();
     await srv.close();
   }
 });

@@ -1,3 +1,5 @@
+import { API } from "@discordjs/core";
+import { REST } from "@discordjs/rest";
 import { mintSignedPayload, verifySignedPayload } from "../auth/signed-token.ts";
 import { DISCORD_PRINCIPAL_PREFIX as ALIAS_PREFIX, personIds } from "../directory/person.ts";
 import type { AuditLog } from "../audit/audit-log.ts";
@@ -5,7 +7,6 @@ import type { PrincipalLink, PrincipalLinkService } from "./principal-links.ts";
 
 const SNOWFLAKE = /^\d{15,22}$/;
 const TICKET_TTL_MS = 30 * 60_000;
-const DISCORD_API = "https://discord.com/api/v10";
 
 export const DISCORD_LINK_PROVIDER = "discord-link";
 export const DISCORD_LINK_CALLBACK_PATH = "/v1/discord-link/callback";
@@ -54,14 +55,19 @@ export async function verifyDiscordLinkTicket(
   return claims.discordId;
 }
 
-export type DiscordFetch = (
-  url: string,
-  init: { method: string; headers: Record<string, string>; body?: string },
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
-
 export interface DiscordOAuthClient {
   id: string;
   secret: string;
+}
+
+function oauthApi(apiUrl?: string): { api: API; rest: REST } {
+  const rest = new REST({
+    authPrefix: "Bearer",
+    hashSweepInterval: 0,
+    handlerSweepInterval: 0,
+    ...(apiUrl ? { api: apiUrl } : {}),
+  });
+  return { api: new API(rest), rest };
 }
 
 export function discordAuthorizeUrl(opts: {
@@ -70,17 +76,17 @@ export function discordAuthorizeUrl(opts: {
   state: string;
   codeChallenge: string;
 }): string {
-  const q = new URLSearchParams({
+  const query = {
     client_id: opts.client.id,
     redirect_uri: opts.redirectUri,
-    response_type: "code",
+    response_type: "code" as const,
     scope: "identify",
     state: opts.state,
-    prompt: "consent",
+    prompt: "consent" as const,
     code_challenge: opts.codeChallenge,
     code_challenge_method: "S256",
-  });
-  return `https://discord.com/oauth2/authorize?${q.toString()}`;
+  };
+  return oauthApi().api.oauth2.generateAuthorizationURL(query);
 }
 
 export async function verifiedDiscordUser(opts: {
@@ -88,33 +94,22 @@ export async function verifiedDiscordUser(opts: {
   code: string;
   redirectUri: string;
   codeVerifier: string;
-  fetchImpl: DiscordFetch;
+  apiUrl?: string;
 }): Promise<{ id: string; username: string }> {
-  const tokenRes = await opts.fetchImpl(`${DISCORD_API}/oauth2/token`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code: opts.code,
-      redirect_uri: opts.redirectUri,
-      client_id: opts.client.id,
-      client_secret: opts.client.secret,
-      code_verifier: opts.codeVerifier,
-    }).toString(),
-  });
-  if (!tokenRes.ok) throw new Error(`Discord token exchange failed (${tokenRes.status})`);
-  const token = (await tokenRes.json()) as { access_token?: unknown };
-  if (typeof token.access_token !== "string" || !token.access_token)
-    throw new Error("Discord token exchange returned no access token");
-  const userRes = await opts.fetchImpl(`${DISCORD_API}/users/@me`, {
-    method: "GET",
-    headers: { authorization: `Bearer ${token.access_token}` },
-  });
-  if (!userRes.ok) throw new Error(`Discord user lookup failed (${userRes.status})`);
-  const user = (await userRes.json()) as { id?: unknown; username?: unknown; bot?: unknown };
-  if (typeof user.id !== "string" || !SNOWFLAKE.test(user.id) || user.bot === true)
-    throw new Error("Discord returned an unusable user");
-  return { id: user.id, username: typeof user.username === "string" ? user.username : user.id };
+  const { api, rest } = oauthApi(opts.apiUrl);
+  const exchange = {
+    grant_type: "authorization_code" as const,
+    code: opts.code,
+    redirect_uri: opts.redirectUri,
+    client_id: opts.client.id,
+    client_secret: opts.client.secret,
+    code_verifier: opts.codeVerifier,
+  };
+  const token = await api.oauth2.tokenExchange(exchange);
+  rest.setToken(token.access_token);
+  const user = await api.users.getCurrent();
+  if (!SNOWFLAKE.test(user.id) || user.bot === true) throw new Error("Discord returned an unusable user");
+  return { id: user.id, username: user.username };
 }
 
 export async function unlinkDiscordAccount(
