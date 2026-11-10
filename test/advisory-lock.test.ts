@@ -13,6 +13,11 @@ import {
 const URL = process.env.DATABASE_URL;
 const skip = URL ? false : "set DATABASE_URL (a Postgres) to run the advisory-lock tests";
 
+const overlappingQueryWarnings: string[] = [];
+process.on("warning", (w) => {
+  if (w.message.includes("already executing a query")) overlappingQueryWarnings.push(w.message);
+});
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 test("no-op mutex: withLock runs fn and returns its value (single-instance dev/test path)", async () => {
@@ -391,4 +396,19 @@ test("multi-key locks retain unawaited nested work until it finishes", async () 
   release.resolve();
   await outer;
   assert.equal(await lock.tryWithLock!("nested", async () => true), true);
+});
+
+test("pg nested locks taken concurrently never overlap queries on the shared session", { skip }, async () => {
+  const pg = createPgPool(URL!);
+  try {
+    const lock = createPostgresAdvisoryLock(pg);
+    const out = await lock.withLock("overlap:parent", () =>
+      Promise.all(["overlap:a", "overlap:b", "overlap:c"].map((k) => lock.withLock(k, async () => k))),
+    );
+    assert.deepEqual(out, ["overlap:a", "overlap:b", "overlap:c"]);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(overlappingQueryWarnings, []);
+  } finally {
+    await pg.close();
+  }
 });

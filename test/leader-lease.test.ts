@@ -6,6 +6,11 @@ import { createPostgresLeaderLease, createNoopLeaderLease } from "../src/persist
 const URL = process.env.DATABASE_URL;
 const skip = URL ? false : "set DATABASE_URL (a Postgres) to run the leader-lease tests";
 
+const overlappingQueryWarnings: string[] = [];
+process.on("warning", (w) => {
+  if (w.message.includes("already executing a query")) overlappingQueryWarnings.push(w.message);
+});
+
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((r) => (resolve = r));
@@ -176,6 +181,24 @@ test(
     } finally {
       await holderPool.close();
       await standbyPool.close();
+    }
+  },
+);
+
+test(
+  "pg lease: loops gating on different keys at once never overlap queries on the lock connection",
+  { skip },
+  async () => {
+    const pg = createPgPool(URL!);
+    try {
+      const lease = createPostgresLeaderLease(pg);
+      const keys = ["spend:refresh", "monitor:retention", "runs:reaper", "cron:scheduler"];
+      const out = await Promise.all(keys.map((k) => lease.hold(k, async () => k)));
+      assert.deepEqual(out, keys);
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(overlappingQueryWarnings, []);
+    } finally {
+      await pg.close();
     }
   },
 );
