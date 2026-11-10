@@ -11,7 +11,6 @@ import { createDirectoryStore } from "../src/directory/directory-store.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { testConfig } from "./support/test-config.ts";
 import { encodeRef, serviceCredRef } from "../src/acl/resource-ref.ts";
-import { isTerminal } from "../src/runs/run-store.ts";
 
 test("a Discord server channel the bot has seen works like a public channel for every linked person", async () => {
   const built = buildApp(testConfig({ harness: "mock", seedSkills: false, discordGuildIds: ["700000000000000001"] }));
@@ -158,14 +157,8 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, an allowed Discord room admits live and
           skipMemory: true,
         });
         const runId = "runId" in result ? result.runId : undefined;
-        const deadline = Date.now() + 3_000;
-        while (Date.now() < deadline) {
-          if (runId) {
-            const run = await built.runs.get(runId);
-            if (run && isTerminal(run.status)) break;
-          } else if (seen.length > before) break;
-          await new Promise((r) => setTimeout(r, 25));
-        }
+        assert.ok(runId, "an asynchronous turn returns its run id");
+        await built.runs.waitFor(runId, 3_000);
         return seen.length > before ? seen.at(-1)! : null;
       };
 
