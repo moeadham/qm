@@ -40,6 +40,12 @@ export interface RunHooks {
   onSurfacePosted?(): void;
   onGoal?(goal: GoalView): void | Promise<void>;
   onSnapshot?(text: string): void;
+  onToolCalls?(calls: ToolCallView[]): void;
+}
+
+export interface ToolCallView {
+  tool: string;
+  args: Record<string, unknown>;
 }
 
 export interface SurfaceCoreClient {
@@ -186,6 +192,24 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
         lastSnapshot = text;
         hooks.onSnapshot(text);
       };
+      let toolCursor: number | undefined;
+      const signalToolCalls = async (): Promise<void> => {
+        if (!hooks.onToolCalls) return;
+        const calls: ToolCallView[] = [];
+        for (const entry of await deps.app.getRunToolEntries(runId, undefined, toolCursor)) {
+          toolCursor = entry.seq;
+          if (entry.type !== "tool_call") continue;
+          const {
+            tool,
+            callId: _callId,
+            step: _step,
+            wire: _wire,
+            ...args
+          } = (entry.payload ?? {}) as Record<string, unknown>;
+          calls.push({ tool: typeof tool === "string" ? tool : "tool", args });
+        }
+        if (calls.length) hooks.onToolCalls(calls);
+      };
       const waiters = terminalWaiters.get(runId) ?? new Set();
       terminalWaiters.set(runId, waiters);
       const unsubscribe = deps.turnStream.subscribe(runId, {
@@ -224,6 +248,7 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
             }
             signalReplying(run.deliveryState?.replying === true);
             signalSnapshot();
+            await signalToolCalls().catch(swallowAs(`${surface}: tool call refresh`, undefined));
             await emitGoal().catch(swallowAs(`${surface}: goal refresh`, undefined));
             const fb = deps.turnStream.firstBlock(runId);
             if (fb?.closed) signalFirstBlock(fb.text);

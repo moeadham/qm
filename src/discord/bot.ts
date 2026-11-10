@@ -20,6 +20,7 @@ import {
   type DiscordMessage,
 } from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
+import type { ToolCallView } from "../surfaces/surface-core-client.ts";
 import { downloadDiscordFile, receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
 import { emojiCharFor } from "../slack/emoji-map.ts";
 import type { ThreadTracker } from "../slack/message-gating.ts";
@@ -55,7 +56,14 @@ const CONTEXT_MESSAGES = 20;
 const THREAD_NAME_LIMIT = 90;
 const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
+const TOOL_ACTIVITY_LINES = 3;
+const TOOL_ARGS_LIMIT = 300;
 const STAKE_SCAN_MESSAGES = 100;
+
+function toolCallLine(call: ToolCallView): string {
+  const args = safeClip(JSON.stringify(call.args), TOOL_ARGS_LIMIT);
+  return `🔧 \`${`${call.tool} ${args}`.replaceAll("`", "ˋ")}\``;
+}
 
 export interface TurnOutcome {
   result?: TurnResult;
@@ -242,28 +250,42 @@ export function createDiscordBot(deps: {
     };
   }
 
-  function createReplyWriter(channelId: string) {
+  function createReplyWriter(channelId: string, onPlaceholder: (messageId: string) => Promise<void>) {
     let placeholder: string | undefined;
     let streaming = true;
     let chain: Promise<void> = Promise.resolve();
+    let reply = "";
+    let activity: string[] = [];
+    const show = (): void => {
+      if (!streaming) return;
+      const status = activity.map((line) => `-# ${line}`).join("\n");
+      const room = DISCORD_MESSAGE_LIMIT - 1 - (status ? status.length + 2 : 0);
+      const body = reply ? safeClip(alignMarkdownTables(reply), room) : "";
+      const shown = [body, status].filter(Boolean).join("\n\n");
+      if (!shown.trim()) return;
+      chain = chain
+        .then(async () => {
+          if (placeholder) return api.edit(channelId, placeholder, shown);
+          const posted = await api.send(channelId, shown);
+          try {
+            await onPlaceholder(posted);
+            placeholder = posted;
+          } catch (error) {
+            streaming = false;
+            await api.remove(channelId, posted).catch(swallowAs("discord: remove unrecorded placeholder", undefined));
+            throw error;
+          }
+        })
+        .catch(swallowAs("discord: stream reply", undefined));
+    };
     return {
-      stream(text: string, onPlaceholder: (messageId: string) => Promise<void>): void {
-        if (!streaming) return;
-        const shown = safeClip(alignMarkdownTables(text), DISCORD_MESSAGE_LIMIT - 1);
-        chain = chain
-          .then(async () => {
-            if (placeholder) return api.edit(channelId, placeholder, shown);
-            const posted = await api.send(channelId, shown);
-            try {
-              await onPlaceholder(posted);
-              placeholder = posted;
-            } catch (error) {
-              streaming = false;
-              await api.remove(channelId, posted).catch(swallowAs("discord: remove unrecorded placeholder", undefined));
-              throw error;
-            }
-          })
-          .catch(swallowAs("discord: stream reply", undefined));
+      stream(text: string): void {
+        reply = text;
+        show();
+      },
+      toolCalls(calls: readonly ToolCallView[]): void {
+        activity = [...activity, ...calls.map(toolCallLine)].slice(-TOOL_ACTIVITY_LINES);
+        show();
       },
       async finish(text: string, key: string): Promise<void> {
         streaming = false;
@@ -407,8 +429,10 @@ export function createDiscordBot(deps: {
     opts: { addressed: boolean; key: string; gate?: AcceptGate; quiet?: boolean },
   ): Promise<TurnOutcome> {
     const { addressed, key, gate, quiet } = opts;
-    const writer = createReplyWriter(channelId);
     let queuedRunId: string | undefined;
+    const writer = createReplyWriter(channelId, async (messageId) => {
+      if (queuedRunId) await core.reportRunEditRef(queuedRunId, messageId);
+    });
     let accepted = false;
     const accept = (): void => {
       accepted = true;
@@ -436,10 +460,9 @@ export function createDiscordBot(deps: {
           onSnapshot: (snapshot) => {
             const text = stripReactionDirectives(snapshot);
             if (!text.trim()) return;
-            writer.stream(text, async (messageId) => {
-              if (queuedRunId) await core.reportRunEditRef(queuedRunId, messageId);
-            });
+            writer.stream(text);
           },
+          onToolCalls: (calls) => writer.toolCalls(calls),
         });
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));

@@ -1,6 +1,6 @@
 import { swallow } from "../util/errors.ts";
 import { sleep } from "../util/async.ts";
-import type { SurfaceCoreClient } from "./surface-core-client.ts";
+import type { SurfaceCoreClient, ToolCallView } from "./surface-core-client.ts";
 import type { GoalView } from "../runs/turn-stream.ts";
 import type { TurnRequest, TurnResult } from "../types.ts";
 import { GENERIC_FAILURE_TEXT } from "../../plugins/chassis/src/failure-copy.ts";
@@ -45,6 +45,7 @@ interface TurnHooks {
   onSurfacePosted?: () => void;
   onGoal?: (goal: GoalView) => void;
   onSnapshot?: (text: string) => void;
+  onToolCalls?: (calls: ToolCallView[]) => void;
 }
 
 export interface TurnFlow {
@@ -135,6 +136,7 @@ export function createTurnFlow(
         ...(hooks.onSurfacePosted ? { onSurfacePosted: hooks.onSurfacePosted } : {}),
         ...(hooks.onGoal ? { onGoal: hooks.onGoal } : {}),
         ...(hooks.onSnapshot ? { onSnapshot: hooks.onSnapshot } : {}),
+        ...(hooks.onToolCalls ? { onToolCalls: hooks.onToolCalls } : {}),
       });
     } catch (err) {
       inFlightRuns.delete(runId);

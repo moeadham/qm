@@ -23,7 +23,7 @@ import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import type { LeaderLease } from "../src/persistence/leader-lease.ts";
 import type { StagedEnvelope } from "../src/surfaces/envelope-staging.ts";
 import type { Delivery, SurfaceContextRequest, SurfaceContextResult, TurnRequest, TurnResult } from "../src/types.ts";
-import type { RunHooks, StoredApprovalView } from "../src/surfaces/surface-core-client.ts";
+import type { RunHooks, StoredApprovalView, ToolCallView } from "../src/surfaces/surface-core-client.ts";
 import type { KeychainApprovalView } from "../src/credentials/keychain-approval.ts";
 import type { RuntimeDeps } from "../src/api/runtime-config.ts";
 import { buildApp } from "../src/wiring.ts";
@@ -239,6 +239,7 @@ function harness(opts: {
   lease?: LeaderLease;
   result?: (body: TurnRequest) => TurnResult;
   snapshots?: string[];
+  toolCalls?: ToolCallView[][];
   replying?: boolean;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
@@ -315,6 +316,10 @@ function harness(opts: {
     },
     async waitRun(runId: string, hooks: RunHooks = {}) {
       if (opts.replying) hooks.onReplying?.();
+      for (const calls of opts.toolCalls ?? []) {
+        hooks.onToolCalls?.(calls);
+        await new Promise((r) => setTimeout(r, 5));
+      }
       for (const s of opts.snapshots ?? []) {
         hooks.onSnapshot?.(s);
         await new Promise((r) => setTimeout(r, 5));
@@ -1332,6 +1337,38 @@ test("a streamed reply posts one placeholder, edits it as text grows, records it
   assert.deepEqual(
     api.edits.map((e) => e.content),
     ["Thinking about it", "Done."],
+  );
+});
+
+test("raw tool calls show in the placeholder under the streamed text until the final reply replaces them", async () => {
+  const h = harness({
+    toolCalls: [
+      [{ tool: "bash", args: { command: "echo `hi`" } }],
+      [
+        { tool: "read", args: { path: "a.ts" } },
+        { tool: "read", args: { path: "b.ts" } },
+        { tool: "read", args: { path: "c.ts" } },
+      ],
+    ],
+    snapshots: ["Found it"],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  const read = (path: string) => `-# 🔧 \`read {"path":"${path}"}\``;
+  assert.equal(api.sent.length, 1);
+  assert.equal(api.sent[0]!.content, '-# 🔧 `bash {"command":"echo ˋhiˋ"}`');
+  assert.deepEqual(h.editRefs, [["run-1", api.sent[0]!.id]]);
+  assert.deepEqual(
+    api.edits.map((e) => e.content),
+    [
+      [read("a.ts"), read("b.ts"), read("c.ts")].join("\n"),
+      `Found it\n\n${[read("a.ts"), read("b.ts"), read("c.ts")].join("\n")}`,
+      "Done.",
+    ],
   );
 });
 
