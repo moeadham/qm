@@ -185,6 +185,7 @@ import {
   deliveryCandidatesFor,
   egressClaimAllowingControlPlane,
   filterConnectorSkills,
+  isScheduledTrustedCredentialRoom,
   isScreenableTextAttachment,
   loadActiveBundles,
   recentPrincipalDeliveryNote,
@@ -557,15 +558,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         (conversation.kind === "dm" ||
           trustedRoom ||
           (!!conversation.publishMembers?.length && conversation.publishMembers.every((p) => p.type === "internal")));
-      const scheduledTrustedRoom =
-        !sessionTurn &&
-        conversation.kind !== "dm" &&
-        !!conversation.channelRef &&
-        input.origin.kind === "automation" &&
-        !!input.origin.destination &&
-        input.origin.destination.audienceScopeId === scopeId &&
-        deps.identity.audienceIsAllInternal(conversation.audience) &&
-        (await deps.trustedChatRoom?.(input.origin.destination.type, conversation.channelRef)) === true;
+      const scheduledTrustedRoom = await isScheduledTrustedCredentialRoom(
+        input,
+        scopeId,
+        deps.identity.audienceIsAllInternal(conversation.audience),
+        deps.trustedChatRoom,
+      );
       const authoredDetection =
         input.origin.kind === "ambient" && input.origin.live === true && conversation.kind !== "dm";
       const delegationEnabled =
