@@ -60,7 +60,7 @@ export interface SurfaceCoreClient {
   claimDeliveries(type: string, claimMs: number): Promise<Delivery[]>;
   ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
   reportSlowDeliveryDrain?(info: { durationMs: number; rows: number }): Promise<void>;
-  reportDeliveryUndeliverable?(id: string, reason: string): Promise<void>;
+  reportDeliveryUndeliverable?(id: string, reason: string, permanent?: boolean): Promise<void>;
   onDeliveryEnqueued(listener: () => void): () => void;
   holdLease<T>(name: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
@@ -289,11 +289,14 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
       await deps.app.ackDelivery(id, body?.slackApiMs);
     },
 
-    async reportDeliveryUndeliverable(id, reason) {
+    async reportDeliveryUndeliverable(id, reason, permanent = false) {
+      if (permanent) await deps.deliveries.expire(id, Date.now(), reason);
       deps.errors?.record({
         category: "delivery",
         code: "delivery_undeliverable",
-        message: `delivery ${id} cannot be delivered (${reason}) — retrying until the TTL expires it`,
+        message: permanent
+          ? `delivery ${id} cannot be delivered (${reason}) — dropped, its target no longer exists`
+          : `delivery ${id} cannot be delivered (${reason}) — retrying until the TTL expires it`,
         scopeLabel: deliveryScope,
       });
     },

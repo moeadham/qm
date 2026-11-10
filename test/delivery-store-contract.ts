@@ -310,6 +310,28 @@ export async function exerciseDeliveryExpiry(makeStore: (opts: { maxAgeMs: numbe
   const delivered = await store.get(lateAck.id);
   assert.notEqual(delivered?.deliveredAt, null, "a post that actually landed wins over the expiry");
   assert.equal(delivered?.expiredAt, undefined, "the expiry mark is cleared once delivered");
+
+  const gone = await store.enqueue({
+    destination: { type: "discord", target: "channel-deleted" },
+    text: "its channel was deleted",
+    idempotencyKey: "expire-gone",
+  });
+  assert.equal((await store.claimPending("discord", 1)).length, 1);
+  await store.expire(gone.id, Date.now(), "discord error 10003");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(await store.claimPending("discord", 60_000), [], "an expired row is never handed out again");
+  const goneRow = await store.get(gone.id);
+  assert.equal(goneRow?.deliveredAt, null, "expiring is not delivering");
+  assert.ok((goneRow?.expiredAt ?? 0) > 0, "the give-up is recorded on the row");
+
+  const landed = await store.enqueue({
+    destination: { type: "discord", target: "channel-live" },
+    text: "already posted",
+    idempotencyKey: "expire-landed",
+  });
+  await store.ack(landed.id, Date.now());
+  await store.expire(landed.id, Date.now(), "discord error 10003");
+  assert.equal((await store.get(landed.id))?.expiredAt, undefined, "a delivered row is never expired");
 }
 
 export async function exerciseDeliveryExpiryRevive(

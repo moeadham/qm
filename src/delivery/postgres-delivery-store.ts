@@ -199,6 +199,17 @@ export function createPostgresDeliveryStore(connectionString: string, opts?: { m
         [id, at, slackApiMs ?? null],
       );
     },
+    async expire(id, at, reason) {
+      const rows = await q(
+        `UPDATE deliveries
+            SET expired_at = $2,
+                claim_expires_at = NULL
+          WHERE id = $1 AND delivered_at IS NULL AND expired_at IS NULL
+          RETURNING *`,
+        [id, at],
+      );
+      for (const r of rows) logDeliveryExpiry(rowToDelivery(r), at, reason);
+    },
     async ackByKey(idempotencyKey, at) {
       await query(
         `INSERT INTO deliveries (id, idempotency_key, destination, text, created_at, delivered_at)

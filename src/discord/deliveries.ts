@@ -23,7 +23,8 @@ import { stripReactionDirectives } from "../slack/reactions.ts";
 
 const CLAIM_MS = 15_000;
 const RUN_RECOVERY_GRACE_MS = 15_000;
-const UNDELIVERABLE_CODES = new Set([10003, 10013, 50001, 50007, 50013, 50035]);
+const TARGET_GONE_CODES = new Set([10003, 10013]);
+const UNDELIVERABLE_CODES = new Set([...TARGET_GONE_CODES, 50001, 50007, 50013, 50035]);
 const MAX_REPORTED = 5_000;
 const UNACTIONABLE_TARGET_CODES = new Set([DISCORD_UNKNOWN_MESSAGE, 10014, 30003, 30010]);
 
@@ -38,11 +39,13 @@ export function createDiscordDeliveryPoller(deps: {
   const claimMs = deps.claimMs ?? CLAIM_MS;
   const reported = new Set<string>();
 
-  const reportUndeliverable = (id: string, reason: string): void => {
+  const reportUndeliverable = (id: string, reason: string, permanent = false): void => {
     if (reported.has(id)) return;
     if (reported.size >= MAX_REPORTED) reported.clear();
     reported.add(id);
-    void core.reportDeliveryUndeliverable?.(id, reason).catch(swallowAs("discord: undeliverable report", undefined));
+    void core
+      .reportDeliveryUndeliverable?.(id, reason, permanent)
+      .catch(swallowAs("discord: undeliverable report", undefined));
   };
 
   async function attempt(d: Delivery, send: () => Promise<{ recipientThreadRef?: string } | void>): Promise<void> {
@@ -51,7 +54,8 @@ export function createDiscordDeliveryPoller(deps: {
       await core.ackDelivery(d.id, body ?? undefined);
     } catch (error) {
       const code = discordErrorCode(error);
-      if (code !== undefined && UNDELIVERABLE_CODES.has(code)) reportUndeliverable(d.id, `discord error ${code}`);
+      if (code !== undefined && UNDELIVERABLE_CODES.has(code))
+        reportUndeliverable(d.id, `discord error ${code}`, TARGET_GONE_CODES.has(code));
       console.error(`[discord] delivery ${d.id} failed:`, errMessage(error));
     }
   }

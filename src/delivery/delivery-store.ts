@@ -47,6 +47,7 @@ export interface DeliveryStore {
   claimPending(type: string, ttlMs: number): Promise<Delivery[]>;
   listShadow(opts?: { limit?: number }): Promise<Delivery[]>;
   ack(id: string, at: number, slackApiMs?: number): Promise<void>;
+  expire(id: string, at: number, reason: string): Promise<void>;
   ackByKey(idempotencyKey: string, at: number): Promise<void>;
   setEditRefByKey(idempotencyKey: string, editRef: string): Promise<void>;
   get(id: string): Promise<Delivery | null>;
@@ -153,6 +154,13 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
         d.deliverLatencyMs = Math.max(0, at - d.createdAt);
         if (slackApiMs !== undefined) d.slackApiMs = slackApiMs;
       }
+    },
+    async expire(id, at, reason) {
+      const d = deliveries.get(id);
+      if (!d || d.deliveredAt !== null || d.expiredAt !== undefined) return;
+      d.expiredAt = at;
+      claimedUntil.delete(id);
+      logDeliveryExpiry(d, at, reason);
     },
     async ackByKey(idempotencyKey, at) {
       const existingId = byKey.get(idempotencyKey);
