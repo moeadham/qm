@@ -67,12 +67,13 @@ test("the Slack directory's answer wins over a Discord record, and deactivated p
   assert.equal(await unknownToSlack.channelMember("600000000000000007", "former@default-org"), false);
 });
 
-test("with DISCORD_TRUST_SERVER_MEMBERS, a live message in an allowed server's thread counts as company-only", async () => {
+test("with DISCORD_TRUST_SERVER_MEMBERS, an allowed Discord room admits live and scheduled org credentials", async () => {
   for (const trusted of [false, true]) {
     const built = buildApp(
       testConfig({
         harness: "mock",
         seedSkills: false,
+        maxAttempts: 1,
         discordGuildIds: ["700000000000000001"],
         ...(trusted ? { discordTrustServerMembers: true } : {}),
       }),
@@ -113,11 +114,35 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, a live message in an allowed server's t
         seen.push({ env: handle.env?.SAFE, companyOnly: "BROWSE_LAB_MODEL" in (handle.env ?? {}) });
         return run(handle, command, opts);
       };
-      const turn = async (channelRef: string, credentials: string[] = [], automated = false) => {
+      const turn = async (
+        channelRef: string,
+        credentials: string[] = [],
+        automated = false,
+        destinationScope?: `channel:${string}`,
+      ) => {
         const before = seen.length;
         await built.app.turn({
-          surface: "discord",
-          ...(automated ? { triggered: true } : { liveActor: true }),
+          surface: automated ? "cron" : "discord",
+          ...(automated
+            ? {
+                origin: {
+                  kind: "automation" as const,
+                  ...(destinationScope
+                    ? {
+                        destination: {
+                          type: "discord",
+                          target: "800000000000000009",
+                          audienceScopeId: destinationScope,
+                        },
+                      }
+                    : {}),
+                },
+              }
+            : {
+                origin: {
+                  kind: "human" as const,
+                },
+              }),
           async: true,
           actor: { externalId: "alice@default-org" },
           conversation: {
@@ -144,8 +169,18 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, a live message in an allowed server's t
       const outside = await turn("600000000000000010");
       assert.equal(outside?.companyOnly, false, "a channel outside the allowed servers never counts");
 
+      const scheduledHome = await turn("600000000000000009", ["safe"], true, "channel:600000000000000009");
+      assert.equal(
+        scheduledHome?.env,
+        trusted ? "SYNTHETIC_safe" : undefined,
+        "a scheduled job gets the org credential only for its trusted Discord home",
+      );
+
       const scheduled = await turn("600000000000000009", ["safe"], true);
-      assert.equal(scheduled?.env, undefined, "a scheduled job in the room never gets the env credential");
+      assert.equal(scheduled?.env, undefined, "a scheduled job without an attested home destination stays denied");
+
+      const scheduledElsewhere = await turn("600000000000000009", ["safe"], true, "channel:600000000000000010");
+      assert.equal(scheduledElsewhere?.env, undefined, "another destination cannot attest the room");
     } finally {
       await built.runtime.stop();
     }
