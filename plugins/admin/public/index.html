@@ -5644,7 +5644,7 @@
       }
       #card-model-accounts .model-account-row {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto auto;
+        grid-template-columns: max-content max-content minmax(0, 1fr);
         gap: 12px;
         align-items: center;
         padding: 8px 0;
@@ -5654,6 +5654,8 @@
       }
       #card-model-accounts .model-account-actions {
         display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
         gap: 8px;
       }
       #card-model-accounts .model-account-flow {

@@ -142,3 +142,45 @@ test("credential save acknowledges its submitted snapshot and retains newer edit
     dom.window.close();
   }
 });
+test("organization subscription logins show their state and walk an admin through the ChatGPT device code", async () => {
+  const dom = setup();
+  try {
+    dom.window.eval(`window.calls = [];
+      settingsUI.configureModelAccounts({
+        api: async (method, path, body) => {
+          window.calls.push(method + " " + path);
+          if (path === "/api/model-accounts")
+            return { ok: true, data: { connections: [{ provider: "anthropic", kind: "oauth", needsReconnect: true }] } };
+          if (path === "/api/model-accounts/chatgpt/start")
+            return { ok: true, data: { deviceAuthId: "d1", userCode: "ABCD-1234", verificationUrl: "https://auth.openai.com/codex/device", intervalMs: 60000, expiresAt: Date.now() + 600000 } };
+          return { ok: false, data: { message: "unexpected" } };
+        },
+      })`);
+    await dom.window.eval("settingsUI.loadModelAccounts()");
+    const card = dom.window.document.getElementById("card-model-accounts")!;
+    assert.equal(card.classList.contains("hidden"), false);
+    const rows = [...card.querySelectorAll(".model-account-row")].map((row) =>
+      [...row.querySelectorAll(".model-account-name, .badge, button")].map((el) => el.textContent!.trim()),
+    );
+    assert.deepEqual(rows, [
+      ["Claude", "Needs reconnect", "Reconnect", "Disconnect"],
+      ["ChatGPT / Codex", "Not connected", "Connect"],
+    ]);
+    const connect = [...card.querySelectorAll("button")].find((b) => b.textContent!.trim() === "Connect")!;
+    connect.click();
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+    assert.equal(card.querySelector(".model-account-code")!.textContent, "ABCD-1234");
+    assert.equal(
+      card.querySelector<HTMLAnchorElement>(".model-account-flow a")!.href,
+      "https://auth.openai.com/codex/device",
+    );
+    assert.equal(
+      dom.window.eval('window.calls.join("|")'),
+      "GET /api/model-accounts|POST /api/model-accounts/chatgpt/start",
+    );
+    [...card.querySelectorAll("button")].find((b) => b.textContent!.trim() === "Cancel")!.click();
+    assert.equal(card.querySelector(".model-account-flow"), null);
+  } finally {
+    dom.window.close();
+  }
+});
