@@ -1,4 +1,5 @@
 import "./support/auto-fake-sprites.ts";
+import { MessageType } from "@discordjs/core";
 import { test } from "node:test";
 import { WebSocketServer, type WebSocket } from "ws";
 import assert from "node:assert/strict";
@@ -522,7 +523,7 @@ test("a Discord thread rename does not become an ambient turn", async () => {
   const { handlers, plugin } = await boot(h, api);
   handlers.onMessage({
     ...dm(ALICE, "CI", "800000000000000020"),
-    type: 4,
+    type: MessageType.ChannelNameChange,
     channel_id: thread,
     guild_id: GUILD,
   });

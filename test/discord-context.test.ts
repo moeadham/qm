@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { MessageType } from "@discordjs/core";
 import { createDiscordContextFulfiller } from "../src/discord/context.ts";
 import type { DiscordMessage } from "../src/discord/api.ts";
 import type { SurfaceContextQuery, SurfaceContextResult } from "../src/types.ts";
@@ -91,5 +92,18 @@ test("requests Discord can't serve get a clear answer instead of a timeout", asy
   assert.match(
     (await ask({ conversationTarget: "thread-1", file: { ts: "900000000000000099" } })).error ?? "",
     /Discord read failed/,
+  );
+});
+
+test("reading the conversation leaves out Discord system events like a thread rename", async () => {
+  const { ask } = setup([
+    msg("900000000000000001", "can you check CI"),
+    msg("900000000000000002", "CI", { type: MessageType.ChannelNameChange }),
+    msg("900000000000000003", "thanks", { type: MessageType.Reply }),
+  ]);
+  const out = await ask({ conversationTarget: "thread-1", count: 10 });
+  assert.deepEqual(
+    (out.result!.messages as Array<{ text: string }>).map((m) => m.text),
+    ["can you check CI", "thanks"],
   );
 });

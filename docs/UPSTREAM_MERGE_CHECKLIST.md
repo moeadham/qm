@@ -401,8 +401,9 @@ Source landmarks: `357a3abc`, `4059977c`, `2ccc729d`, `47ef91dc`, `6dc464f5`,
       token as intermittent authentication.
 - [ ] Marketing Discord delivery uses a transport accepted by Discord and can
       decode both plain and `deflate-raw` QM capability payloads.
-- [ ] Discord system events such as thread renames never become human turns or
-      steer an active run; ordinary messages and replies remain accepted.
+- [ ] Discord system events such as thread renames never become human turns,
+      steer an active run, or appear in thread history reads; ordinary messages
+      and replies remain accepted.
 - [ ] Skills, grants, scoped sandbox defaults, and email secrets survive the
       deployment. A source/image upgrade must not silently replace database
       configuration.

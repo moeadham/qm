@@ -1,7 +1,14 @@
 import { buildContextWindow, type RecentMessage } from "../surfaces/conversation.ts";
 import type { SurfaceContextRequest } from "../types.ts";
 import { errMessage } from "../util/errors.ts";
-import { discordDisplayName, messageAttachments, messageText, type DiscordApi, type DiscordMessage } from "./api.ts";
+import {
+  discordDisplayName,
+  isConversationMessage,
+  messageAttachments,
+  messageText,
+  type DiscordApi,
+  type DiscordMessage,
+} from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import { receiveDiscordFiles } from "./files.ts";
 
@@ -85,7 +92,7 @@ export function createDiscordContextFulfiller(deps: {
       const { raw, hasMore } = await readHistory(channelId, before, match || count > PAGE ? SCAN_PAGES_FOR_MATCH : 1);
       const nameById = new Map<string, string>();
       const shaped: RecentMessage[] = raw
-        .filter((m) => messageText(m).trim() || messageAttachments(m).length)
+        .filter((m) => isConversationMessage(m) && (messageText(m).trim() || messageAttachments(m).length))
         .map((m) => {
           nameById.set(m.author.id, discordDisplayName(m.author));
           return {

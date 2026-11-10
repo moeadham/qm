@@ -1,4 +1,4 @@
-import { MessageFlags, MessageType } from "@discordjs/core";
+import { MessageFlags } from "@discordjs/core";
 import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
@@ -10,6 +10,7 @@ import {
   DISCORD_MESSAGE_LIMIT,
   discordDisplayName,
   discordErrorCode,
+  isConversationMessage,
   messageAttachments,
   messageHomeChannel,
   messageText,
@@ -55,7 +56,6 @@ const THREAD_NAME_LIMIT = 90;
 const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
 const STAKE_SCAN_MESSAGES = 100;
-const CONVERSATION_MESSAGE_TYPES = new Set<number>([MessageType.Default, MessageType.Reply]);
 
 export interface TurnOutcome {
   result?: TurnResult;
@@ -144,7 +144,7 @@ export function createDiscordBot(deps: {
   async function relevantPlace(
     m: DiscordMessage,
   ): Promise<{ channel?: DiscordChannel; addressed: boolean } | undefined> {
-    if (!CONVERSATION_MESSAGE_TYPES.has(m.type)) return undefined;
+    if (!isConversationMessage(m)) return undefined;
     if (m.author.bot || m.webhook_id || m.author.id === self.id) return undefined;
     if (!m.guild_id) return { addressed: true };
     if (!deps.guildIds.has(m.guild_id)) return undefined;
@@ -217,7 +217,7 @@ export function createDiscordBot(deps: {
     const nameById = new Map<string, string>([[self.id, self.username]]);
     for (const m of raw) nameById.set(m.author.id, discordDisplayName(m.author));
     const messages: RecentMessage[] = raw
-      .filter((m) => m.id !== trigger.id && CONVERSATION_MESSAGE_TYPES.has(m.type) && messageText(m).trim())
+      .filter((m) => m.id !== trigger.id && isConversationMessage(m) && messageText(m).trim())
       .map((m) => ({
         ts: m.id,
         name: discordDisplayName(m.author),

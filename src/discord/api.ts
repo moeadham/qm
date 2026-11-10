@@ -7,6 +7,7 @@ import {
   GatewayDispatchEvents,
   GatewayIntentBits,
   MessageFlags,
+  MessageType,
   type APIActionRowComponent,
   type APIComponentInMessageActionRow,
   type APIChannel,
@@ -41,6 +42,12 @@ export type DiscordMessage = Pick<APIMessage, "id" | "channel_id" | "content" | 
   message_snapshots?: Array<{ message: { content?: string; attachments?: DiscordAttachment[] } }>;
   flags?: number;
 };
+
+const CONVERSATION_MESSAGE_TYPES = new Set<number>([MessageType.Default, MessageType.Reply]);
+
+export function isConversationMessage(m: Pick<DiscordMessage, "type">): boolean {
+  return CONVERSATION_MESSAGE_TYPES.has(m.type);
+}
 
 export function discordDisplayName(author: DiscordMessage["author"]): string {
   return author.global_name || author.username;
