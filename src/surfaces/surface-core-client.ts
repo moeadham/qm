@@ -301,6 +301,12 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
 
     async expireDelivery(id, reason) {
       await deps.deliveries.expire(id, Date.now(), reason);
+      deps.errors?.record({
+        category: "delivery",
+        code: "delivery_target_gone",
+        message: `delivery ${id} expired: its target no longer exists (${reason})`,
+        scopeLabel: deliveryScope,
+      });
     },
 
     async reportSlowDeliveryDrain(info) {

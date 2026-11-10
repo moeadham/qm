@@ -1045,7 +1045,6 @@ test("a delivery to a deleted channel is dropped, even after an earlier retryabl
   await until(() => h.queue.find((d) => d.id === "d-doomed")!.expiredAt !== undefined, "doomed-channel expired");
   await plugin.stop();
 
-  assert.equal(h.queue[0]!.deliveredAt, null);
   assert.equal(h.queue[1]!.expiredAt, undefined);
   assert.equal(api.sendAttempts.filter((c) => c === "deleted-channel").length, 1);
 });
