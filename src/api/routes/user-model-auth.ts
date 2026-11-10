@@ -127,9 +127,10 @@ const codexDeviceLogin = createCodexDeviceLogin();
 
 function chatgptStart(accountOf: AccountOf) {
   return async (ctx: ApiCtx): Promise<void> => {
-    if (!(await accountOf(ctx))) return;
+    const account = await accountOf(ctx);
+    if (!account) return;
     try {
-      return sendJson(ctx.res, 200, await codexDeviceLogin.start());
+      return sendJson(ctx.res, 200, await codexDeviceLogin.start(account.owner));
     } catch (e) {
       return sendJson(ctx.res, 502, { error: "oauth_start_failed", message: errMessage(e) });
     }
@@ -144,7 +145,7 @@ function chatgptPoll(accountOf: AccountOf) {
     const deviceAuthId = bodyObj(ctx).deviceAuthId;
     if (typeof deviceAuthId !== "string" || !deviceAuthId) return sendJson(ctx.res, 400, { error: "bad_request" });
     try {
-      const result = await codexDeviceLogin.poll(deviceAuthId);
+      const result = await codexDeviceLogin.poll(deviceAuthId, account.owner);
       if (result === "pending") return sendJson(ctx.res, 200, { status: "pending" });
       await ctx.deps.userModelCredentials.setOAuth(account.owner, "openai", result);
       audit(ctx.deps, {

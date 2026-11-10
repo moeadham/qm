@@ -667,7 +667,7 @@ export function buildApp(
       const direct = await directModelCredentials.availability();
       return {
         ...direct,
-        ...((await refreshCompanyCodex()) ? { codexOAuth: true } : {}),
+        ...((await companyCodex()) ? { codexOAuth: true } : {}),
         modelIds: new Set(Object.keys(gatewayTransport?.models ?? {})),
       };
     },
@@ -1317,19 +1317,18 @@ export function buildApp(
   // every other personal credential.
   const userModelCredentials = createUserModelCredentialStore({ keychain: credentialStore });
   const orgModelAccount = scopeId("org", config.orgId);
-  const orgSubscription = async (provider: "anthropic" | "openai"): Promise<boolean> =>
-    (await userModelCredentials.connections(orgModelAccount)).some(
-      (c) => c.provider === provider && c.kind === "oauth" && !c.needsReconnect,
-    );
   const companyChatGPTFile = config.codexAuthFile ? fileCompanyChatGPTAuth(config.codexAuthFile) : undefined;
-  let companyCodex = Boolean(companyChatGPTFile);
-  const refreshCompanyCodex = async (): Promise<boolean> =>
-    (companyCodex = Boolean(companyChatGPTFile) || (await orgSubscription("openai").catch(() => companyCodex)));
-  void refreshCompanyCodex();
+  const companyCodex = async (): Promise<boolean> =>
+    Boolean(companyChatGPTFile) || (await userModelCredentials.subscription(orgModelAccount, "openai")) === "active";
   const harnessCarriedModelAuth = async (): Promise<ModelProvider | undefined> => {
-    if (config.harness === "claude" && (await orgSubscription("anthropic"))) return "anthropic";
-    if (await refreshCompanyCodex()) return "openai";
-    return staticCarriedModelAuth(config);
+    const configured = staticCarriedModelAuth(config);
+    const [claude, codex] = await Promise.all([
+      config.harness === "claude" &&
+        userModelCredentials.subscription(orgModelAccount, "anthropic").then((status) => status === "active"),
+      companyCodex(),
+    ]).catch(swallowAs("model: org subscription lookup", [false, false]));
+    if (claude || configured === "anthropic") return "anthropic";
+    return codex ? "openai" : configured;
   };
   const keychain: Keychain | undefined = keychainKeyMaterial ? credentialStore : undefined;
   const serviceCreds = withDeploymentCredentials(
@@ -1452,12 +1451,14 @@ export function buildApp(
       const token =
         (await userModelCredentials.derivedOAuth(orgModelAccount, "openai"))?.accessToken ??
         (await companyChatGPTFile?.accessToken());
-      companyCodex = Boolean(token);
-      return token ? { [CODEX_SUBSCRIPTION_PROVIDER]: token } : {};
+      if (token) return { [CODEX_SUBSCRIPTION_PROVIDER]: token };
     } catch (e) {
       console.error(`[model] company ChatGPT login unreadable: ${errMessage(e)}`);
-      return {};
     }
+    const configured =
+      Boolean(companyChatGPTFile) || (await userModelCredentials.subscription(orgModelAccount, "openai")) !== undefined;
+    if (configured) console.error("[model] company ChatGPT login has no usable token; reconnect it in Admin → Models");
+    return configured ? { [CODEX_SUBSCRIPTION_PROVIDER]: "" } : {};
   };
   const resolvePiProviderKeys = async (): Promise<ProviderKeys> => ({
     ...(await resolveModelProviderKeys()),
@@ -1466,8 +1467,7 @@ export function buildApp(
   const resolveBrowserCompanyKeys = async (includeSubscription = true): Promise<ProviderKeys> =>
     includeSubscription ? resolvePiProviderKeys() : resolveModelProviderKeys();
   const companyModelId = (id: string): string => {
-    if (!companyCodex || resolveModel(id)?.provider !== "openai" || isOverlayModel(id) || modelRequestOverrides(id))
-      return id;
+    if (resolveModel(id)?.provider !== "openai" || isOverlayModel(id) || modelRequestOverrides(id)) return id;
     const subscription = codexSubscriptionModelId(id);
     return resolveModel(subscription) ? subscription : id;
   };
@@ -1501,10 +1501,7 @@ export function buildApp(
       "claude",
       createClaudeHarness({
         ...claudeHarnessConfigOptions(config),
-        authEnv: async () => {
-          const token = (await userModelCredentials.derivedOAuth(orgModelAccount, "anthropic"))?.accessToken;
-          return token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : {};
-        },
+        orgOauthToken: async () => (await userModelCredentials.derivedOAuth(orgModelAccount, "anthropic"))?.accessToken,
         signals: runSignals,
         mcpTools,
       }),

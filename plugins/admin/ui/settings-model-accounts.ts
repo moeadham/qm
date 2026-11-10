@@ -32,8 +32,8 @@ export function configureModelAccounts(options: { api: Api }) {
 
 export async function loadModelAccounts() {
   const res = await api("GET", BASE);
-  state.available = res.ok;
-  state.connections = res.ok ? res.data?.connections || [] : [];
+  state.available ||= res.ok;
+  if (res.ok) state.connections = res.data?.connections || [];
   redraw();
 }
 
@@ -60,7 +60,10 @@ async function pollChatGPT(attempt: number, deviceAuthId: string, intervalMs: nu
     if (state.attempt !== attempt) return;
     const res = await api("POST", `${BASE}/chatgpt/poll`, { deviceAuthId });
     if (state.attempt !== attempt) return;
-    if (!res.ok) return report(failure(res, "ChatGPT sign-in failed. Start again."), true);
+    if (!res.ok) {
+      state.flow = null;
+      return report(failure(res, "ChatGPT sign-in failed. Start again."), true);
+    }
     if (res.data?.status === "connected") return finish("ChatGPT");
   }
   if (state.attempt === attempt) {
@@ -96,9 +99,11 @@ async function connect(provider: (typeof PROVIDERS)[number]) {
 async function completeClaude() {
   const flow = state.flow;
   if (flow?.provider !== "anthropic" || !flow.code.trim()) return;
+  const attempt = state.attempt;
   state.busy = true;
   redraw();
   const res = await api("POST", `${BASE}/claude/complete`, { code: flow.code.trim(), verifier: flow.verifier });
+  if (state.attempt !== attempt) return;
   if (!res.ok) return report(failure(res, "Claude rejected that code. Start again."), true);
   return finish("Claude");
 }
@@ -106,11 +111,12 @@ async function completeClaude() {
 async function disconnect(provider: (typeof PROVIDERS)[number]) {
   if (!confirm(`Disconnect the organization's ${provider.name} login? Company-access turns on it stop working.`))
     return;
-  state.attempt++;
+  const attempt = ++state.attempt;
   state.flow = null;
   state.busy = true;
   redraw();
   const res = await api("POST", `${BASE}/disconnect`, { provider: provider.id });
+  if (state.attempt !== attempt) return;
   if (!res.ok) return report(failure(res, `Could not disconnect ${provider.name}.`), true);
   await loadModelAccounts();
   report(`${provider.name} disconnected.`);
@@ -189,11 +195,11 @@ function template() {
       <h2>Organization AI subscriptions</h2>
       <p>The Claude and ChatGPT logins that company-access turns run on. Reconnect one when it expires.</p>
     </div>
-    <div class="body">${PROVIDERS.map(row)}</div>
-    <div class="foot">
-      <span class=${classMap({ status: true, err: state.error, idle: !state.message })} aria-live="polite"
-        >${state.message}</span
-      >
+    <div class="body">
+      ${PROVIDERS.map(row)}
+      <p class=${classMap({ status: true, err: state.error, hidden: !state.message })} aria-live="polite">
+        ${state.message}
+      </p>
     </div>
   </section>`;
 }

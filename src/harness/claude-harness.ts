@@ -67,12 +67,7 @@ export interface ClaudeHarnessOptions extends HarnessToolPlumbing {
   binaryPath?: string;
   env?: NodeJS.ProcessEnv;
   turnWallClockMs?: number;
-  /**
-   * Custodian of subscription auth (e.g. a keychain-held CLAUDE_CODE_OAUTH_TOKEN).
-   * Resolved fresh per session start; merged over static env so the secret
-   * never lives in process env or on the core host's disk.
-   */
-  authEnv?: () => Promise<NodeJS.ProcessEnv>;
+  orgOauthToken?: () => Promise<string | undefined>;
   signals?: RunSignalStore;
 }
 
@@ -422,17 +417,14 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
     let streamedText = "";
     let initialUserEchoSkipped = false;
     const seenUserMessages = new Set<string>();
-    const authEnv = opts.authEnv ? await opts.authEnv() : undefined;
+    const oauthToken = turn.claudeOauthToken ?? (await opts.orgOauthToken?.());
     const sdkQuery = query({
       prompt: queue,
       options: {
         abortController: controller,
         cwd: jail,
         env: {
-          ...perUserClaudeEnv(
-            claudeChildEnv(authEnv ? { ...opts.env, ...authEnv } : (opts.env ?? {}), jail),
-            turn.claudeOauthToken,
-          ),
+          ...perUserClaudeEnv(claudeChildEnv(opts.env ?? {}, jail), oauthToken),
           ...(turn.timezone
             ? { TZ: new Intl.DateTimeFormat("en-US", { timeZone: turn.timezone }).resolvedOptions().timeZone }
             : {}),

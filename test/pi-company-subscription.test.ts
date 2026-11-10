@@ -41,7 +41,10 @@ test("company utility calls on a plain OpenAI id are served by the ChatGPT subsc
 
 test("an unavailable company ChatGPT token fails closed instead of falling back to the metered key", async (t) => {
   const urls = recordFetch(t);
-  assert.equal(await companyHarness({ openai: "sk-metered" }).models.oneShot?.("system", "hi"), undefined);
+  assert.equal(
+    await companyHarness({ openai: "sk-metered", "openai-codex": "" }).models.oneShot?.("system", "hi"),
+    undefined,
+  );
   assert.deepEqual(urls, []);
 });
 
