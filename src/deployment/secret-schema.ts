@@ -90,8 +90,7 @@ const GATE_PREDICATES: Readonly<Record<SecretGate, (env: NodeJS.ProcessEnv) => b
   smtp: (env) => env.AUTH_EMAIL_TRANSPORT?.trim() === "smtp",
   "email-auth": (env) => env.AUTH_ALLOWED_EMAILS !== undefined,
   "model-anthropic": (env) => env.MODEL_PROVIDER?.trim() === "anthropic",
-  "model-openai": (env) =>
-    env.MODEL_PROVIDER?.trim() === "openai" && !(env.CODEX_AUTH_FILE?.trim() || env.CODEX_AUTH_CREDENTIAL?.trim()),
+  "model-openai": (env) => env.MODEL_PROVIDER?.trim() === "openai" && !env.CODEX_AUTH_FILE?.trim(),
   "model-openrouter": (env) => env.MODEL_PROVIDER?.trim() === "openrouter",
 };
 

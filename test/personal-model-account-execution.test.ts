@@ -314,26 +314,3 @@ test("a company ChatGPT login feeds pi's subscription provider while personal Ch
     await built.runtime.stop();
   }
 });
-
-test("a configured company subscription without a keychain cannot fall back to the metered key", async (t) => {
-  buildApp(
-    testConfig({
-      connectorSecretKey: undefined,
-      codexAuthCredential: "unavailable",
-      openaiApiKey: "metered",
-      modelId: "gpt-5.6-sol",
-    }),
-  );
-  const urls: string[] = [];
-  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
-    urls.push(String(input));
-    return new Response("unexpected provider request", { status: 400 });
-  });
-  const harness = piHarness.createPiHarness({ ...piOptions, captureRequests: false });
-  try {
-    assert.equal(await harness.models.oneShot?.("system", "hello"), undefined);
-    assert.deepEqual(urls, []);
-  } finally {
-    await harness.turns.close?.();
-  }
-});

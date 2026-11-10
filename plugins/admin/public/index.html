@@ -5642,6 +5642,33 @@
         width: 100%;
         min-height: 60px;
       }
+      #card-model-accounts .model-account-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 12px;
+        align-items: center;
+        padding: 8px 0;
+      }
+      #card-model-accounts .model-account-name {
+        font-weight: 600;
+      }
+      #card-model-accounts .model-account-actions {
+        display: flex;
+        gap: 8px;
+      }
+      #card-model-accounts .model-account-flow {
+        display: grid;
+        gap: 8px;
+        margin: 0 0 12px;
+      }
+      #card-model-accounts .model-account-flow > div {
+        display: flex;
+        gap: 8px;
+      }
+      #card-model-accounts .model-account-code {
+        font-size: 18px;
+        letter-spacing: 0.1em;
+      }
       #feature-flag-list .feature-flag-row,
       #card-decisions .feature-flag-row {
         display: grid;
@@ -6575,6 +6602,7 @@
                   <p>The models, browser runtime, and organization context available on future turns.</p>
                 </div>
                 <template data-settings-card="card-runtimes"></template>
+                <template data-settings-card="card-model-accounts"></template>
                 <template data-settings-card="card-webui-models"></template>
                 <template data-settings-card="card-branding"></template>
                 <template data-settings-card="card-feature-flags"></template>
@@ -8113,7 +8141,10 @@
         if (requestedView === "customize") void governanceUI.settings.loadFlags(r.data, scope);
         if (requestedView === "customize") governanceUI.settings.loadDecisions(r.data, scope);
         if (requestedView === "credentials") renderServiceCreds(r.data.serviceCredentials || []);
-        if (view === "models") void loadCustomProviders();
+        if (view === "models") {
+          void loadCustomProviders();
+          void governanceUI.settings.loadModelAccounts();
+        }
         if (view === "credentials") {
           void loadServiceCredentialUsage(requestedScope, requestId);
         }
@@ -8423,6 +8454,7 @@
         return governanceUI.onboarding.load();
       }
 
+      governanceUI.settings.configureModelAccounts({ api });
       governanceUI.settings.configureProviders({
         api,
         refresh: async () => {

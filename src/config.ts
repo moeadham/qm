@@ -90,12 +90,8 @@ export interface Config {
   brandingDefault?: OrgBranding;
   modelId?: string;
   codexAuthFile?: string;
-  /** Keychain credential id holding the Codex ChatGPT OAuth auth.json (production path). */
-  codexAuthCredential?: string;
   discordGuildIds?: string[];
   discordTrustServerMembers?: boolean;
-  /** Keychain credential id holding a Claude Code subscription token (production path). */
-  claudeAuthCredential?: string;
   claudeModel?: string;
   claudeBinPath?: string;
   claudeProcessEnv: NodeJS.ProcessEnv;
@@ -239,7 +235,7 @@ export function providerKeysPresent(config: Config): ModelProviderAvailability {
     anthropic: Boolean(config.anthropicApiKey),
     openai: Boolean(config.openaiApiKey),
     openrouter: Boolean(config.openrouterApiKey),
-    ...(config.codexAuthCredential || config.codexAuthFile ? { codexOAuth: true } : {}),
+    ...(config.codexAuthFile ? { codexOAuth: true } : {}),
   };
 }
 
@@ -250,12 +246,10 @@ export function baseModelProviders(config: Config): ModelProviderAvailability | 
 export function harnessCarriedModelAuth(config: Config): ModelProvider | undefined {
   if (
     config.harness === "claude" &&
-    (config.claudeAuthCredential ||
-      config.claudeProcessEnv.CLAUDE_CODE_OAUTH_TOKEN ||
-      config.claudeProcessEnv.ANTHROPIC_AUTH_TOKEN)
+    (config.claudeProcessEnv.CLAUDE_CODE_OAUTH_TOKEN || config.claudeProcessEnv.ANTHROPIC_AUTH_TOKEN)
   )
     return "anthropic";
-  if (config.codexAuthCredential || config.codexAuthFile) return "openai";
+  if (config.codexAuthFile) return "openai";
   return undefined;
 }
 
@@ -1210,13 +1204,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     env.SWARM_DEFAULTS === undefined ? undefined : JSON.parse(env.SWARM_DEFAULTS),
   );
   const harness = harnessEnvStrict(env.HARNESS);
-  const codexAuthCredential = env.CODEX_AUTH_CREDENTIAL?.trim() || undefined;
   const discordGuildIds = [...(discordConfigFromEnv(env)?.guildIds ?? [])];
-  const claudeAuthCredential = env.CLAUDE_AUTH_CREDENTIAL?.trim() || undefined;
-  const codexAuthFile = codexAuthCredential ? undefined : codexAuthFileForEnv(env);
+  const codexAuthFile = codexAuthFileForEnv(env);
   if (env.NODE_ENV === "production" && codexAuthFile) {
     throw new Error(
-      "CODEX_AUTH_FILE is supported for local development only; production must use CODEX_AUTH_CREDENTIAL (keychain custody)",
+      "CODEX_AUTH_FILE is supported for local development only; production connects ChatGPT in Admin → Models",
     );
   }
   if (codexAuthFile) {
@@ -1521,12 +1513,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(orgBrandingFromEnv(env) ? { brandingDefault: orgBrandingFromEnv(env) } : {}),
     ...(env.PI_MODEL ? { modelId: env.PI_MODEL } : {}),
     ...(codexAuthFile ? { codexAuthFile } : {}),
-    ...(codexAuthCredential ? { codexAuthCredential } : {}),
     ...(discordGuildIds.length ? { discordGuildIds } : {}),
     ...(boolEnvStrict("DISCORD_TRUST_SERVER_MEMBERS", env.DISCORD_TRUST_SERVER_MEMBERS)
       ? { discordTrustServerMembers: true }
       : {}),
-    ...(claudeAuthCredential ? { claudeAuthCredential } : {}),
     ...(env.CLAUDE_MODEL ? { claudeModel: env.CLAUDE_MODEL } : {}),
     ...(env.CLAUDE_BIN ? { claudeBinPath: env.CLAUDE_BIN } : {}),
     claudeProcessEnv,

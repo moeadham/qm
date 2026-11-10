@@ -79,7 +79,7 @@ async function browserModel(ctx: ApiCtx): Promise<void> {
           credentials: deps.userModelCredentials,
           companyProviderKeys:
             selected.account === "company" ? await deps.resolveBrowserCompanyKeys?.(useCompanySubscription) : undefined,
-          companySubscriptionProvider: useCompanySubscription ? deps.harnessCarriedModelAuth : undefined,
+          companySubscriptionProvider: useCompanySubscription ? await deps.harnessCarriedModelAuth?.() : undefined,
           actorId: capability.actorId,
           body: input,
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]),

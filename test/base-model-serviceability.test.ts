@@ -29,7 +29,7 @@ function start(overrides: Parameters<typeof testConfig>[0] = { anthropicApiKey: 
   });
   server.listen(0);
   const base = `http://localhost:${(server.address() as AddressInfo).port}`;
-  return { base, close: () => new Promise<void>((r) => server.close(() => r())) };
+  return { base, built, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
 async function effectiveModel(base: string): Promise<string> {
@@ -115,19 +115,21 @@ test("the declaration outranks a stray key from another vendor", async () => {
   }
 });
 
-test("company ChatGPT-only deployments offer their plain GPT default through managed availability", async () => {
-  const srv = start({ codexAuthCredential: "company-chatgpt" });
-  try {
+test("an admin-connected org ChatGPT login offers the Codex models with no API key", async () => {
+  const srv = start({});
+  const piModels = async () => {
     const res = await fetch(`${srv.base}/v1/runtime-config?principalId=alice&scopeId=personal%3Aalice`);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as {
-      effective: { modelId: string };
-      modelsByHarness: Record<string, string[]>;
-      unavailableReason?: string;
-    };
-    assert.equal(body.effective.modelId, "gpt-5.6-sol");
-    assert.ok(body.modelsByHarness.pi?.includes("gpt-5.6-sol"));
-    assert.equal(body.unavailableReason, undefined);
+    return ((await res.json()) as { modelsByHarness: Record<string, string[]> }).modelsByHarness.pi ?? [];
+  };
+  try {
+    assert.ok(!(await piModels()).includes("gpt-5.6-sol"));
+    await srv.built.userModelCredentials.setOAuth("org:default-org", "openai", {
+      accessToken: "org-codex-access",
+      refreshToken: "org-codex-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    });
+    assert.ok((await piModels()).includes("gpt-5.6-sol"));
   } finally {
     await srv.close();
   }

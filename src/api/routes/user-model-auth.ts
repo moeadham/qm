@@ -5,11 +5,30 @@ import { errMessage } from "../../util/errors.ts";
 import { sendJson } from "../http.ts";
 import { validateProviderApiKey } from "./admin/model-providers.ts";
 import type { ApiCtx, Route } from "./route.ts";
-import { audit } from "./shared.ts";
+import { audit, authorizeAdmin, orgScope } from "./shared.ts";
+
+interface Account {
+  owner: string;
+  actor: string;
+}
+
+type AccountOf = (ctx: ApiCtx) => Promise<Account | null>;
 
 function caller(ctx: ApiCtx): string | null {
   return ctx.actor?.p ?? null;
 }
+
+const personal: AccountOf = async (ctx) => {
+  const principal = caller(ctx);
+  if (principal) return { owner: principal, actor: principal };
+  sendJson(ctx.res, 401, { error: "unauthorized" });
+  return null;
+};
+
+const organization: AccountOf = async (ctx) => {
+  const admin = await authorizeAdmin(ctx, orgScope());
+  return admin ? { owner: orgScope(), actor: admin.id } : null;
+};
 
 function bodyObj(ctx: ApiCtx): Record<string, unknown> {
   return typeof ctx.body === "object" && ctx.body !== null ? (ctx.body as Record<string, unknown>) : {};
@@ -63,20 +82,23 @@ async function setAccount(ctx: ApiCtx): Promise<void> {
   return getStatus(ctx);
 }
 
-async function disconnect(ctx: ApiCtx): Promise<void> {
-  const principal = caller(ctx);
-  if (!principal) return sendJson(ctx.res, 401, { error: "unauthorized" });
-  if (!ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
-  const provider = connectProvider(bodyObj(ctx).provider);
-  if (!provider) return sendJson(ctx.res, 400, { error: "bad_request", message: "provider must be claude or chatgpt" });
-  await ctx.deps.userModelCredentials.delete(principal, provider);
-  audit(ctx.deps, {
-    principalId: principal,
-    action: "user-model-auth.disconnect",
-    resource: provider,
-    scopeLabel: principal,
-  });
-  return sendJson(ctx.res, 200, { ok: true });
+function disconnect(accountOf: AccountOf) {
+  return async (ctx: ApiCtx): Promise<void> => {
+    const account = await accountOf(ctx);
+    if (!account) return;
+    if (!ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
+    const provider = connectProvider(bodyObj(ctx).provider);
+    if (!provider)
+      return sendJson(ctx.res, 400, { error: "bad_request", message: "provider must be claude or chatgpt" });
+    await ctx.deps.userModelCredentials.delete(account.owner, provider);
+    audit(ctx.deps, {
+      principalId: account.actor,
+      action: "user-model-auth.disconnect",
+      resource: provider,
+      scopeLabel: account.owner,
+    });
+    return sendJson(ctx.res, 200, { ok: true });
+  };
 }
 
 async function putApiKey(ctx: ApiCtx): Promise<void> {
@@ -103,65 +125,78 @@ async function putApiKey(ctx: ApiCtx): Promise<void> {
 
 const codexDeviceLogin = createCodexDeviceLogin();
 
-async function chatgptStart(ctx: ApiCtx): Promise<void> {
-  if (!caller(ctx)) return sendJson(ctx.res, 401, { error: "unauthorized" });
-  try {
-    const prompt = await codexDeviceLogin.start();
-    return sendJson(ctx.res, 200, prompt);
-  } catch (e) {
-    return sendJson(ctx.res, 502, { error: "oauth_start_failed", message: errMessage(e) });
-  }
+function chatgptStart(accountOf: AccountOf) {
+  return async (ctx: ApiCtx): Promise<void> => {
+    if (!(await accountOf(ctx))) return;
+    try {
+      return sendJson(ctx.res, 200, await codexDeviceLogin.start());
+    } catch (e) {
+      return sendJson(ctx.res, 502, { error: "oauth_start_failed", message: errMessage(e) });
+    }
+  };
 }
 
-async function chatgptPoll(ctx: ApiCtx): Promise<void> {
-  const principal = caller(ctx);
-  if (!principal) return sendJson(ctx.res, 401, { error: "unauthorized" });
-  if (!ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
-  const body = bodyObj(ctx);
-  const deviceAuthId = typeof body.deviceAuthId === "string" ? body.deviceAuthId : "";
-  if (!deviceAuthId) return sendJson(ctx.res, 400, { error: "bad_request" });
-  try {
-    const result = await codexDeviceLogin.poll(deviceAuthId);
-    if (result === "pending") return sendJson(ctx.res, 200, { status: "pending" });
-    await ctx.deps.userModelCredentials.setOAuth(principal, "openai", result);
-    audit(ctx.deps, {
-      principalId: principal,
-      action: "user-model-auth.oauth",
-      resource: "openai",
-      scopeLabel: principal,
-    });
-    return sendJson(ctx.res, 200, { status: "connected" });
-  } catch (e) {
-    return sendJson(ctx.res, 502, { error: "oauth_poll_failed", message: errMessage(e) });
-  }
+function chatgptPoll(accountOf: AccountOf) {
+  return async (ctx: ApiCtx): Promise<void> => {
+    const account = await accountOf(ctx);
+    if (!account) return;
+    if (!ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
+    const deviceAuthId = bodyObj(ctx).deviceAuthId;
+    if (typeof deviceAuthId !== "string" || !deviceAuthId) return sendJson(ctx.res, 400, { error: "bad_request" });
+    try {
+      const result = await codexDeviceLogin.poll(deviceAuthId);
+      if (result === "pending") return sendJson(ctx.res, 200, { status: "pending" });
+      await ctx.deps.userModelCredentials.setOAuth(account.owner, "openai", result);
+      audit(ctx.deps, {
+        principalId: account.actor,
+        action: "user-model-auth.oauth",
+        resource: "openai",
+        scopeLabel: account.owner,
+      });
+      return sendJson(ctx.res, 200, { status: "connected" });
+    } catch (e) {
+      return sendJson(ctx.res, 502, { error: "oauth_poll_failed", message: errMessage(e) });
+    }
+  };
 }
 
-async function claudeStart(ctx: ApiCtx): Promise<void> {
-  if (!caller(ctx)) return sendJson(ctx.res, 401, { error: "unauthorized" });
-  return sendJson(ctx.res, 200, startClaudeLogin());
+function claudeStart(accountOf: AccountOf) {
+  return async (ctx: ApiCtx): Promise<void> => {
+    if (!(await accountOf(ctx))) return;
+    return sendJson(ctx.res, 200, startClaudeLogin());
+  };
 }
 
-async function claudeComplete(ctx: ApiCtx): Promise<void> {
-  const principal = caller(ctx);
-  if (!principal) return sendJson(ctx.res, 401, { error: "unauthorized" });
-  if (!ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
-  const body = bodyObj(ctx);
-  const code = typeof body.code === "string" ? body.code : "";
-  const verifier = typeof body.verifier === "string" ? body.verifier : "";
-  if (!code || !verifier) return sendJson(ctx.res, 400, { error: "bad_request" });
-  try {
-    const tokens = await completeClaudeLogin(code, verifier);
-    await ctx.deps.userModelCredentials.setOAuth(principal, "anthropic", tokens);
-    audit(ctx.deps, {
-      principalId: principal,
-      action: "user-model-auth.oauth",
-      resource: "anthropic",
-      scopeLabel: principal,
-    });
-    return sendJson(ctx.res, 200, { ok: true });
-  } catch (e) {
-    return sendJson(ctx.res, 502, { error: "oauth_complete_failed", message: errMessage(e) });
-  }
+function claudeComplete(accountOf: AccountOf) {
+  return async (ctx: ApiCtx): Promise<void> => {
+    const account = await accountOf(ctx);
+    if (!account) return;
+    if (!ctx.deps.userModelCredentials) return sendJson(ctx.res, 404, { error: "not_found" });
+    const body = bodyObj(ctx);
+    const code = typeof body.code === "string" ? body.code : "";
+    const verifier = typeof body.verifier === "string" ? body.verifier : "";
+    if (!code || !verifier) return sendJson(ctx.res, 400, { error: "bad_request" });
+    try {
+      const tokens = await completeClaudeLogin(code, verifier);
+      await ctx.deps.userModelCredentials.setOAuth(account.owner, "anthropic", tokens);
+      audit(ctx.deps, {
+        principalId: account.actor,
+        action: "user-model-auth.oauth",
+        resource: "anthropic",
+        scopeLabel: account.owner,
+      });
+      return sendJson(ctx.res, 200, { ok: true });
+    } catch (e) {
+      return sendJson(ctx.res, 502, { error: "oauth_complete_failed", message: errMessage(e) });
+    }
+  };
+}
+
+async function getOrgStatus(ctx: ApiCtx): Promise<void> {
+  const account = await organization(ctx);
+  if (!account) return;
+  const connections = (await ctx.deps.userModelCredentials?.connections(account.owner)) ?? [];
+  return sendJson(ctx.res, 200, { connections });
 }
 
 function personalAccountsAllowed(handle: (ctx: ApiCtx) => Promise<void>): (ctx: ApiCtx) => Promise<void> {
@@ -179,29 +214,45 @@ export const userModelAuthRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "POST", path: "/v1/user-model-auth/account", auth: "source", handle: personalAccountsAllowed(setAccount) },
   { method: "GET", path: "/v1/user-model-auth/status", auth: "source", handle: getStatus },
   { method: "POST", path: "/v1/user-model-auth/api-key", auth: "source", handle: personalAccountsAllowed(putApiKey) },
-  { method: "POST", path: "/v1/user-model-auth/disconnect", auth: "source", handle: disconnect },
+  { method: "POST", path: "/v1/user-model-auth/disconnect", auth: "source", handle: disconnect(personal) },
   {
     method: "POST",
     path: "/v1/user-model-auth/chatgpt/start",
     auth: "source",
-    handle: personalAccountsAllowed(chatgptStart),
+    handle: personalAccountsAllowed(chatgptStart(personal)),
   },
   {
     method: "POST",
     path: "/v1/user-model-auth/chatgpt/poll",
     auth: "source",
-    handle: personalAccountsAllowed(chatgptPoll),
+    handle: personalAccountsAllowed(chatgptPoll(personal)),
   },
   {
     method: "POST",
     path: "/v1/user-model-auth/claude/start",
     auth: "source",
-    handle: personalAccountsAllowed(claudeStart),
+    handle: personalAccountsAllowed(claudeStart(personal)),
   },
   {
     method: "POST",
     path: "/v1/user-model-auth/claude/complete",
     auth: "source",
-    handle: personalAccountsAllowed(claudeComplete),
+    handle: personalAccountsAllowed(claudeComplete(personal)),
+  },
+  { method: "GET", path: "/v1/admin/model-accounts", auth: "either", handle: getOrgStatus },
+  { method: "POST", path: "/v1/admin/model-accounts/disconnect", auth: "either", handle: disconnect(organization) },
+  {
+    method: "POST",
+    path: "/v1/admin/model-accounts/chatgpt/start",
+    auth: "either",
+    handle: chatgptStart(organization),
+  },
+  { method: "POST", path: "/v1/admin/model-accounts/chatgpt/poll", auth: "either", handle: chatgptPoll(organization) },
+  { method: "POST", path: "/v1/admin/model-accounts/claude/start", auth: "either", handle: claudeStart(organization) },
+  {
+    method: "POST",
+    path: "/v1/admin/model-accounts/claude/complete",
+    auth: "either",
+    handle: claudeComplete(organization),
   },
 ];

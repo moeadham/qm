@@ -61,7 +61,7 @@ test("without a company subscription a plain OpenAI id stays metered", async (t)
 
 test("a subscription-only deployment's default utility model is served by the ChatGPT subscription", async (t) => {
   const urls = recordFetch(t);
-  const config = { ...loadConfig({}), harness: "pi" as const, codexAuthCredential: "cred-1" };
+  const config = { ...loadConfig({}), harness: "pi" as const, codexAuthFile: "/local/auth.json" };
   const harness = createPiHarness({
     ...piHarnessConfigOptions(config),
     captureRequests: false,

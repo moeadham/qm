@@ -311,6 +311,7 @@ const WRITES = new Map<string, string[]>([
   ["model-providers", ["PUT", "DELETE"]],
   ["model-registry", ["POST", "PUT", "DELETE"]],
   ["custom-providers", ["PUT", "DELETE"]],
+  ["model-accounts", ["POST"]],
 ]);
 
 const READS = [
@@ -339,6 +340,7 @@ const READS = [
   "model-providers",
   "model-registry",
   "custom-providers",
+  "model-accounts",
   "principal-links",
 ];
 

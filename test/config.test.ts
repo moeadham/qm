@@ -806,17 +806,12 @@ test("the deploy-apps sign-in address defaults to the public web URL", () => {
   );
 });
 
-test("company ChatGPT auth satisfies model onboarding on any harness without an API key", () => {
+test("a local company ChatGPT auth file satisfies model onboarding on any harness without an API key", () => {
   const config = { ...loadConfig({}), harness: "pi" as const };
-  assert.equal(harnessCarriedModelAuth({ ...config, codexAuthCredential: "cred-1" }), "openai");
   assert.equal(harnessCarriedModelAuth({ ...config, codexAuthFile: "/local/auth.json" }), "openai");
-  assert.equal(harnessCarriedModelAuth({ ...config, harness: "claude", codexAuthCredential: "cred-1" }), "openai");
+  assert.equal(harnessCarriedModelAuth({ ...config, harness: "claude", codexAuthFile: "/local/auth.json" }), "openai");
   assert.equal(harnessCarriedModelAuth(config), undefined);
-  assert.equal(providerKeysPresent({ ...config, codexAuthCredential: "cred-1" }).codexOAuth, true);
-  assert.equal(
-    loadConfig({ MODEL_PROVIDER: "openai", HARNESS: "pi", CODEX_AUTH_CREDENTIAL: "cred-1" }).codexAuthCredential,
-    "cred-1",
-  );
+  assert.equal(providerKeysPresent({ ...config, codexAuthFile: "/local/auth.json" }).codexOAuth, true);
 });
 
 test("CODEX_AUTH_FILE is a validated local-only company ChatGPT login", (t) => {
@@ -831,10 +826,6 @@ test("CODEX_AUTH_FILE is a validated local-only company ChatGPT login", (t) => {
   assert.throws(
     () => loadConfig({ HARNESS: "pi", CODEX_AUTH_FILE: join(dir, "missing.json") }),
     /CODEX_AUTH_FILE is unusable: .*ENOENT/,
-  );
-  assert.equal(
-    loadConfig({ HARNESS: "pi", CODEX_AUTH_FILE: path, CODEX_AUTH_CREDENTIAL: "cred-1" }).codexAuthFile,
-    undefined,
   );
   assert.throws(
     () => loadConfig({ ...productionEnv, CODEX_AUTH_FILE: path }),
@@ -1009,13 +1000,13 @@ test("sandbox capability TTL is deployment-configurable with a 48-hour default",
 
 test("a subscription-only company ChatGPT deployment defaults pi to the plain Codex model id", () => {
   const base = { ...loadConfig({}), harness: "pi" as const };
-  assert.equal(configuredModelForHarness({ ...base, codexAuthCredential: "cred-1" }, "pi"), "gpt-5.6-sol");
+  assert.equal(configuredModelForHarness({ ...base, codexAuthFile: "/local/auth.json" }, "pi"), "gpt-5.6-sol");
   assert.equal(
-    configuredModelForHarness({ ...base, codexAuthCredential: "cred-1", anthropicApiKey: "k" }, "pi"),
+    configuredModelForHarness({ ...base, codexAuthFile: "/local/auth.json", anthropicApiKey: "k" }, "pi"),
     undefined,
   );
   assert.equal(
-    configuredModelForHarness({ ...base, codexAuthCredential: "cred-1", modelId: "claude-opus-5" }, "pi"),
+    configuredModelForHarness({ ...base, codexAuthFile: "/local/auth.json", modelId: "claude-opus-5" }, "pi"),
     "claude-opus-5",
   );
   assert.equal(configuredModelForHarness(base, "pi"), undefined);
