@@ -185,7 +185,6 @@ import {
   deliveryCandidatesFor,
   egressClaimAllowingControlPlane,
   filterConnectorSkills,
-  isScheduledTrustedCredentialRoom,
   isScreenableTextAttachment,
   loadActiveBundles,
   recentPrincipalDeliveryNote,
@@ -558,12 +557,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         (conversation.kind === "dm" ||
           trustedRoom ||
           (!!conversation.publishMembers?.length && conversation.publishMembers.every((p) => p.type === "internal")));
-      const scheduledTrustedRoom = await isScheduledTrustedCredentialRoom(
-        input,
-        scopeId,
-        deps.identity.audienceIsAllInternal(conversation.audience),
-        deps.trustedChatRoom,
-      );
       const authoredDetection =
         input.origin.kind === "ambient" && input.origin.live === true && conversation.kind !== "dm";
       const delegationEnabled =
@@ -1779,6 +1772,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         );
       };
       const egressTokenForTurn = await egressTokenForPolicy(resolution.egress);
+      const scheduledTrustedCredentialRoom =
+        input.surface === "cron" &&
+        !sessionTurn &&
+        conversation.kind !== "dm" &&
+        !!conversation.channelRef &&
+        input.origin.kind === "automation" &&
+        !!input.origin.destination &&
+        input.origin.destination.audienceScopeId === scopeId &&
+        deps.identity.audienceIsAllInternal(conversation.audience) &&
+        (await deps.trustedChatRoom?.(input.origin.destination.type, conversation.channelRef)) === true;
       const registerServiceCredentials = async (
         addCredential: typeof addCredentialToCatalog,
         requestedHandles: readonly string[],
@@ -1827,7 +1830,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           })());
         for (const credential of available) {
           if (credential.delivery === "env") {
-            if ((!allInternal && !scheduledTrustedRoom && !external) || !credential.envKey) continue;
+            if ((!allInternal && !scheduledTrustedCredentialRoom && !external) || !credential.envKey) continue;
             addCredential(
               {
                 handle: credential.slug,

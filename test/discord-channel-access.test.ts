@@ -11,6 +11,7 @@ import { createDirectoryStore } from "../src/directory/directory-store.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { testConfig } from "./support/test-config.ts";
 import { encodeRef, serviceCredRef } from "../src/acl/resource-ref.ts";
+import { isTerminal } from "../src/runs/run-store.ts";
 
 test("a Discord server channel the bot has seen works like a public channel for every linked person", async () => {
   const built = buildApp(testConfig({ harness: "mock", seedSkills: false, discordGuildIds: ["700000000000000001"] }));
@@ -119,10 +120,11 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, an allowed Discord room admits live and
         credentials: string[] = [],
         automated = false,
         destinationScope?: `channel:${string}`,
+        automationSurface: "cron" | "webhook" | "monitor" | "loop" | "keychain-ask" | "secret-drop" = "cron",
       ) => {
         const before = seen.length;
-        await built.app.turn({
-          surface: automated ? "cron" : "discord",
+        const result = await built.app.turn({
+          surface: automated ? automationSurface : "discord",
           ...(automated
             ? {
                 origin: {
@@ -155,8 +157,15 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, an allowed Discord room admits live and
           text: `!execute ${JSON.stringify({ command: "printf ok", credentials })}`,
           skipMemory: true,
         });
+        const runId = "runId" in result ? result.runId : undefined;
         const deadline = Date.now() + 3_000;
-        while (seen.length === before && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+        while (Date.now() < deadline) {
+          if (runId) {
+            const run = await built.runs.get(runId);
+            if (run && isTerminal(run.status)) break;
+          } else if (seen.length > before) break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
         return seen.length > before ? seen.at(-1)! : null;
       };
 
@@ -181,6 +190,19 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, an allowed Discord room admits live and
 
       const scheduledElsewhere = await turn("600000000000000009", ["safe"], true, "channel:600000000000000010");
       assert.equal(scheduledElsewhere?.env, undefined, "another destination cannot attest the room");
+
+      if (trusted) {
+        for (const surface of ["webhook", "monitor", "loop", "keychain-ask", "secret-drop"] as const) {
+          const unrelatedAutomation = await turn(
+            "600000000000000009",
+            ["safe"],
+            true,
+            "channel:600000000000000009",
+            surface,
+          );
+          assert.equal(unrelatedAutomation?.env, undefined, `${surface} automation cannot inherit cron credentials`);
+        }
+      }
     } finally {
       await built.runtime.stop();
     }

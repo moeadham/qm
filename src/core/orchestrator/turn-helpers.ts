@@ -9,7 +9,7 @@ import type {
   TurnRequest,
   ActorAssertion,
 } from "../../types.ts";
-import { isSessionTurn, turnOriginRequestFields } from "../turn-origin.ts";
+import { turnOriginRequestFields } from "../turn-origin.ts";
 import { isOverheardEntry } from "../../sessions/session-store.ts";
 import type { DeliveryStore } from "../../delivery/delivery-store.ts";
 import type { SkillBundle, SkillBundleStore } from "../../skills/skill-bundle-store.ts";
@@ -20,24 +20,6 @@ import { hashId } from "../../util/crypto.ts";
 import type { OrchestratorInput } from "./types.ts";
 
 export const MAX_AUTO_ATTACHMENT_SCREEN_BYTES = 12_000;
-
-export async function isScheduledTrustedCredentialRoom(
-  input: OrchestratorInput,
-  scopeId: ScopeId,
-  allInternalAudience: boolean,
-  trustedChatRoom: ((surface: string, channelRef: string) => Promise<boolean>) | undefined,
-): Promise<boolean> {
-  return (
-    !isSessionTurn(input) &&
-    input.conversation.kind !== "dm" &&
-    !!input.conversation.channelRef &&
-    input.origin.kind === "automation" &&
-    !!input.origin.destination &&
-    input.origin.destination.audienceScopeId === scopeId &&
-    allInternalAudience &&
-    (await trustedChatRoom?.(input.origin.destination.type, input.conversation.channelRef)) === true
-  );
-}
 
 export function isScreenableTextAttachment(mimetype: string): boolean {
   const mime = mimetype.split(";", 1)[0]!.trim().toLowerCase();
