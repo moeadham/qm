@@ -1,4 +1,5 @@
 import "./support/auto-fake-sprites.ts";
+import { MessageType } from "@discordjs/core";
 import { test } from "node:test";
 import { WebSocketServer, type WebSocket } from "ws";
 import assert from "node:assert/strict";
@@ -512,6 +513,26 @@ test("a reply in a thread the bot owns is heard without a mention as an ambient 
   assert.equal(api.sent.length, 0);
   assert.deepEqual(h.acked, []);
   assert.deepEqual(api.typed, [], "a turn that stays quiet never shows typing");
+});
+
+test("a Discord thread rename does not become an ambient turn", async () => {
+  const h = harness({ result: () => ({ status: "silent" }) });
+  const api = new FakeDiscord();
+  const thread = "800000000000000019";
+  api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
+  const { handlers, plugin } = await boot(h, api);
+  handlers.onMessage({
+    ...dm(ALICE, "CI", "800000000000000020"),
+    type: MessageType.ChannelNameChange,
+    channel_id: thread,
+    guild_id: GUILD,
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  await plugin.stop();
+
+  assert.equal(h.turns.length, 0);
+  assert.equal(api.historyReads.length, 0);
+  assert.equal(api.sent.length, 0);
 });
 
 test("in a thread a person started, follow-ups are heard without a mention once QM has a stake in it", async () => {
