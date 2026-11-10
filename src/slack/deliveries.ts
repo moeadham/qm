@@ -37,7 +37,12 @@ import { slackErrorCode } from "./payloads.ts";
 
 const DELIVERY_CLAIM_MS = 15_000;
 const SLOW_DRAIN_ALARM_MS = 120_000;
-const TARGET_GONE_POST_ERRORS = new Set(["user_not_found", "cannot_reply_to_message", "message_not_found"]);
+const TARGET_GONE_POST_ERRORS = new Set([
+  "user_not_found",
+  "cannot_reply_to_message",
+  "message_not_found",
+  "thread_not_found",
+]);
 const PERMANENT_POST_ERRORS = new Set(["channel_not_found", "is_archived", "account_inactive"]);
 
 const SETTLED_PIN_ERRORS = new Set(["already_pinned", "no_pin", "not_pinned"]);

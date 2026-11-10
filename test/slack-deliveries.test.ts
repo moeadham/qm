@@ -400,10 +400,15 @@ test("a delivery whose Slack target is gone is expired once posting gives up; a 
     ackDelivery: async () => {},
     expireDelivery: async (id: string, reason: string) => void expired.set(id, reason),
   };
+  const attempts: Record<string, number> = {};
   const client = {
-    conversations: { history: async () => ({ messages: [] }), replies: async () => ({ messages: [] }) },
+    conversations: {
+      history: async () => ({ messages: [] }),
+      replies: async () => ({ messages: [] }),
+    },
     chat: {
       postMessage: async (args: { channel: string }) => {
+        attempts[args.channel] = (attempts[args.channel] ?? 0) + 1;
         throw Object.assign(new Error("slack"), { data: { error: failures[args.channel] } });
       },
     },
@@ -414,7 +419,12 @@ test("a delivery whose Slack target is gone is expired once posting gives up; a 
     threads: { mark: () => {} } as never,
     clientForIdentity: () => client,
   });
-  for (let i = 0; i < 6; i++) await poller.pollDeliveries(client);
-  await new Promise((r) => setImmediate(r));
+  let failedWhileUnexpired = false;
+  for (let i = 0; i < 10 && !expired.size; i++) {
+    await poller.pollDeliveries(client);
+    await new Promise((r) => setImmediate(r));
+    if (!expired.size && (attempts.C1 ?? 0) > 0) failedWhileUnexpired = true;
+  }
+  assert.ok(failedWhileUnexpired, "a single failed post does not expire the delivery before retries give up");
   assert.deepEqual([...expired], [["D-gone", "message_not_found"]]);
 });
