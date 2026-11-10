@@ -144,6 +144,7 @@ export function createDiscordBot(deps: {
   async function relevantPlace(
     m: DiscordMessage,
   ): Promise<{ channel?: DiscordChannel; addressed: boolean } | undefined> {
+    if (!CONVERSATION_MESSAGE_TYPES.has(m.type)) return undefined;
     if (m.author.bot || m.webhook_id || m.author.id === self.id) return undefined;
     if (!m.guild_id) return { addressed: true };
     if (!deps.guildIds.has(m.guild_id)) return undefined;

@@ -3,7 +3,7 @@
 Use this checklist whenever this fork pulls a new QM release or a substantial
 upstream change. It consolidates the intentional fork behavior and production
 failures recorded in the source and deployment Git histories through
-2026-11-04.
+2026-11-10.
 
 Do not promote an upgrade because it compiles. Preserve each behavior below,
 run its automated checks, and exercise the user-visible paths in staging.
@@ -401,6 +401,8 @@ Source landmarks: `357a3abc`, `4059977c`, `2ccc729d`, `47ef91dc`, `6dc464f5`,
       token as intermittent authentication.
 - [ ] Marketing Discord delivery uses a transport accepted by Discord and can
       decode both plain and `deflate-raw` QM capability payloads.
+- [ ] Discord system events such as thread renames never become human turns or
+      steer an active run; ordinary messages and replies remain accepted.
 - [ ] Skills, grants, scoped sandbox defaults, and email secrets survive the
       deployment. A source/image upgrade must not silently replace database
       configuration.
@@ -423,6 +425,9 @@ clone ... file exists`, producing hundreds of repeated errors until its scope
   to the session's scope.
 - Discord rejected Python `urllib` with Cloudflare HTTP 403/1010, and the skill
   misread compressed capability tokens as ordinary JWT payloads.
+- A Discord `ChannelNameChange` event was attributed to the user who renamed a
+  thread, so QM treated the thread title as a new ambient message and replied
+  repeatedly without a new human message.
 - A short Fly private-network/Postgres timeout burst occurred during staging;
   distinguish infrastructure transients from application regressions.
 
