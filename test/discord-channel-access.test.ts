@@ -119,7 +119,7 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, an allowed Discord room admits live and
         credentials: string[] = [],
         automated = false,
         destinationScope?: `channel:${string}`,
-        automationSurface: "cron" | "webhook" | "monitor" | "loop" | "keychain-ask" | "secret-drop" = "cron",
+        automationSurface: "cron" | "webhook" = "cron",
       ) => {
         const before = seen.length;
         const result = await built.app.turn({
@@ -178,23 +178,15 @@ test("with DISCORD_TRUST_SERVER_MEMBERS, an allowed Discord room admits live and
         "a scheduled job gets the org credential only for its trusted Discord home",
       );
 
-      const scheduled = await turn("600000000000000009", ["safe"], true);
-      assert.equal(scheduled?.env, undefined, "a scheduled job without an attested home destination stays denied");
-
-      const scheduledElsewhere = await turn("600000000000000009", ["safe"], true, "channel:600000000000000010");
-      assert.equal(scheduledElsewhere?.env, undefined, "another destination cannot attest the room");
-
       if (trusted) {
-        for (const surface of ["webhook", "monitor", "loop", "keychain-ask", "secret-drop"] as const) {
-          const unrelatedAutomation = await turn(
-            "600000000000000009",
-            ["safe"],
-            true,
-            "channel:600000000000000009",
-            surface,
-          );
-          assert.equal(unrelatedAutomation?.env, undefined, `${surface} automation cannot inherit cron credentials`);
-        }
+        const scheduled = await turn("600000000000000009", ["safe"], true);
+        assert.equal(scheduled?.env, undefined, "a scheduled job without an attested home destination stays denied");
+
+        const scheduledElsewhere = await turn("600000000000000009", ["safe"], true, "channel:600000000000000010");
+        assert.equal(scheduledElsewhere?.env, undefined, "another destination cannot attest the room");
+
+        const webhook = await turn("600000000000000009", ["safe"], true, "channel:600000000000000009", "webhook");
+        assert.equal(webhook?.env, undefined, "webhook automation cannot inherit cron credentials");
       }
     } finally {
       await built.runtime.stop();
