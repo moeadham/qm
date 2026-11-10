@@ -1318,8 +1318,12 @@ export function buildApp(
   const userModelCredentials = createUserModelCredentialStore({ keychain: credentialStore });
   const orgModelAccount = scopeId("org", config.orgId);
   const companyChatGPTFile = config.codexAuthFile ? fileCompanyChatGPTAuth(config.codexAuthFile) : undefined;
-  const companyCodex = async (): Promise<boolean> =>
-    Boolean(companyChatGPTFile) || (await userModelCredentials.subscription(orgModelAccount, "openai")) === "active";
+  const orgChatGPT = (): Promise<boolean> =>
+    userModelCredentials
+      .subscription(orgModelAccount, "openai")
+      .then((status) => status !== undefined)
+      .catch(swallowAs("model: org ChatGPT login lookup", false));
+  const companyCodex = async (): Promise<boolean> => Boolean(companyChatGPTFile) || orgChatGPT();
   const harnessCarriedModelAuth = async (): Promise<ModelProvider | undefined> => {
     const configured = staticCarriedModelAuth(config);
     const [claude, codex] = await Promise.all([
@@ -1455,8 +1459,7 @@ export function buildApp(
     } catch (e) {
       console.error(`[model] company ChatGPT login unreadable: ${errMessage(e)}`);
     }
-    const configured =
-      Boolean(companyChatGPTFile) || (await userModelCredentials.subscription(orgModelAccount, "openai")) !== undefined;
+    const configured = await companyCodex();
     if (configured) console.error("[model] company ChatGPT login has no usable token; reconnect it in Admin → Models");
     return configured ? { [CODEX_SUBSCRIPTION_PROVIDER]: "" } : {};
   };
@@ -1501,7 +1504,12 @@ export function buildApp(
       "claude",
       createClaudeHarness({
         ...claudeHarnessConfigOptions(config),
-        orgOauthToken: async () => (await userModelCredentials.derivedOAuth(orgModelAccount, "anthropic"))?.accessToken,
+        orgOauthToken: async () => {
+          const token = (await userModelCredentials.derivedOAuth(orgModelAccount, "anthropic"))?.accessToken;
+          if (!token && (await userModelCredentials.subscription(orgModelAccount, "anthropic")))
+            console.error("[model] company Claude login has no usable token; reconnect it in Admin → Models");
+          return token;
+        },
         signals: runSignals,
         mcpTools,
       }),

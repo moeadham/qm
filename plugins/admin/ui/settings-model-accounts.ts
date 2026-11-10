@@ -103,7 +103,7 @@ async function completeClaude() {
   state.busy = true;
   redraw();
   const res = await api("POST", `${BASE}/claude/complete`, { code: flow.code.trim(), verifier: flow.verifier });
-  if (state.attempt !== attempt) return;
+  if (state.attempt !== attempt) return loadModelAccounts();
   if (!res.ok) return report(failure(res, "Claude rejected that code. Start again."), true);
   return finish("Claude");
 }
@@ -111,12 +111,11 @@ async function completeClaude() {
 async function disconnect(provider: (typeof PROVIDERS)[number]) {
   if (!confirm(`Disconnect the organization's ${provider.name} login? Company-access turns on it stop working.`))
     return;
-  const attempt = ++state.attempt;
+  state.attempt++;
   state.flow = null;
   state.busy = true;
   redraw();
   const res = await api("POST", `${BASE}/disconnect`, { provider: provider.id });
-  if (state.attempt !== attempt) return;
   if (!res.ok) return report(failure(res, `Could not disconnect ${provider.name}.`), true);
   await loadModelAccounts();
   report(`${provider.name} disconnected.`);
