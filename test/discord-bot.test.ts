@@ -1018,7 +1018,7 @@ test("files QM returns are uploaded after its reply, and oversized ones are expl
   assert.match(api.sent[1]!.content, /huge\.zip.*too large/);
 });
 
-test("a delivery to a deleted channel is dropped, one the bot merely can't post in keeps retrying", async () => {
+test("a delivery to a deleted channel is dropped, even after an earlier retryable failure; one the bot merely can't post in keeps retrying", async () => {
   const h = harness({});
   const row = (id: string, channel: string): Delivery => ({
     id,
@@ -1037,6 +1037,12 @@ test("a delivery to a deleted channel is dropped, one the bot merely can't post 
   api.sendErrors.delete("locked-channel");
   h.queue.push(row("d-kick", "open-channel"));
   await until(() => h.deliveriesAcked.some((d) => d.id === "d-locked"), "locked-channel delivery retried");
+  api.sendErrors.set("doomed-channel", 50013);
+  h.queue.push(row("d-doomed", "doomed-channel"));
+  await until(() => api.sendAttempts.includes("doomed-channel"), "doomed-channel first attempt");
+  api.sendErrors.set("doomed-channel", 10003);
+  h.queue.push(row("d-kick-2", "open-channel"));
+  await until(() => h.queue.find((d) => d.id === "d-doomed")!.expiredAt !== undefined, "doomed-channel expired");
   await plugin.stop();
 
   assert.equal(h.queue[0]!.deliveredAt, null);
