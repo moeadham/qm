@@ -278,9 +278,9 @@ export function createDiscordBot(deps: {
           if (placeholder) await api.edit(channelId, placeholder, shown);
           else placeholder = await api.send(channelId, shown);
           if (!reply || shared) return;
+          shared = true;
           try {
             await onPlaceholder(placeholder);
-            shared = true;
           } catch (error) {
             streaming = false;
             const unrecorded = placeholder;
@@ -298,12 +298,11 @@ export function createDiscordBot(deps: {
         reply = text;
         show();
       },
+      handOff(): void {
+        streaming = false;
+        handedOff = true;
+      },
       toolCalls(calls: readonly ToolCallView[]): void {
-        if (shared && calls.some((call) => call.tool === "discord" && call.args.action === "post")) {
-          streaming = false;
-          handedOff = true;
-          return;
-        }
         activity = [...activity, ...calls.map(toolCallLine)].slice(-TOOL_ACTIVITY_LINES);
         show();
       },
@@ -486,6 +485,7 @@ export function createDiscordBot(deps: {
           onToolCalls: (calls) => {
             if (typing) writer.toolCalls(calls);
           },
+          onEditRefTaken: () => writer.handOff(),
         });
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));

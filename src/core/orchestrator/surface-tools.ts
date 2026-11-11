@@ -241,7 +241,10 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       const run = input.runId ? await deps.runs?.get(input.runId) : null;
       const editRef =
         !editRefConsumed && destination.target === currentDestination.target ? run?.deliveryState?.editRef : undefined;
-      if (editRef) editRefConsumed = true;
+      if (editRef) {
+        editRefConsumed = true;
+        await deps.runs?.setDeliveryState(input.runId!, null, { editRefTaken: editRef });
+      }
       const projectedDestination = {
         ...destination,
         ...(editRef ? { editRef } : {}),

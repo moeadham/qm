@@ -241,6 +241,7 @@ function harness(opts: {
   snapshots?: string[];
   toolCalls?: ToolCallView[][];
   toolCallsAfterSnapshots?: ToolCallView[][];
+  editRefTakenAfterSnapshots?: boolean;
   replying?: boolean;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
@@ -325,6 +326,7 @@ function harness(opts: {
         hooks.onSnapshot?.(s);
         await new Promise((r) => setTimeout(r, 5));
       }
+      if (opts.editRefTakenAfterSnapshots) hooks.onEditRefTaken?.();
       for (const calls of opts.toolCallsAfterSnapshots ?? []) {
         hooks.onToolCalls?.(calls);
         await new Promise((r) => setTimeout(r, 5));
@@ -1437,6 +1439,7 @@ test("a tool-only placeholder is never offered to the core, so a surface post ca
 test("a streamed placeholder taken over by a surface post is left to the post", async () => {
   const h = harness({
     snapshots: ["Checking"],
+    editRefTakenAfterSnapshots: true,
     toolCallsAfterSnapshots: [[{ tool: "discord", args: { action: "post", text: "Answer" } }]],
     result: () => ({ status: "silent" }),
   });

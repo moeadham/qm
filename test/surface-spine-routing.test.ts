@@ -649,3 +649,19 @@ test("a shared web project turn answers with its final text, not surface tools",
     await built.runtime.stop();
   }
 });
+
+test("a surface post that lands in the run's placeholder records the takeover on the run", async () => {
+  const built = freshApp();
+  try {
+    const queued = await built.app.turn(mention("!speakpost the answer", "C9", "900.5"));
+    assert.ok(queued.runId);
+    assert.equal(await built.app.setRunDeliveryState(queued.runId, { editRef: "900.6" }), true);
+    built.runtime.start();
+    const post = await pollFor(built.deliveries, (d) => d.text === "the answer");
+    assert.equal(post?.destination.editRef, "900.6");
+    const run = await built.runs.get(queued.runId);
+    assert.equal(run?.deliveryState?.editRefTaken, "900.6");
+  } finally {
+    await built.runtime.stop();
+  }
+});
