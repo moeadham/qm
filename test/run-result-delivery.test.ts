@@ -179,6 +179,20 @@ test("runResultDelivery finishes a surface's reply placeholder in place after a 
   assert.equal(d?.destination.editRef, "171.003");
 });
 
+test("runResultDelivery removes a surface's leftover reply placeholder when the run has nothing to send", () => {
+  const spine = run({ deliveryState: { replyRef: "171.003" } });
+  spine.request = { ...spine.request, surfaceTools: true };
+  assert.deepEqual(runResultDelivery(spine)?.destination.delete, { messageTs: "171.003" });
+  assert.deepEqual(
+    runResultDelivery(run({ result: { status: "silent" }, deliveryState: { replyRef: "171.004" } }))?.destination
+      .delete,
+    {
+      messageTs: "171.004",
+    },
+  );
+  assert.equal(runResultDelivery(run({ result: { status: "silent" }, deliveryState: { editRef: "171.005" } })), null);
+});
+
 test("runResultDelivery links the admin error page when a resolver is wired", () => {
   const failed = run({
     status: "failed",

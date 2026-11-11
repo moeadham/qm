@@ -224,7 +224,7 @@ interface Harness {
   core: DiscordCoreClient;
   turns: TurnRequest[];
   acked: string[];
-  editRefs: Array<[string, string]>;
+  replyRefs: Array<[string, string]>;
   stopped: string[];
   deliveriesAcked: Array<{ id: string; body?: unknown }>;
   queue: Delivery[];
@@ -261,7 +261,7 @@ function harness(opts: {
   const h: Harness = {
     turns: [],
     acked: [],
-    editRefs: [],
+    replyRefs: [],
     stopped: [],
     deliveriesAcked: [],
     queue,
@@ -329,8 +329,8 @@ function harness(opts: {
     async ackRunDelivery(runId) {
       h.acked.push(runId);
     },
-    async reportRunReplyRef(runId, editRef) {
-      h.editRefs.push([runId, editRef]);
+    async reportRunReplyRef(runId, replyRef) {
+      h.replyRefs.push([runId, replyRef]);
     },
     async stopConversation(threadRef) {
       h.stopped.push(threadRef);
@@ -1336,7 +1336,7 @@ test("a streamed reply posts one placeholder, edits it as text grows, records it
 
   assert.equal(api.sent.length, 1);
   assert.equal(api.sent[0]!.content, "Thinking");
-  assert.deepEqual(h.editRefs, [["run-1", api.sent[0]!.id]]);
+  assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
   assert.deepEqual(
     api.edits.map((e) => e.content),
     ["Thinking about it", "Done."],
@@ -1364,7 +1364,7 @@ test("raw tool calls show in the placeholder under the streamed text until the f
   const read = (path: string) => `-# 🔧 \`read {"path":"${path}"}\``;
   assert.equal(api.sent.length, 1);
   assert.equal(api.sent[0]!.content, '-# 🔧 `bash {"command":"echo ˋhiˋ"}`');
-  assert.deepEqual(h.editRefs, [["run-1", api.sent[0]!.id]]);
+  assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
   assert.deepEqual(
     api.edits.map((e) => e.content),
     [
@@ -1422,7 +1422,7 @@ test("a tool-only placeholder is recorded for recovery and removed when the turn
   await until(() => api.removed.length === 1, "placeholder removed");
   await plugin.stop();
 
-  assert.deepEqual(h.editRefs, [["run-1", api.sent[0]!.id]]);
+  assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
   assert.deepEqual(api.removed, [api.sent[0]!.id]);
 });
 
