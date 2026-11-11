@@ -369,6 +369,21 @@ test("a person's reply never steers into a live AUTOMATION run — it enqueues b
   );
 });
 
+test("the owner of a live AUTOMATION run steers into it instead of queuing behind it", async () => {
+  const built = freshApp();
+  const channel = "C15";
+  const root = "1500.1";
+  const owned = { ...automationRun(channel, root), actor };
+  const first = await built.app.turn(owned);
+  const liveRunId = first.runId!;
+
+  const reply = await built.app.turn(mention("@bot use the second option", channel, root));
+  assert.equal(reply.runId, liveRunId, "the owner's reply joined their own automation run");
+  const signals = await built.signals.takePending(liveRunId);
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0]!.kind, "steer");
+});
+
 test("a person's verbatim thread-follow (authored detection) also enqueues behind a live AUTOMATION run", async () => {
   const built = freshApp();
   const channel = "C13";

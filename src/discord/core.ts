@@ -15,14 +15,24 @@ import {
 import { setSessionRuntime } from "../api/session-runtime.ts";
 import type { SessionStore } from "../sessions/session-store.ts";
 import type { RuntimeChoice } from "../harness/harness.ts";
-import type { Session, SessionRuntime } from "../types.ts";
+import type { Session, SessionRuntime, TurnOrigin } from "../types.ts";
+import { resolveTurnOrigin } from "../core/turn-origin.ts";
 import {
   createSurfaceCoreClient,
   type SurfaceCoreClient,
   type SurfaceCoreClientDeps,
 } from "../surfaces/surface-core-client.ts";
 
+export interface WatchableRun {
+  runId: string;
+  threadRef: string;
+  createdAt: number;
+  dm: boolean;
+  origin: TurnOrigin;
+}
+
 export interface DiscordCoreClient extends SurfaceCoreClient {
+  watchableRuns(): Promise<WatchableRun[]>;
   linkedPrincipal(discordId: string): Promise<string | undefined>;
   linkUrl(discordId: string): Promise<string | undefined>;
   allowLinkPrompt(discordId: string): Promise<boolean>;
@@ -94,6 +104,24 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
   };
   return {
     ...createSurfaceCoreClient("discord", deps),
+    async watchableRuns() {
+      const watchable: WatchableRun[] = [];
+      for (const threadRef of await deps.runs.activeSessionIds()) {
+        if (!threadRef.startsWith("discord:")) continue;
+        const run = await deps.runs.activeForThread(threadRef);
+        if (!run) continue;
+        const origin = resolveTurnOrigin(run.request);
+        if (origin.kind === "ambient") continue;
+        watchable.push({
+          runId: run.id,
+          threadRef,
+          createdAt: run.createdAt,
+          dm: run.request.conversation.kind === "dm",
+          origin,
+        });
+      }
+      return watchable;
+    },
 
     modelMenu,
 

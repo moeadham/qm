@@ -3,8 +3,14 @@ import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
 import { closeOpenFence, safeClip } from "../surfaces/safe-cut.ts";
-import { hasRunDelivery, turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
-import type { ActorAssertion, TurnResult } from "../types.ts";
+import {
+  hasRunDelivery,
+  turnFailureText,
+  type CoreTurnBody,
+  type TurnFlow,
+  type TurnHooks,
+} from "../surfaces/turn-flow.ts";
+import type { ActorAssertion, TurnOrigin, TurnResult } from "../types.ts";
 import { errMessage, reportFailure, swallowAs } from "../util/errors.ts";
 import {
   DISCORD_MESSAGE_LIMIT,
@@ -20,7 +26,7 @@ import {
   type DiscordMessage,
 } from "./api.ts";
 import { activityHeader, activityKind, toolCallLine, type ActivityKind } from "./activity-status.ts";
-import type { DiscordCoreClient } from "./core.ts";
+import type { DiscordCoreClient, WatchableRun } from "./core.ts";
 import type { ToolCallView } from "../surfaces/surface-core-client.ts";
 import { downloadDiscordFile, receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
 import { emojiCharFor } from "../slack/emoji-map.ts";
@@ -44,8 +50,7 @@ export const DISCORD_REACTION_INSTRUCTION =
   "you're answering, so a reply can be just the directive. To react to a different message, use your surface tool's " +
   "react action with that message's id.";
 
-function triggerMessageId(body: CoreTurnBody): string | undefined {
-  const origin = body.origin;
+function triggerMessageId(origin: TurnOrigin | undefined): string | undefined {
   if (origin?.kind === "human") return origin.messageTs;
   if (origin?.kind === "ambient") return origin.entryTs;
   return undefined;
@@ -62,6 +67,13 @@ const FENCE_CLOSE_RESERVE = 4;
 const STAKE_SCAN_MESSAGES = 100;
 const STATUS_DELAY_MS = 2_000;
 const STATUS_REFRESH_MS = 10_000;
+const WATCH_GRACE_MS = 10_000;
+interface DiscordTurn {
+  start(hooks: TurnHooks): Promise<TurnResult>;
+  dm: boolean;
+  origin?: TurnOrigin;
+}
+
 export interface TurnOutcome {
   result?: TurnResult;
   accepted: boolean;
@@ -80,6 +92,14 @@ interface Place {
   channelRef?: string;
   channelName?: string;
   youOpenedIt?: boolean;
+}
+
+function discordThreadChannel(threadRef: string): string | undefined {
+  const [surface, kind, ...ids] = threadRef.split(":");
+  if (surface !== "discord") return undefined;
+  if (kind === "ch" && ids.length === 2) return ids[1];
+  if (kind === "dm" && ids.length === 1) return ids[0];
+  return undefined;
 }
 
 export function discordDmThreadRef(dmChannelId: string): string {
@@ -443,16 +463,34 @@ export function createDiscordBot(deps: {
       ...(await inboundFiles(m, spoken)),
       ...(place.kind === "channel" ? await threadContext(place, m) : {}),
     };
-    await converse(place.channelId, body, {
+    await converse(place.channelId, submitted(body), {
       addressed: relevant.addressed,
       key: messageKey,
       ...(gate ? { gate } : {}),
     });
   }
 
+  function submitted(body: CoreTurnBody): DiscordTurn {
+    return {
+      start: (hooks) => flow.callCore(body, hooks),
+      dm: body.conversation.kind === "dm",
+      ...(body.origin ? { origin: body.origin } : {}),
+    };
+  }
+
+  async function watchRun(run: WatchableRun): Promise<void> {
+    const channelId = discordThreadChannel(run.threadRef);
+    if (!channelId || flow.inFlightRuns.has(run.runId) || Date.now() - run.createdAt < WATCH_GRACE_MS) return;
+    await converse(
+      channelId,
+      { start: (hooks) => flow.followRun(run.runId, hooks), dm: run.dm, origin: run.origin },
+      { addressed: true, key: `run:${run.runId}` },
+    );
+  }
+
   async function converse(
     channelId: string,
-    body: CoreTurnBody,
+    turn: DiscordTurn,
     opts: { addressed: boolean; key: string; gate?: AcceptGate; quiet?: boolean },
   ): Promise<TurnOutcome> {
     const { addressed, key, gate, quiet } = opts;
@@ -477,7 +515,7 @@ export function createDiscordBot(deps: {
     try {
       let result: TurnResult;
       try {
-        result = await flow.callCore(body, {
+        result = await turn.start({
           deferDeliveryAck: true,
           onQueued: (runId) => {
             queuedRunId = runId;
@@ -508,15 +546,13 @@ export function createDiscordBot(deps: {
       writer.stop();
       if (!accepted) accept();
       if (result.steered) return { result, accepted };
-      const extracted = extractReactions(
-        quiet && result.status !== "ok" ? "" : replyText(result, typing, body.conversation.kind === "dm"),
-      );
+      const extracted = extractReactions(quiet && result.status !== "ok" ? "" : replyText(result, typing, turn.dm));
       const reply = extracted.text.trim();
       const reactions = [
         ...(result.status === "react" ? (result.reactions ?? []) : []),
         ...extracted.reactions.filter((d) => !d.target && !d.targetId).flatMap((d) => d.names),
       ];
-      const trigger = triggerMessageId(body);
+      const trigger = triggerMessageId(turn.origin);
       if (reactions.length && trigger) await reactTo(channelId, trigger, reactions);
       const runId = queuedRunId;
       try {
@@ -566,8 +602,8 @@ export function createDiscordBot(deps: {
         });
     }
     if (!body.deliveryTarget) return { accepted: false };
-    return converse(body.deliveryTarget, body, { addressed: true, key, quiet: true });
+    return converse(body.deliveryTarget, submitted(body), { addressed: true, key, quiet: true });
   }
 
-  return { handleMessage, resumeTurn };
+  return { handleMessage, resumeTurn, watchRun };
 }

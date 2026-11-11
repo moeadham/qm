@@ -258,7 +258,7 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
             if (fb?.closed) signalFirstBlock(fb.text);
             await signalToolCalls().catch(swallowAs(`${surface}: tool call refresh`, undefined));
             const mark = `${run.status}:${run.attempts}:${run.leaseExpiresAt ?? ""}`;
-            if (mark !== lastMark) {
+            if (mark !== lastMark || run.status === "pending") {
               lastMark = mark;
               lastProgressAt = Date.now();
             }

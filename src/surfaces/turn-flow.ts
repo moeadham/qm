@@ -36,7 +36,7 @@ export function hasRunDelivery(result: TurnResult): boolean {
 
 export type CoreTurnBody = Omit<TurnRequest, "surface">;
 
-interface TurnHooks {
+export interface TurnHooks {
   deferDeliveryAck?: boolean;
   onQueued?: (runId: string) => void | Promise<void>;
   onSteered?: (runId: string) => void | Promise<void>;
@@ -51,6 +51,7 @@ interface TurnHooks {
 
 export interface TurnFlow {
   callCore(body: CoreTurnBody, hooks?: TurnHooks): Promise<TurnResult>;
+  followRun(runId: string, hooks?: TurnHooks): Promise<TurnResult>;
   inFlightRuns: { add(runId: string): void; delete(runId: string): void; has(runId: string): boolean };
   inFlightRunByThread: ReturnType<typeof createInFlightThreadMap>;
   ackRunDelivery(runId: string): void;
@@ -118,12 +119,16 @@ export function createTurnFlow(
       await hooks.onSteered?.(queued.runId);
       return { status: "silent", steered: true };
     }
-    inFlightRuns.add(queued.runId);
+    return followRun(queued.runId, hooks);
+  }
+
+  async function followRun(runId: string, hooks: TurnHooks = {}): Promise<TurnResult> {
+    inFlightRuns.add(runId);
     try {
-      await hooks.onQueued?.(queued.runId);
-      return await pollRun(queued.runId, hooks);
+      await hooks.onQueued?.(runId);
+      return await pollRun(runId, hooks);
     } finally {
-      inFlightRuns.delete(queued.runId);
+      inFlightRuns.delete(runId);
     }
   }
 
@@ -156,5 +161,5 @@ export function createTurnFlow(
     throw new SurfaceTurnFailure("the agent finished without producing a reply", undefined);
   }
 
-  return { callCore, inFlightRuns, inFlightRunByThread, ackRunDelivery };
+  return { callCore, followRun, inFlightRuns, inFlightRunByThread, ackRunDelivery };
 }

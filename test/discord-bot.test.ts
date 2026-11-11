@@ -5,7 +5,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import assert from "node:assert/strict";
 import type { APIInteraction } from "@discordjs/core";
 import { startDiscordPlugin, assertOneChatPlatform, discordConfigFromEnv } from "../src/discord/index.ts";
-import { createDiscordCoreClient, type DiscordCoreClient } from "../src/discord/core.ts";
+import { createDiscordCoreClient, type DiscordCoreClient, type WatchableRun } from "../src/discord/core.ts";
 import {
   components,
   createDiscordGateway,
@@ -242,6 +242,7 @@ function harness(opts: {
   toolCalls?: ToolCallView[][];
   replying?: boolean;
   queuedMs?: number;
+  watchable?: WatchableRun[];
   steeredAfterMs?: number;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
@@ -336,6 +337,9 @@ function harness(opts: {
     },
     async ackRunDelivery(runId) {
       h.acked.push(runId);
+    },
+    async watchableRuns() {
+      return opts.watchable?.splice(0) ?? [];
     },
     async reportRunReplyRef(runId, replyRef) {
       h.replyRefs.push([runId, replyRef]);
@@ -1488,6 +1492,31 @@ test("a failed turn that used tools posts its failure note without a worked summ
   await plugin.stop();
 
   assert.match(api.edits.at(-1)!.content, /^⚠️ /);
+});
+
+test("a run the bot did not start is watched with live status and its reply lands in the status message", async () => {
+  const h = harness({
+    watchable: [
+      {
+        runId: "run-drop",
+        threadRef: `discord:dm:${DM}`,
+        createdAt: Date.now() - 60_000,
+        dm: true,
+        origin: { kind: "automation" },
+      },
+    ],
+    toolCalls: [[{ tool: "execute", args: { command: "ls", purpose: "Check the workspace" } }]],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, plugin } = await boot(h);
+  await until(() => h.acked.includes("run-drop"), "watched run delivery ack");
+  await plugin.stop();
+
+  assert.deepEqual(h.turns, []);
+  assert.equal(api.sent.length, 1);
+  assert.equal(api.sent[0]!.content, "-# Working · Ran commands\n-# 🔧 Check the workspace");
+  assert.deepEqual(h.replyRefs, [["run-drop", api.sent[0]!.id]]);
+  assert.equal(api.edits.at(-1)!.content, "-# Worked · Ran commands\n\nDone.");
 });
 
 test("a tool-only placeholder is recorded for recovery and removed when the turn ends without text", async () => {

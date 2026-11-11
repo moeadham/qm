@@ -109,3 +109,28 @@ test("waitRun signals once when a pending run starts running", async () => {
   await core.waitRun("r1", { onRunning: () => seen.push(`running after ${polls} polls`) });
   assert.deepEqual(seen, ["running after 3 polls"]);
 });
+
+test("waitRun keeps following a queued run past the stall budget instead of giving up", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  let status = "pending";
+  const core = createSurfaceCoreClient("discord", {
+    runs: { onTerminal() {}, get: async () => ({ id: "r1", status, attempts: 0 }) },
+    turnStream: createTurnStream(),
+    app: {
+      getRun: async () => ({ result: { status: "ok", reply: "Done" } }),
+      getRunToolEntries: async () => [],
+    },
+  } as unknown as SurfaceCoreClientDeps);
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const waiting = core.waitRun("r1");
+  let failure: unknown;
+  waiting.catch((error: unknown) => (failure = error));
+  for (let second = 0; second < 400 && failure === undefined; second++) {
+    await flush();
+    t.mock.timers.tick(1_000);
+  }
+  status = "done";
+  await flush();
+  t.mock.timers.tick(1_000);
+  assert.deepEqual(await waiting, { status: "ok", reply: "Done" });
+});
