@@ -46,7 +46,6 @@ interface TurnHooks {
   onGoal?: (goal: GoalView) => void;
   onSnapshot?: (text: string) => void;
   onToolCalls?: (calls: ToolCallView[]) => void;
-  onEditRefTaken?: () => void;
 }
 
 export interface TurnFlow {
@@ -138,7 +137,6 @@ export function createTurnFlow(
         ...(hooks.onGoal ? { onGoal: hooks.onGoal } : {}),
         ...(hooks.onSnapshot ? { onSnapshot: hooks.onSnapshot } : {}),
         ...(hooks.onToolCalls ? { onToolCalls: hooks.onToolCalls } : {}),
-        ...(hooks.onEditRefTaken ? { onEditRefTaken: hooks.onEditRefTaken } : {}),
       });
     } catch (err) {
       inFlightRuns.delete(runId);

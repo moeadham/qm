@@ -240,8 +240,6 @@ function harness(opts: {
   result?: (body: TurnRequest) => TurnResult;
   snapshots?: string[];
   toolCalls?: ToolCallView[][];
-  toolCallsAfterSnapshots?: ToolCallView[][];
-  editRefTakenAfterSnapshots?: boolean;
   replying?: boolean;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
@@ -326,17 +324,12 @@ function harness(opts: {
         hooks.onSnapshot?.(s);
         await new Promise((r) => setTimeout(r, 5));
       }
-      if (opts.editRefTakenAfterSnapshots) hooks.onEditRefTaken?.();
-      for (const calls of opts.toolCallsAfterSnapshots ?? []) {
-        hooks.onToolCalls?.(calls);
-        await new Promise((r) => setTimeout(r, 5));
-      }
       return opts.result ? opts.result(h.turns.at(-1)!) : { status: "ok", reply: "hello back", runId };
     },
     async ackRunDelivery(runId) {
       h.acked.push(runId);
     },
-    async reportRunEditRef(runId, editRef) {
+    async reportRunReplyRef(runId, editRef) {
       h.editRefs.push([runId, editRef]);
     },
     async stopConversation(threadRef) {
@@ -1419,12 +1412,9 @@ test("tool lines under a reply that is mid code block stay outside the block", a
   assert.equal(api.edits[0]!.content, 'Here:\n```ts\nconst a = 1;\n```\n\n-# 🔧 `bash {"command":"ls"}`');
 });
 
-test("a tool-only placeholder is never offered to the core, so a surface post cannot land in it before it is removed", async () => {
+test("a tool-only placeholder is recorded for recovery and removed when the turn ends without text", async () => {
   const h = harness({
-    toolCalls: [
-      [{ tool: "execute", args: { command: "ls" } }],
-      [{ tool: "discord", args: { action: "post", text: "Answer" } }],
-    ],
+    toolCalls: [[{ tool: "execute", args: { command: "ls" } }]],
     result: () => ({ status: "silent" }),
   });
   const { api, handlers, plugin } = await boot(h);
@@ -1432,26 +1422,8 @@ test("a tool-only placeholder is never offered to the core, so a surface post ca
   await until(() => api.removed.length === 1, "placeholder removed");
   await plugin.stop();
 
-  assert.deepEqual(h.editRefs, []);
-  assert.equal(api.removed[0], api.sent[0]!.id);
-});
-
-test("a streamed placeholder taken over by a surface post is left to the post", async () => {
-  const h = harness({
-    snapshots: ["Checking"],
-    editRefTakenAfterSnapshots: true,
-    toolCallsAfterSnapshots: [[{ tool: "discord", args: { action: "post", text: "Answer" } }]],
-    result: () => ({ status: "silent" }),
-  });
-  const { api, handlers, plugin } = await boot(h);
-  handlers.onMessage(dm(ALICE, "go"));
-  await until(() => h.editRefs.length === 1, "placeholder recorded");
-  await new Promise((r) => setTimeout(r, 50));
-  await plugin.stop();
-
   assert.deepEqual(h.editRefs, [["run-1", api.sent[0]!.id]]);
-  assert.deepEqual(api.edits, []);
-  assert.deepEqual(api.removed, []);
+  assert.deepEqual(api.removed, [api.sent[0]!.id]);
 });
 
 test("the gateway connects on exactly one instance while another holds the lease", async () => {

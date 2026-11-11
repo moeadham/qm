@@ -254,8 +254,6 @@ export function createDiscordBot(deps: {
 
   function createReplyWriter(channelId: string, onPlaceholder: (messageId: string) => Promise<void>) {
     let placeholder: string | undefined;
-    let shared = false;
-    let handedOff = false;
     let streaming = true;
     let chain: Promise<void> = Promise.resolve();
     let reply = "";
@@ -275,19 +273,14 @@ export function createDiscordBot(deps: {
           queued = false;
           const shown = streaming ? render() : "";
           if (!shown.trim()) return;
-          if (placeholder) await api.edit(channelId, placeholder, shown);
-          else placeholder = await api.send(channelId, shown);
-          if (!reply || shared) return;
-          shared = true;
+          if (placeholder) return api.edit(channelId, placeholder, shown);
+          const posted = await api.send(channelId, shown);
           try {
-            await onPlaceholder(placeholder);
+            await onPlaceholder(posted);
+            placeholder = posted;
           } catch (error) {
             streaming = false;
-            const unrecorded = placeholder;
-            placeholder = undefined;
-            await api
-              .remove(channelId, unrecorded)
-              .catch(swallowAs("discord: remove unrecorded placeholder", undefined));
+            await api.remove(channelId, posted).catch(swallowAs("discord: remove unrecorded placeholder", undefined));
             throw error;
           }
         })
@@ -298,10 +291,6 @@ export function createDiscordBot(deps: {
         reply = text;
         show();
       },
-      handOff(): void {
-        streaming = false;
-        handedOff = true;
-      },
       toolCalls(calls: readonly ToolCallView[]): void {
         activity = [...activity, ...calls.map(toolCallLine)].slice(-TOOL_ACTIVITY_LINES);
         show();
@@ -309,9 +298,8 @@ export function createDiscordBot(deps: {
       async finish(text: string, key: string): Promise<void> {
         streaming = false;
         await chain;
-        const own = handedOff ? undefined : placeholder;
-        if (text) return postMessage(api, channelId, text, { key, ...(own ? { editRef: own } : {}) });
-        if (own) await api.remove(channelId, own);
+        if (text) return postMessage(api, channelId, text, { key, ...(placeholder ? { editRef: placeholder } : {}) });
+        if (placeholder) await api.remove(channelId, placeholder);
       },
     };
   }
@@ -451,7 +439,7 @@ export function createDiscordBot(deps: {
     const { addressed, key, gate, quiet } = opts;
     let queuedRunId: string | undefined;
     const writer = createReplyWriter(channelId, async (messageId) => {
-      if (queuedRunId) await core.reportRunEditRef(queuedRunId, messageId);
+      if (queuedRunId) await core.reportRunReplyRef(queuedRunId, messageId);
     });
     let accepted = false;
     const accept = (): void => {
@@ -485,7 +473,6 @@ export function createDiscordBot(deps: {
           onToolCalls: (calls) => {
             if (typing) writer.toolCalls(calls);
           },
-          onEditRefTaken: () => writer.handOff(),
         });
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));

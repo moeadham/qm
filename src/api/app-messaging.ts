@@ -439,7 +439,8 @@ export function createMessagingMethods(
     },
     async setRunDeliveryState(runId, state) {
       const found = await deps.runs.setDeliveryState(runId, null, state);
-      if (found && state.editRef) await deps.deliveries.setEditRefByKey(`run:${runId}`, state.editRef);
+      const ref = state.editRef ?? state.replyRef;
+      if (found && ref) await deps.deliveries.setEditRefByKey(`run:${runId}`, ref);
       return found;
     },
 

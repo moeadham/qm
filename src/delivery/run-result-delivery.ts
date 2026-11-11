@@ -35,7 +35,7 @@ export function runResultDelivery(run: Run, adminUrlFor?: AdminUrlFor): RunResul
   const surface = run.request.surface;
   if (!target || !surface) return null;
   const origin = resolveTurnOrigin(run.request);
-  const editRef = run.deliveryState?.editRefTaken ? undefined : run.deliveryState?.editRef;
+  const editRef = run.deliveryState?.editRef ?? run.deliveryState?.replyRef;
   const failed = run.status === "failed";
   const webTranscript = webTranscriptNote(run, surface, failed);
   const destination: Destination = {

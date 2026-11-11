@@ -42,7 +42,6 @@ export interface RunHooks {
   onGoal?(goal: GoalView): void | Promise<void>;
   onSnapshot?(text: string): void;
   onToolCalls?(calls: ToolCallView[]): void;
-  onEditRefTaken?(): void;
 }
 
 export interface ToolCallView {
@@ -65,6 +64,7 @@ export interface SurfaceCoreClient {
   ackRunDelivery(runId: string): Promise<void>;
   reportTurnMetrics(runId: string, patch: { deliverMs?: number; slackInflightMs?: number }): Promise<void>;
   reportRunEditRef(runId: string, editRef: string): Promise<void>;
+  reportRunReplyRef(runId: string, replyRef: string): Promise<void>;
   claimDeliveries(type: string, claimMs: number): Promise<Delivery[]>;
   ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
   reportSlowDeliveryDrain?(info: { durationMs: number; rows: number }): Promise<void>;
@@ -187,12 +187,6 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
         surfaceSignaled = true;
         hooks.onSurfacePosted?.();
       };
-      let editRefTakenSignaled = false;
-      const signalEditRefTaken = (): void => {
-        if (editRefTakenSignaled) return;
-        editRefTakenSignaled = true;
-        hooks.onEditRefTaken?.();
-      };
       const signalSnapshot = (): void => {
         if (!hooks.onSnapshot) return;
         const text = deps.turnStream.snapshot(runId) ?? "";
@@ -250,7 +244,6 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
               return (view?.result as TurnResult | null | undefined) ?? null;
             }
             signalReplying(run.deliveryState?.replying === true);
-            if (run.deliveryState?.editRefTaken) signalEditRefTaken();
             signalSnapshot();
             await emitGoal().catch(swallowAs(`${surface}: goal refresh`, undefined));
             const fb = deps.turnStream.firstBlock(runId);
@@ -307,6 +300,11 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
 
     async reportRunEditRef(runId, editRef) {
       const found = await deps.app.setRunDeliveryState(runId, { editRef });
+      if (!found) throw new Error(`run ${runId} not found`);
+    },
+
+    async reportRunReplyRef(runId, replyRef) {
+      const found = await deps.app.setRunDeliveryState(runId, { replyRef });
       if (!found) throw new Error(`run ${runId} not found`);
     },
 

@@ -650,17 +650,16 @@ test("a shared web project turn answers with its final text, not surface tools",
   }
 });
 
-test("a surface post that lands in the run's placeholder records the takeover on the run", async () => {
+test("a surface post never lands in a reply placeholder that the surface keeps for itself", async () => {
   const built = freshApp();
   try {
     const queued = await built.app.turn(mention("!speakpost the answer", "C9", "900.5"));
     assert.ok(queued.runId);
-    assert.equal(await built.app.setRunDeliveryState(queued.runId, { editRef: "900.6" }), true);
+    assert.equal(await built.app.setRunDeliveryState(queued.runId, { replyRef: "900.6" }), true);
     built.runtime.start();
     const post = await pollFor(built.deliveries, (d) => d.text === "the answer");
-    assert.equal(post?.destination.editRef, "900.6");
-    const run = await built.runs.get(queued.runId);
-    assert.equal(run?.deliveryState?.editRefTaken, "900.6");
+    assert.ok(post, "the post was delivered");
+    assert.equal(post.destination.editRef, undefined);
   } finally {
     await built.runtime.stop();
   }

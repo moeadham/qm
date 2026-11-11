@@ -174,15 +174,9 @@ test("runResultDelivery carries the surface's edit checkpoint into the destinati
   assert.equal(d?.destination.editRef, "171.002");
 });
 
-test("runResultDelivery leaves a placeholder alone once a surface post has taken it", () => {
-  const d = runResultDelivery(
-    run({
-      status: "failed",
-      result: { status: "failed" },
-      deliveryState: { editRef: "171.002", editRefTaken: "171.002" },
-    }),
-  );
-  assert.equal(d?.destination.editRef, undefined);
+test("runResultDelivery finishes a surface's reply placeholder in place after a crash", () => {
+  const d = runResultDelivery(run({ deliveryState: { replyRef: "171.003" } }));
+  assert.equal(d?.destination.editRef, "171.003");
 });
 
 test("runResultDelivery links the admin error page when a resolver is wired", () => {

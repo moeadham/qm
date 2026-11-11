@@ -90,33 +90,3 @@ test("waitRun reports each new tool call once with its raw arguments", async () 
     [{ tool: "read", args: { path: "README.md" } }],
   ]);
 });
-
-test("waitRun signals a taken placeholder before the reply snapshot of the same poll", async () => {
-  const stream = createTurnStream();
-  stream.begin("r1");
-  stream.publish("r1", "Checking");
-  let polls = 0;
-  const core = createSurfaceCoreClient("discord", {
-    runs: {
-      onTerminal() {},
-      get: async () => {
-        polls++;
-        return {
-          id: "r1",
-          status: polls < 3 ? "running" : "done",
-          attempts: 1,
-          deliveryState: { editRef: "m1", editRefTaken: "m1" },
-        };
-      },
-    },
-    turnStream: stream,
-    app: { getRun: async () => ({ result: { status: "silent" } }) },
-  } as unknown as SurfaceCoreClientDeps);
-  const seen: string[] = [];
-  await core.waitRun("r1", {
-    onEditRefTaken: () => seen.push("taken"),
-    onSnapshot: (text) => seen.push(text),
-  });
-  assert.deepEqual(seen, ["taken", "Checking"]);
-  stream.end("r1");
-});
