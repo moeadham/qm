@@ -544,11 +544,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const humanTurn = input.origin.kind === "human";
       const sessionTurn = isSessionTurn(input);
       const humanInput = humanTurn && !sessionTurn;
+      const scopeId = deps.resolution.scopeFor(conversation, actor);
       const trustedRoom =
         conversation.kind !== "dm" &&
         !!conversation.channelRef &&
         !!input.surface &&
-        !isSessionTurn(input) &&
+        !sessionTurn &&
         (input.origin.kind === "human" || (input.origin.kind === "ambient" && input.origin.live === true)) &&
         (await deps.trustedChatRoom?.(input.surface, conversation.channelRef)) === true;
       const allInternal =
@@ -708,7 +709,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       }
 
       const resolution = await deps.resolution.resolve(conversation, actor, external);
-      const scopeId = deps.resolution.scopeFor(conversation, actor);
       const isCurrentSharedScopeMember = withLiveTurnMembership(deps.isCurrentSharedScopeMember, {
         actorId: actor.id,
         scopeId,
@@ -1772,6 +1772,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         );
       };
       const egressTokenForTurn = await egressTokenForPolicy(resolution.egress);
+      const scheduledTrustedCredentialRoom =
+        input.surface === "cron" &&
+        !sessionTurn &&
+        conversation.kind !== "dm" &&
+        !!conversation.channelRef &&
+        input.origin.kind === "automation" &&
+        !!input.origin.destination &&
+        input.origin.destination.audienceScopeId === scopeId &&
+        deps.identity.audienceIsAllInternal(conversation.audience) &&
+        (await deps.trustedChatRoom?.(input.origin.destination.type, conversation.channelRef)) === true;
       const registerServiceCredentials = async (
         addCredential: typeof addCredentialToCatalog,
         requestedHandles: readonly string[],
@@ -1820,7 +1830,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           })());
         for (const credential of available) {
           if (credential.delivery === "env") {
-            if ((!allInternal && !external) || !credential.envKey) continue;
+            if ((!allInternal && !scheduledTrustedCredentialRoom && !external) || !credential.envKey) continue;
             addCredential(
               {
                 handle: credential.slug,
