@@ -304,11 +304,13 @@ export async function webuiModelEnabled(
 export async function availableRuntimeError(
   ctx: { deps: RuntimeDeps },
   scope: ScopeId,
-  choice: RuntimeChoice,
+  choice: Omit<RuntimeChoice, "harnessId"> & { harnessId: string },
   purpose?: RuntimePurpose,
   actorId?: string,
 ): Promise<string | null> {
-  const available = await availableRuntime(ctx, scope, choice, purpose, actorId);
+  const harnessId = choice.harnessId;
+  if (!isHarnessId(harnessId)) return `harness ${harnessId} is not available`;
+  const available = await availableRuntime(ctx, scope, { ...choice, harnessId }, purpose, actorId);
   return "error" in available ? available.error : null;
 }
 

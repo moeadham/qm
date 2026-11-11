@@ -16,7 +16,6 @@ import { setSessionRuntime } from "../api/session-runtime.ts";
 import type { SessionStore } from "../sessions/session-store.ts";
 import type { RuntimeChoice } from "../harness/harness.ts";
 import type { Session, SessionRuntime } from "../types.ts";
-import { isHarnessId } from "../model/pi-models.ts";
 import {
   createSurfaceCoreClient,
   type SurfaceCoreClient,
@@ -83,17 +82,15 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     if (opts.refresh !== false) await deps.runtime.refreshModels?.();
     const menu = await userRuntimeConfigBody({ deps: deps.runtime }, session.scopeId, principalId);
     const pinned = session.runtime;
-    if (!pinned) return { session, menu, current: menu.effective };
-    const usable =
-      isHarnessId(pinned.harnessId) &&
-      !(await availableRuntimeError(
-        { deps: deps.runtime },
-        session.scopeId,
-        { ...pinned, harnessId: pinned.harnessId },
-        undefined,
-        principalId,
-      ));
-    return usable ? { session, menu, current: pinned } : { session, menu, current: menu.effective, skipped: pinned };
+    if (!pinned || opts.refresh === false) return { session, menu, current: pinned ?? menu.effective };
+    const problem = await availableRuntimeError(
+      { deps: deps.runtime },
+      session.scopeId,
+      pinned,
+      undefined,
+      principalId,
+    );
+    return !problem ? { session, menu, current: pinned } : { session, menu, current: menu.effective, skipped: pinned };
   };
   return {
     ...createSurfaceCoreClient("discord", deps),
