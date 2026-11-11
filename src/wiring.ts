@@ -441,6 +441,7 @@ import { createPostgresErrorLog } from "./admin/postgres-error-log.ts";
 import { createMetricsSink, type MetricsSink } from "./admin/metrics-sink.ts";
 import { createPostgresMetricsSink } from "./admin/postgres-metrics-sink.ts";
 import { errMessage, reportFailureAs, swallowAs } from "./util/errors.ts";
+import { ProviderTurnError } from "./core/turn-error.ts";
 import { sleep, withTimeout } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
 
@@ -1506,9 +1507,11 @@ export function buildApp(
         ...claudeHarnessConfigOptions(config),
         orgOauthToken: async () => {
           const token = (await userModelCredentials.derivedOAuth(orgModelAccount, "anthropic"))?.accessToken;
-          if (!token && (await userModelCredentials.subscription(orgModelAccount, "anthropic")))
-            console.error("[model] company Claude login has no usable token; reconnect it in Admin → Models");
-          return token;
+          if (token || !(await userModelCredentials.subscription(orgModelAccount, "anthropic"))) return token;
+          throw new ProviderTurnError(
+            "The organization's Claude login needs to be reconnected. An admin can reconnect it in Admin → Models.",
+            { code: "auth", retryable: false, raw: "company Claude login has no usable token" },
+          );
         },
         signals: runSignals,
         mcpTools,
