@@ -254,6 +254,8 @@ export function createDiscordBot(deps: {
 
   function createReplyWriter(channelId: string, onPlaceholder: (messageId: string) => Promise<void>) {
     let placeholder: string | undefined;
+    let shared = false;
+    let handedOff = false;
     let streaming = true;
     let chain: Promise<void> = Promise.resolve();
     let reply = "";
@@ -273,14 +275,19 @@ export function createDiscordBot(deps: {
           queued = false;
           const shown = streaming ? render() : "";
           if (!shown.trim()) return;
-          if (placeholder) return api.edit(channelId, placeholder, shown);
-          const posted = await api.send(channelId, shown);
+          if (placeholder) await api.edit(channelId, placeholder, shown);
+          else placeholder = await api.send(channelId, shown);
+          if (!reply || shared) return;
           try {
-            await onPlaceholder(posted);
-            placeholder = posted;
+            await onPlaceholder(placeholder);
+            shared = true;
           } catch (error) {
             streaming = false;
-            await api.remove(channelId, posted).catch(swallowAs("discord: remove unrecorded placeholder", undefined));
+            const unrecorded = placeholder;
+            placeholder = undefined;
+            await api
+              .remove(channelId, unrecorded)
+              .catch(swallowAs("discord: remove unrecorded placeholder", undefined));
             throw error;
           }
         })
@@ -292,14 +299,20 @@ export function createDiscordBot(deps: {
         show();
       },
       toolCalls(calls: readonly ToolCallView[]): void {
+        if (shared && calls.some((call) => call.tool === "discord" && call.args.action === "post")) {
+          streaming = false;
+          handedOff = true;
+          return;
+        }
         activity = [...activity, ...calls.map(toolCallLine)].slice(-TOOL_ACTIVITY_LINES);
         show();
       },
       async finish(text: string, key: string): Promise<void> {
         streaming = false;
         await chain;
-        if (text) return postMessage(api, channelId, text, { key, ...(placeholder ? { editRef: placeholder } : {}) });
-        if (placeholder) await api.remove(channelId, placeholder);
+        const own = handedOff ? undefined : placeholder;
+        if (text) return postMessage(api, channelId, text, { key, ...(own ? { editRef: own } : {}) });
+        if (own) await api.remove(channelId, own);
       },
     };
   }
