@@ -37,14 +37,13 @@ import { slackErrorCode } from "./payloads.ts";
 
 const DELIVERY_CLAIM_MS = 15_000;
 const SLOW_DRAIN_ALARM_MS = 120_000;
-const PERMANENT_POST_ERRORS = new Set([
-  "channel_not_found",
-  "is_archived",
-  "account_inactive",
+const TARGET_GONE_POST_ERRORS = new Set([
   "user_not_found",
   "cannot_reply_to_message",
   "message_not_found",
+  "thread_not_found",
 ]);
+const PERMANENT_POST_ERRORS = new Set(["channel_not_found", "is_archived", "account_inactive"]);
 
 const SETTLED_PIN_ERRORS = new Set(["already_pinned", "no_pin", "not_pinned"]);
 
@@ -116,6 +115,8 @@ export function createDeliveryPoller(deps: {
     (id: string) =>
     (stage: "post" | "ack", err: unknown, gaveUp: boolean): void => {
       const code = slackErrorCode(err);
+      if (stage === "post" && gaveUp && code && TARGET_GONE_POST_ERRORS.has(code))
+        void core.expireDelivery(id, code).catch(swallowAs("slack-plugin: delivery expiry", undefined));
       if (stage === "post" && gaveUp && code && PERMANENT_POST_ERRORS.has(code) && !undeliverableReported.has(id)) {
         if (undeliverableReported.size >= 5000) undeliverableReported.clear();
         undeliverableReported.add(id);

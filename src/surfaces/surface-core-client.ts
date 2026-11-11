@@ -61,6 +61,7 @@ export interface SurfaceCoreClient {
   ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
   reportSlowDeliveryDrain?(info: { durationMs: number; rows: number }): Promise<void>;
   reportDeliveryUndeliverable?(id: string, reason: string): Promise<void>;
+  expireDelivery(id: string, reason: string): Promise<void>;
   onDeliveryEnqueued(listener: () => void): () => void;
   holdLease<T>(name: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
@@ -294,6 +295,16 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
         category: "delivery",
         code: "delivery_undeliverable",
         message: `delivery ${id} cannot be delivered (${reason}) — retrying until the TTL expires it`,
+        scopeLabel: deliveryScope,
+      });
+    },
+
+    async expireDelivery(id, reason) {
+      await deps.deliveries.expire(id, Date.now(), reason);
+      deps.errors?.record({
+        category: "delivery",
+        code: "delivery_target_gone",
+        message: `delivery ${id} expired: its target no longer exists (${reason})`,
         scopeLabel: deliveryScope,
       });
     },

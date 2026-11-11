@@ -385,3 +385,46 @@ for (const type of ["slack", "group", "principal"]) {
     assert.deepEqual(recovered.acknowledgements, ["D1"]);
   });
 }
+
+test("a delivery whose Slack target is gone is expired once posting gives up; a merely blocked one is not", async () => {
+  const rows = [
+    { id: "D-gone", idempotencyKey: "D-gone", text: "reply", destination: { type: "slack", target: "C1:100.200" } },
+    { id: "D-blocked", idempotencyKey: "D-blocked", text: "post", destination: { type: "slack", target: "C2" } },
+  ].map((r) => ({ ...r, createdAt: Date.now() }));
+  const expired = new Map<string, string>();
+  const failures: Record<string, string> = { C1: "message_not_found", C2: "channel_not_found" };
+  const core = {
+    holdDeliveryDispatch: (fn: (lost: Promise<void>) => Promise<unknown>) => fn(new Promise<void>(() => {})),
+    getApproval: async () => null,
+    claimDeliveries: async () => rows.filter((r) => !expired.has(r.id)),
+    ackDelivery: async () => {},
+    expireDelivery: async (id: string, reason: string) => void expired.set(id, reason),
+  };
+  const attempts: Record<string, number> = {};
+  const client = {
+    conversations: {
+      history: async () => ({ messages: [] }),
+      replies: async () => ({ messages: [] }),
+    },
+    chat: {
+      postMessage: async (args: { channel: string }) => {
+        attempts[args.channel] = (attempts[args.channel] ?? 0) + 1;
+        throw Object.assign(new Error("slack"), { data: { error: failures[args.channel] } });
+      },
+    },
+  };
+  const poller = createDeliveryPoller({
+    core: core as never,
+    flow: { inFlightRuns: new Set<string>() } as never,
+    threads: { mark: () => {} } as never,
+    clientForIdentity: () => client,
+  });
+  let failedWhileUnexpired = false;
+  for (let i = 0; i < 10 && !expired.size; i++) {
+    await poller.pollDeliveries(client);
+    await new Promise((r) => setImmediate(r));
+    if (!expired.size && (attempts.C1 ?? 0) > 0) failedWhileUnexpired = true;
+  }
+  assert.ok(failedWhileUnexpired, "a single failed post does not expire the delivery before retries give up");
+  assert.deepEqual([...expired], [["D-gone", "message_not_found"]]);
+});

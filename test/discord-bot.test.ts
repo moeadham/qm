@@ -94,11 +94,16 @@ class FakeDiscord implements DiscordApi {
     });
     return `msg-${this.next++}`;
   }
+  sendErrors = new Map<string, number>();
+  sendAttempts: string[] = [];
   async send(
     channelId: string,
     content: string,
     opts: { nonce?: string; buttons?: DiscordButton[]; replyTo?: string } = {},
   ) {
+    this.sendAttempts.push(channelId);
+    const code = this.sendErrors.get(channelId);
+    if (code !== undefined) throw Object.assign(new Error(`discord ${code}`), { code });
     const id = `msg-${this.next++}`;
     this.sent.push({
       channelId,
@@ -273,6 +278,10 @@ function harness(opts: {
         enqueued.add(listener);
         return () => enqueued.delete(listener);
       },
+      expire: async (id: string, at: number) => {
+        const row = queue.find((d) => d.id === id);
+        if (row && row.deliveredAt === null) row.expiredAt = at;
+      },
     } as never,
     metrics: {} as never,
     runs: { onTerminal: () => {} } as never,
@@ -342,7 +351,9 @@ function harness(opts: {
       return blob;
     },
     async claimDeliveries(type) {
-      const rows = h.queue.filter((d) => d.destination.type === type && d.deliveredAt === null);
+      const rows = h.queue.filter(
+        (d) => d.destination.type === type && d.deliveredAt === null && d.expiredAt === undefined,
+      );
       return rows;
     },
     async getApproval(requestId) {
@@ -1005,6 +1016,37 @@ test("files QM returns are uploaded after its reply, and oversized ones are expl
   assert.deepEqual(api.files[0]!.names, ["chart.png"]);
   assert.deepEqual(api.files[0]!.bytes, ["CHART"]);
   assert.match(api.sent[1]!.content, /huge\.zip.*too large/);
+});
+
+test("a delivery to a deleted channel is dropped, even after an earlier retryable failure; one the bot merely can't post in keeps retrying", async () => {
+  const h = harness({});
+  const row = (id: string, channel: string): Delivery => ({
+    id,
+    destination: { type: "discord", target: channel },
+    text: "hello",
+    idempotencyKey: `post:${id}`,
+    createdAt: Date.now() - 60_000,
+    deliveredAt: null,
+  });
+  h.queue.push(row("d-gone", "deleted-channel"), row("d-locked", "locked-channel"));
+  const api = new FakeDiscord();
+  api.sendErrors.set("deleted-channel", 10003);
+  api.sendErrors.set("locked-channel", 50013);
+  const { plugin } = await boot(h, api);
+  await until(() => h.queue[0]!.expiredAt !== undefined, "deleted-channel delivery expired");
+  api.sendErrors.delete("locked-channel");
+  h.queue.push(row("d-kick", "open-channel"));
+  await until(() => h.deliveriesAcked.some((d) => d.id === "d-locked"), "locked-channel delivery retried");
+  api.sendErrors.set("doomed-channel", 50013);
+  h.queue.push(row("d-doomed", "doomed-channel"));
+  await until(() => api.sendAttempts.includes("doomed-channel"), "doomed-channel first attempt");
+  api.sendErrors.set("doomed-channel", 10003);
+  h.queue.push(row("d-kick-2", "open-channel"));
+  await until(() => h.queue.find((d) => d.id === "d-doomed")!.expiredAt !== undefined, "doomed-channel expired");
+  await plugin.stop();
+
+  assert.equal(h.queue[1]!.expiredAt, undefined);
+  assert.equal(api.sendAttempts.filter((c) => c === "deleted-channel").length, 1);
 });
 
 test("a file the agent posts to a thread is uploaded there", async () => {
