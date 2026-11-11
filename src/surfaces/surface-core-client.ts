@@ -25,6 +25,7 @@ import type {
 import type { IdentityService } from "../identity/identity-service.ts";
 import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import { swallowAs } from "../util/errors.ts";
+import { recordedToolArguments } from "../harness/replay.ts";
 import { decideDeploymentAccess, type DeploymentAccessRequest } from "./deploy-access.ts";
 import type { StagedEnvelope } from "./envelope-staging.ts";
 
@@ -40,6 +41,12 @@ export interface RunHooks {
   onSurfacePosted?(): void;
   onGoal?(goal: GoalView): void | Promise<void>;
   onSnapshot?(text: string): void;
+  onToolCalls?(calls: ToolCallView[]): void;
+}
+
+export interface ToolCallView {
+  tool: string;
+  args: Record<string, unknown>;
 }
 
 export interface SurfaceCoreClient {
@@ -57,6 +64,7 @@ export interface SurfaceCoreClient {
   ackRunDelivery(runId: string): Promise<void>;
   reportTurnMetrics(runId: string, patch: { deliverMs?: number; slackInflightMs?: number }): Promise<void>;
   reportRunEditRef(runId: string, editRef: string): Promise<void>;
+  reportRunReplyRef(runId: string, replyRef: string): Promise<void>;
   claimDeliveries(type: string, claimMs: number): Promise<Delivery[]>;
   ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
   reportSlowDeliveryDrain?(info: { durationMs: number; rows: number }): Promise<void>;
@@ -186,6 +194,19 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
         lastSnapshot = text;
         hooks.onSnapshot(text);
       };
+      let toolCursor: number | undefined;
+      const signalToolCalls = async (): Promise<void> => {
+        if (!hooks.onToolCalls) return;
+        const calls: ToolCallView[] = [];
+        for (const entry of await deps.app.getRunToolEntries(runId, undefined, toolCursor)) {
+          toolCursor = entry.seq;
+          if (entry.type !== "tool_call") continue;
+          const payload = (entry.payload ?? {}) as Record<string, unknown>;
+          const { retrySafe: _retrySafe, ...args } = recordedToolArguments(payload);
+          calls.push({ tool: typeof payload.tool === "string" ? payload.tool : "tool", args });
+        }
+        if (calls.length) hooks.onToolCalls(calls);
+      };
       const waiters = terminalWaiters.get(runId) ?? new Set();
       terminalWaiters.set(runId, waiters);
       const unsubscribe = deps.turnStream.subscribe(runId, {
@@ -227,6 +248,7 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
             await emitGoal().catch(swallowAs(`${surface}: goal refresh`, undefined));
             const fb = deps.turnStream.firstBlock(runId);
             if (fb?.closed) signalFirstBlock(fb.text);
+            await signalToolCalls().catch(swallowAs(`${surface}: tool call refresh`, undefined));
             const mark = `${run.status}:${run.attempts}:${run.leaseExpiresAt ?? ""}`;
             if (mark !== lastMark) {
               lastMark = mark;
@@ -278,6 +300,11 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
 
     async reportRunEditRef(runId, editRef) {
       const found = await deps.app.setRunDeliveryState(runId, { editRef });
+      if (!found) throw new Error(`run ${runId} not found`);
+    },
+
+    async reportRunReplyRef(runId, replyRef) {
+      const found = await deps.app.setRunDeliveryState(runId, { replyRef });
       if (!found) throw new Error(`run ${runId} not found`);
     },
 

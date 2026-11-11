@@ -49,3 +49,44 @@ test("expiring a delivery whose target is gone stops it being claimed and leaves
   assert.equal(event?.scopeLabel, "discord:deliveries");
   assert.ok(event?.message.includes(row.id) && event.message.includes("discord error 10003"), event?.message);
 });
+
+test("waitRun reports each new tool call once with its raw arguments", async () => {
+  let polls = 0;
+  const entries = [
+    {
+      seq: 3,
+      type: "tool_call",
+      payload: {
+        tool: "bash",
+        callId: "c1",
+        step: { id: "s" },
+        command: "ls -la",
+        retrySafe: true,
+        rerun: { tool: "bash", input: { command: "ls -la" } },
+      },
+    },
+    { seq: 4, type: "tool_result", payload: { tool: "bash", callId: "c1", result: "ok" } },
+    { seq: 5, type: "tool_call", payload: { tool: "read", callId: "c2", path: "README.md" } },
+  ];
+  const core = createSurfaceCoreClient("discord", {
+    runs: {
+      onTerminal() {},
+      get: async () => {
+        polls++;
+        return { id: "r1", status: polls < 4 ? "running" : "done", attempts: 1 };
+      },
+    },
+    turnStream: createTurnStream(),
+    app: {
+      getRun: async () => ({ result: { status: "ok", reply: "Done" } }),
+      getRunToolEntries: async (_runId: string, _viewer: string | undefined, afterSeq?: number) =>
+        entries.slice(0, polls === 1 ? 1 : 3).filter((e) => e.seq > (afterSeq ?? -1)),
+    },
+  } as unknown as SurfaceCoreClientDeps);
+  const seen: unknown[] = [];
+  await core.waitRun("r1", { onToolCalls: (calls) => seen.push(calls) });
+  assert.deepEqual(seen, [
+    [{ tool: "bash", args: { command: "ls -la" } }],
+    [{ tool: "read", args: { path: "README.md" } }],
+  ]);
+});

@@ -35,7 +35,7 @@ export function runResultDelivery(run: Run, adminUrlFor?: AdminUrlFor): RunResul
   const surface = run.request.surface;
   if (!target || !surface) return null;
   const origin = resolveTurnOrigin(run.request);
-  const editRef = run.deliveryState?.editRef;
+  const editRef = run.deliveryState?.editRef ?? run.deliveryState?.replyRef;
   const failed = run.status === "failed";
   const webTranscript = webTranscriptNote(run, surface, failed);
   const destination: Destination = {
@@ -71,9 +71,25 @@ export function runResultDelivery(run: Run, adminUrlFor?: AdminUrlFor): RunResul
   ) {
     return { destination, text: standaloneFailureText(run.result)!, provenance, idempotencyKey };
   }
-  if (run.request.surfaceTools && run.result?.status !== "failed" && !run.result?.attachments?.length) return null;
+  const replyRef = run.deliveryState?.editRef ? undefined : run.deliveryState?.replyRef;
+  const result = run.result;
+  const showsNothing =
+    result?.status === "silent" ||
+    result?.status === "react" ||
+    (result?.status === "ok" && !result.reply?.trim() && !result.stopped && !result.attachments?.length);
+  const nothingToSend = (): RunResultDelivery | null =>
+    replyRef && showsNothing
+      ? {
+          destination: { type: surface, target, delete: { messageTs: replyRef } },
+          text: "",
+          provenance,
+          idempotencyKey,
+        }
+      : null;
+  if (run.request.surfaceTools && run.result?.status !== "failed" && !run.result?.attachments?.length)
+    return nothingToSend();
   if (failed) {
-    if (origin.kind === "ambient" && !isSessionTurn(run.request)) return null;
+    if (origin.kind === "ambient" && !isSessionTurn(run.request)) return nothingToSend();
     const clause = userFacingFailureClause(run.result ?? { status: "failed" });
     const adminUrl = run.result?.sessionId ? adminUrlFor?.(run.result.sessionId) : undefined;
     const detail = adminUrl ? ` — full error: ${adminUrl}` : "";
@@ -88,7 +104,7 @@ export function runResultDelivery(run: Run, adminUrlFor?: AdminUrlFor): RunResul
       idempotencyKey,
     };
   }
-  return null;
+  return nothingToSend();
 }
 
 export type TurnFailureSessions = Pick<

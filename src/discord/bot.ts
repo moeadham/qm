@@ -2,7 +2,8 @@ import { MessageFlags } from "@discordjs/core";
 import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
-import { safeClip } from "../surfaces/safe-cut.ts";
+import { closeOpenFence, safeClip } from "../surfaces/safe-cut.ts";
+import { redactSecrets } from "../harness/redact-secrets.ts";
 import { hasRunDelivery, turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
 import type { ActorAssertion, TurnResult } from "../types.ts";
 import { errMessage, reportFailure, swallowAs } from "../util/errors.ts";
@@ -20,6 +21,7 @@ import {
   type DiscordMessage,
 } from "./api.ts";
 import type { DiscordCoreClient } from "./core.ts";
+import type { ToolCallView } from "../surfaces/surface-core-client.ts";
 import { downloadDiscordFile, receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
 import { emojiCharFor } from "../slack/emoji-map.ts";
 import type { ThreadTracker } from "../slack/message-gating.ts";
@@ -55,7 +57,15 @@ const CONTEXT_MESSAGES = 20;
 const THREAD_NAME_LIMIT = 90;
 const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
+const TOOL_ACTIVITY_LINES = 3;
+const TOOL_ARGS_LIMIT = 300;
+const FENCE_CLOSE_RESERVE = 4;
 const STAKE_SCAN_MESSAGES = 100;
+
+function toolCallLine(call: ToolCallView): string {
+  const args = safeClip(redactSecrets(JSON.stringify(call.args)), TOOL_ARGS_LIMIT);
+  return `🔧 \`${`${call.tool} ${args}`.replaceAll("`", "ˋ")}\``;
+}
 
 export interface TurnOutcome {
   result?: TurnResult;
@@ -242,28 +252,48 @@ export function createDiscordBot(deps: {
     };
   }
 
-  function createReplyWriter(channelId: string) {
+  function createReplyWriter(channelId: string, onPlaceholder: (messageId: string) => Promise<void>) {
     let placeholder: string | undefined;
     let streaming = true;
     let chain: Promise<void> = Promise.resolve();
+    let reply = "";
+    let activity: string[] = [];
+    let queued = false;
+    const render = (): string => {
+      const status = activity.map((line) => `-# ${line}`).join("\n");
+      const room = DISCORD_MESSAGE_LIMIT - 1 - FENCE_CLOSE_RESERVE - (status ? status.length + 2 : 0);
+      const body = reply ? closeOpenFence(safeClip(alignMarkdownTables(reply), room)) : "";
+      return [body, status].filter(Boolean).join("\n\n");
+    };
+    const show = (): void => {
+      if (!streaming || queued) return;
+      queued = true;
+      chain = chain
+        .then(async () => {
+          queued = false;
+          const shown = streaming ? render() : "";
+          if (!shown.trim()) return;
+          if (placeholder) return api.edit(channelId, placeholder, shown);
+          const posted = await api.send(channelId, shown);
+          try {
+            await onPlaceholder(posted);
+            placeholder = posted;
+          } catch (error) {
+            streaming = false;
+            await api.remove(channelId, posted).catch(swallowAs("discord: remove unrecorded placeholder", undefined));
+            throw error;
+          }
+        })
+        .catch(swallowAs("discord: stream reply", undefined));
+    };
     return {
-      stream(text: string, onPlaceholder: (messageId: string) => Promise<void>): void {
-        if (!streaming) return;
-        const shown = safeClip(alignMarkdownTables(text), DISCORD_MESSAGE_LIMIT - 1);
-        chain = chain
-          .then(async () => {
-            if (placeholder) return api.edit(channelId, placeholder, shown);
-            const posted = await api.send(channelId, shown);
-            try {
-              await onPlaceholder(posted);
-              placeholder = posted;
-            } catch (error) {
-              streaming = false;
-              await api.remove(channelId, posted).catch(swallowAs("discord: remove unrecorded placeholder", undefined));
-              throw error;
-            }
-          })
-          .catch(swallowAs("discord: stream reply", undefined));
+      stream(text: string): void {
+        reply = text;
+        show();
+      },
+      toolCalls(calls: readonly ToolCallView[]): void {
+        activity = [...activity, ...calls.map(toolCallLine)].slice(-TOOL_ACTIVITY_LINES);
+        show();
       },
       async finish(text: string, key: string): Promise<void> {
         streaming = false;
@@ -407,8 +437,10 @@ export function createDiscordBot(deps: {
     opts: { addressed: boolean; key: string; gate?: AcceptGate; quiet?: boolean },
   ): Promise<TurnOutcome> {
     const { addressed, key, gate, quiet } = opts;
-    const writer = createReplyWriter(channelId);
     let queuedRunId: string | undefined;
+    const writer = createReplyWriter(channelId, async (messageId) => {
+      if (queuedRunId) await core.reportRunReplyRef(queuedRunId, messageId);
+    });
     let accepted = false;
     const accept = (): void => {
       accepted = true;
@@ -436,18 +468,18 @@ export function createDiscordBot(deps: {
           onSnapshot: (snapshot) => {
             const text = stripReactionDirectives(snapshot);
             if (!text.trim()) return;
-            writer.stream(text, async (messageId) => {
-              if (queuedRunId) await core.reportRunEditRef(queuedRunId, messageId);
-            });
+            writer.stream(text);
+          },
+          onToolCalls: (calls) => {
+            if (typing) writer.toolCalls(calls);
           },
         });
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));
         console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
-        if (typing && !quiet)
-          await writer
-            .finish(`⚠️ ${turnFailureText(error)}`, `failure:${key}`)
-            .catch(swallowAs("discord: failure note", undefined));
+        await writer
+          .finish(typing && !quiet ? `⚠️ ${turnFailureText(error)}` : "", `failure:${key}`)
+          .catch(swallowAs("discord: failure note", undefined));
         return { accepted };
       }
       if (!accepted) accept();

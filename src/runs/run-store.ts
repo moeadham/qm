@@ -27,6 +27,7 @@ export interface ReapEvent {
 export interface RunDeliveryState {
   replying?: boolean;
   editRef?: string;
+  replyRef?: string;
 }
 
 export type RunStop =

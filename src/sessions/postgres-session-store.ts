@@ -1278,6 +1278,10 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         params.push(opts.beforeSeq);
         sql += ` AND seq < $${params.length}`;
       }
+      if (opts?.types) {
+        params.push(opts.types);
+        sql += ` AND type = ANY($${params.length})`;
+      }
       sql += " ORDER BY seq DESC";
       if (opts?.limit !== undefined) {
         params.push(opts.limit);

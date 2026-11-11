@@ -649,3 +649,18 @@ test("a shared web project turn answers with its final text, not surface tools",
     await built.runtime.stop();
   }
 });
+
+test("a surface post never lands in a reply placeholder that the surface keeps for itself", async () => {
+  const built = freshApp();
+  try {
+    const queued = await built.app.turn(mention("!speakpost the answer", "C9", "900.5"));
+    assert.ok(queued.runId);
+    assert.equal(await built.app.setRunDeliveryState(queued.runId, { replyRef: "900.6" }), true);
+    built.runtime.start();
+    const post = await pollFor(built.deliveries, (d) => d.text === "the answer");
+    assert.ok(post, "the post was delivered");
+    assert.equal(post.destination.editRef, undefined);
+  } finally {
+    await built.runtime.stop();
+  }
+});

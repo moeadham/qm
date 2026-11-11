@@ -317,7 +317,12 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       const all = entries.get(sessionId) ?? [];
       const log = opts?.transcript ? transcriptEntries(all) : all;
       const since = opts?.sinceSeq ?? 0;
-      const filtered = log.filter((e) => e.seq >= since && (opts?.beforeSeq === undefined || e.seq < opts.beforeSeq));
+      const filtered = log.filter(
+        (e) =>
+          e.seq >= since &&
+          (opts?.beforeSeq === undefined || e.seq < opts.beforeSeq) &&
+          (!opts?.types || opts.types.includes(e.type)),
+      );
       return opts?.limit !== undefined ? filtered.slice(-opts.limit) : filtered;
     },
 

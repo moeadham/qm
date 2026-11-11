@@ -803,7 +803,8 @@ export function createTurnMethods(
       const session = await deps.sessions.getByThread(run.sessionId);
       if (!session) return [];
       const entries = await deps.sessions.getEntries(session.id, {
-        sinceSeq: Math.max(run.turnUserSeq, (afterSeq ?? -1) + 1),
+        sinceSeq: Math.max(run.turnUserSeq + 1, (afterSeq ?? -1) + 1),
+        types: ["user", "tool_call", "tool_result"],
       });
       const nextRun = entries.findIndex((e) => {
         const owner = (e.payload as { runId?: unknown } | null)?.runId;

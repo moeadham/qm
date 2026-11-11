@@ -334,6 +334,7 @@ class FakeCore implements SlackCoreClient {
   async ackRunDelivery(): Promise<void> {}
   async reportTurnMetrics(): Promise<void> {}
   async reportRunEditRef(): Promise<void> {}
+  async reportRunReplyRef(): Promise<void> {}
   async getApproval(): Promise<null> {
     return null;
   }

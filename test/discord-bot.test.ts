@@ -23,7 +23,7 @@ import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import type { LeaderLease } from "../src/persistence/leader-lease.ts";
 import type { StagedEnvelope } from "../src/surfaces/envelope-staging.ts";
 import type { Delivery, SurfaceContextRequest, SurfaceContextResult, TurnRequest, TurnResult } from "../src/types.ts";
-import type { RunHooks, StoredApprovalView } from "../src/surfaces/surface-core-client.ts";
+import type { RunHooks, StoredApprovalView, ToolCallView } from "../src/surfaces/surface-core-client.ts";
 import type { KeychainApprovalView } from "../src/credentials/keychain-approval.ts";
 import type { RuntimeDeps } from "../src/api/runtime-config.ts";
 import { buildApp } from "../src/wiring.ts";
@@ -224,7 +224,7 @@ interface Harness {
   core: DiscordCoreClient;
   turns: TurnRequest[];
   acked: string[];
-  editRefs: Array<[string, string]>;
+  replyRefs: Array<[string, string]>;
   stopped: string[];
   deliveriesAcked: Array<{ id: string; body?: unknown }>;
   queue: Delivery[];
@@ -239,6 +239,7 @@ function harness(opts: {
   lease?: LeaderLease;
   result?: (body: TurnRequest) => TurnResult;
   snapshots?: string[];
+  toolCalls?: ToolCallView[][];
   replying?: boolean;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
@@ -260,7 +261,7 @@ function harness(opts: {
   const h: Harness = {
     turns: [],
     acked: [],
-    editRefs: [],
+    replyRefs: [],
     stopped: [],
     deliveriesAcked: [],
     queue,
@@ -315,6 +316,10 @@ function harness(opts: {
     },
     async waitRun(runId: string, hooks: RunHooks = {}) {
       if (opts.replying) hooks.onReplying?.();
+      for (const calls of opts.toolCalls ?? []) {
+        hooks.onToolCalls?.(calls);
+        await new Promise((r) => setTimeout(r, 5));
+      }
       for (const s of opts.snapshots ?? []) {
         hooks.onSnapshot?.(s);
         await new Promise((r) => setTimeout(r, 5));
@@ -324,8 +329,8 @@ function harness(opts: {
     async ackRunDelivery(runId) {
       h.acked.push(runId);
     },
-    async reportRunEditRef(runId, editRef) {
-      h.editRefs.push([runId, editRef]);
+    async reportRunReplyRef(runId, replyRef) {
+      h.replyRefs.push([runId, replyRef]);
     },
     async stopConversation(threadRef) {
       h.stopped.push(threadRef);
@@ -486,7 +491,10 @@ test("in servers the bot answers mentions in a new thread and ignores unmentione
 });
 
 test("a reply in a thread the bot owns is heard without a mention as an ambient turn", async () => {
-  const h = harness({ result: () => ({ status: "silent" }) });
+  const h = harness({
+    toolCalls: [[{ tool: "finish_silently", args: { reason: "not for me" } }]],
+    result: () => ({ status: "silent" }),
+  });
   const api = new FakeDiscord();
   const thread = "800000000000000009";
   api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
@@ -1328,11 +1336,94 @@ test("a streamed reply posts one placeholder, edits it as text grows, records it
 
   assert.equal(api.sent.length, 1);
   assert.equal(api.sent[0]!.content, "Thinking");
-  assert.deepEqual(h.editRefs, [["run-1", api.sent[0]!.id]]);
+  assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
   assert.deepEqual(
     api.edits.map((e) => e.content),
     ["Thinking about it", "Done."],
   );
+});
+
+test("raw tool calls show in the placeholder under the streamed text until the final reply replaces them", async () => {
+  const h = harness({
+    toolCalls: [
+      [{ tool: "bash", args: { command: "echo `hi`" } }],
+      [
+        { tool: "read", args: { path: "a.ts" } },
+        { tool: "read", args: { path: "b.ts" } },
+        { tool: "read", args: { path: "c.ts" } },
+      ],
+    ],
+    snapshots: ["Found it"],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  const read = (path: string) => `-# 🔧 \`read {"path":"${path}"}\``;
+  assert.equal(api.sent.length, 1);
+  assert.equal(api.sent[0]!.content, '-# 🔧 `bash {"command":"echo ˋhiˋ"}`');
+  assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
+  assert.deepEqual(
+    api.edits.map((e) => e.content),
+    [
+      [read("a.ts"), read("b.ts"), read("c.ts")].join("\n"),
+      `Found it\n\n${[read("a.ts"), read("b.ts"), read("c.ts")].join("\n")}`,
+      "Done.",
+    ],
+  );
+});
+
+test("a streamed reply that is mid code block shows the block closed", async () => {
+  const h = harness({ snapshots: ["Here:\n```ts\nconst a = 1;"], result: () => ({ status: "ok", reply: "Done." }) });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.equal(api.sent[0]!.content, "Here:\n```ts\nconst a = 1;\n```");
+});
+
+test("secret-looking tool arguments are redacted in the tool lines", async () => {
+  const h = harness({
+    toolCalls: [[{ tool: "webhooks", args: { action: "create", secret: "abc123def456" } }]],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.equal(api.sent[0]!.content, '-# 🔧 `webhooks {"action":"create","secret":"[redacted]"}`');
+});
+
+test("tool lines under a reply that is mid code block stay outside the block", async () => {
+  const h = harness({
+    toolCalls: [[{ tool: "bash", args: { command: "ls" } }]],
+    snapshots: ["Here:\n```ts\nconst a = 1;"],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.equal(api.edits[0]!.content, 'Here:\n```ts\nconst a = 1;\n```\n\n-# 🔧 `bash {"command":"ls"}`');
+});
+
+test("a tool-only placeholder is recorded for recovery and removed when the turn ends without text", async () => {
+  const h = harness({
+    toolCalls: [[{ tool: "execute", args: { command: "ls" } }]],
+    result: () => ({ status: "silent" }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => api.removed.length === 1, "placeholder removed");
+  await plugin.stop();
+
+  assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
+  assert.deepEqual(api.removed, [api.sent[0]!.id]);
 });
 
 test("the gateway connects on exactly one instance while another holds the lease", async () => {
