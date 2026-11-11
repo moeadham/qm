@@ -217,6 +217,29 @@ test("a steer the SDK folds into the running turn still ends the turn after its 
   );
 });
 
+test("a steer the SDK reports as answered by the turn's result ends the turn without an echo", async () => {
+  const signals = createMemoryRunSignalStore();
+  const runId = "run-steer-unechoed";
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    yield (await iterator.next()).value as unknown as FakeSdkMessage;
+    await signals.send(runId, { kind: "steer", text: "and the rest", ts: "123.790" });
+    const steer = (await iterator.next()).value as unknown as { uuid: string };
+    yield resultMessage("Did the rest too.", { user_message_uuids: [steer.uuid] });
+    if (!(await iterator.next()).done) yield resultMessage("unexpected prompt");
+  };
+
+  const harness = createClaudeHarness({ signals, turnWallClockMs: 3_000 });
+  const { turn, entries } = harnessTurn({ runId });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "Did the rest too.");
+  assert.deepEqual(
+    entries.filter((entry) => entry.type === "user").map((entry) => (entry.payload as { text: string }).text),
+    ["what is the capital of france?", "and the rest"],
+  );
+});
+
 for (const shutdown of [false, true]) {
   test(`a user stop stays explicit when shutdown=${shutdown}`, async () => {
     const cancel = new AbortController();

@@ -699,6 +699,11 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           result = message;
           await recordStep(message);
           await flushThinking();
+          const answered = new Set(message.user_message_uuids ?? []);
+          for (const steer of steerPrompts.filter(({ message: prompt }) => answered.has(prompt.uuid ?? ""))) {
+            steerPrompts.splice(steerPrompts.indexOf(steer), 1);
+            await recordSteerIntake(turn, steer.intake);
+          }
           if (interrupted) break;
           const terminal = ref.runtimeHandoff || ref.silentRequested || ref.pausedOnApproval;
           const text = message.subtype === "success" && !terminal ? message.result.trim() : "";
