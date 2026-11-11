@@ -32,8 +32,8 @@ export function parseApprovalButton(customId: string): ApprovalButton | null {
   return null;
 }
 
-function escapeMarkdown(text: string): string {
-  return text.replace(/[\\*_~`|]/g, "\\$&");
+export function escapeMarkdown(text: string): string {
+  return text.replace(/[\\*_~`|<[\]]/g, "\\$&");
 }
 
 function code(text: string): string {

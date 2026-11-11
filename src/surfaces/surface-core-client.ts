@@ -36,6 +36,7 @@ export interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
 }
 
 export interface RunHooks {
+  onRunning?(): void;
   onReplying?(): void;
   onFirstBlock?(text: string): void;
   onSurfacePosted?(): void;
@@ -169,6 +170,12 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
 
     async waitRun(runId, hooks = {}) {
       let replyingSignaled = false;
+      let runningSignaled = false;
+      const signalRunning = (): void => {
+        if (runningSignaled) return;
+        runningSignaled = true;
+        hooks.onRunning?.();
+      };
       let firstBlockSignaled = false;
       let surfaceSignaled = false;
       let lastSnapshot = "";
@@ -243,6 +250,7 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
               if (view?.surfacePosted) signalSurface();
               return (view?.result as TurnResult | null | undefined) ?? null;
             }
+            if (run.status === "running") signalRunning();
             signalReplying(run.deliveryState?.replying === true);
             signalSnapshot();
             await emitGoal().catch(swallowAs(`${surface}: goal refresh`, undefined));

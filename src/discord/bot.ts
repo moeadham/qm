@@ -3,7 +3,6 @@ import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
 import { closeOpenFence, safeClip } from "../surfaces/safe-cut.ts";
-import { redactSecrets } from "../harness/redact-secrets.ts";
 import { hasRunDelivery, turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
 import type { ActorAssertion, TurnResult } from "../types.ts";
 import { errMessage, reportFailure, swallowAs } from "../util/errors.ts";
@@ -20,6 +19,7 @@ import {
   type DiscordChannel,
   type DiscordMessage,
 } from "./api.ts";
+import { activityHeader, activityKind, toolCallLine, type ActivityKind } from "./activity-status.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import type { ToolCallView } from "../surfaces/surface-core-client.ts";
 import { downloadDiscordFile, receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
@@ -58,15 +58,10 @@ const THREAD_NAME_LIMIT = 90;
 const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
 const TOOL_ACTIVITY_LINES = 3;
-const TOOL_ARGS_LIMIT = 300;
 const FENCE_CLOSE_RESERVE = 4;
 const STAKE_SCAN_MESSAGES = 100;
-
-function toolCallLine(call: ToolCallView): string {
-  const args = safeClip(redactSecrets(JSON.stringify(call.args)), TOOL_ARGS_LIMIT);
-  return `🔧 \`${`${call.tool} ${args}`.replaceAll("`", "ˋ")}\``;
-}
-
+const STATUS_DELAY_MS = 2_000;
+const STATUS_REFRESH_MS = 10_000;
 export interface TurnOutcome {
   result?: TurnResult;
   accepted: boolean;
@@ -259,8 +254,14 @@ export function createDiscordBot(deps: {
     let reply = "";
     let activity: string[] = [];
     let queued = false;
+    let since = Date.now();
+    let running = false;
+    const kinds = new Set<ActivityKind>();
+    let firstStatus: ReturnType<typeof setTimeout> | undefined;
+    let refresh: ReturnType<typeof setInterval> | undefined;
+    const header = (prefix: string): string => activityHeader(prefix, Date.now() - since, kinds);
     const render = (): string => {
-      const status = activity.map((line) => `-# ${line}`).join("\n");
+      const status = [header(running ? "Working" : "Queued"), ...activity].map((line) => `-# ${line}`).join("\n");
       const room = DISCORD_MESSAGE_LIMIT - 1 - FENCE_CLOSE_RESERVE - (status ? status.length + 2 : 0);
       const body = reply ? closeOpenFence(safeClip(alignMarkdownTables(reply), room)) : "";
       return [body, status].filter(Boolean).join("\n\n");
@@ -287,18 +288,36 @@ export function createDiscordBot(deps: {
         .catch(swallowAs("discord: stream reply", undefined));
     };
     return {
+      begin(): void {
+        if (refresh) return;
+        firstStatus = setTimeout(show, STATUS_DELAY_MS);
+        refresh = setInterval(show, STATUS_REFRESH_MS);
+      },
+      running(): void {
+        if (running) return;
+        running = true;
+        since = Date.now();
+        if (placeholder) show();
+      },
       stream(text: string): void {
         reply = text;
         show();
       },
       toolCalls(calls: readonly ToolCallView[]): void {
         activity = [...activity, ...calls.map(toolCallLine)].slice(-TOOL_ACTIVITY_LINES);
+        for (const call of calls) kinds.add(activityKind(call));
         show();
       },
-      async finish(text: string, key: string): Promise<void> {
+      stop(): void {
+        streaming = false;
+        clearTimeout(firstStatus);
+        clearInterval(refresh);
+      },
+      async finish(text: string, key: string, summarize = false): Promise<void> {
         streaming = false;
         await chain;
-        if (text) return postMessage(api, channelId, text, { key, ...(placeholder ? { editRef: placeholder } : {}) });
+        const shown = summarize && text && kinds.size ? `-# ${header("Worked")}\n\n${text}` : text;
+        if (shown) return postMessage(api, channelId, shown, { key, ...(placeholder ? { editRef: placeholder } : {}) });
         if (placeholder) await api.remove(channelId, placeholder);
       },
     };
@@ -453,6 +472,7 @@ export function createDiscordBot(deps: {
       if (finished || typing) return;
       typing = true;
       stopTyping = startTyping(channelId);
+      writer.begin();
     };
     try {
       let result: TurnResult;
@@ -462,8 +482,10 @@ export function createDiscordBot(deps: {
           onQueued: (runId) => {
             queuedRunId = runId;
             accept();
+            if (typing) writer.begin();
           },
           onSteered: accept,
+          onRunning: () => writer.running(),
           onReplying: typeOnceReplying,
           onSnapshot: (snapshot) => {
             const text = stripReactionDirectives(snapshot);
@@ -475,6 +497,7 @@ export function createDiscordBot(deps: {
           },
         });
       } catch (error) {
+        writer.stop();
         if (!accepted) gate?.failed(errMessage(error));
         console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
         await writer
@@ -482,6 +505,7 @@ export function createDiscordBot(deps: {
           .catch(swallowAs("discord: failure note", undefined));
         return { accepted };
       }
+      writer.stop();
       if (!accepted) accept();
       if (result.steered) return { result, accepted };
       const extracted = extractReactions(
@@ -496,7 +520,7 @@ export function createDiscordBot(deps: {
       if (reactions.length && trigger) await reactTo(channelId, trigger, reactions);
       const runId = queuedRunId;
       try {
-        await writer.finish(reply, runId ? `run:${runId}` : key);
+        await writer.finish(reply, runId ? `run:${runId}` : key, result.status === "ok");
         if (result.attachments?.length) {
           const problems = await sendDiscordFiles(api, core, channelId, result.attachments, {
             key: runId ? `run:${runId}` : key,
@@ -519,6 +543,7 @@ export function createDiscordBot(deps: {
     } finally {
       finished = true;
       stopTyping();
+      writer.stop();
     }
   }
 

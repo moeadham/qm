@@ -90,3 +90,22 @@ test("waitRun reports each new tool call once with its raw arguments", async () 
     [{ tool: "read", args: { path: "README.md" } }],
   ]);
 });
+
+test("waitRun signals once when a pending run starts running", async () => {
+  const statuses = ["pending", "pending", "running", "running", "done"];
+  let polls = 0;
+  const core = createSurfaceCoreClient("discord", {
+    runs: {
+      onTerminal() {},
+      get: async () => ({ id: "r1", status: statuses[Math.min(polls++, statuses.length - 1)], attempts: 1 }),
+    },
+    turnStream: createTurnStream(),
+    app: {
+      getRun: async () => ({ result: { status: "ok", reply: "Done" } }),
+      getRunToolEntries: async () => [],
+    },
+  } as unknown as SurfaceCoreClientDeps);
+  const seen: string[] = [];
+  await core.waitRun("r1", { onRunning: () => seen.push(`running after ${polls} polls`) });
+  assert.deepEqual(seen, ["running after 3 polls"]);
+});
