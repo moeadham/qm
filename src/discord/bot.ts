@@ -62,6 +62,29 @@ const TOOL_ACTIVITY_LINES = 3;
 const TOOL_ARGS_LIMIT = 300;
 const FENCE_CLOSE_RESERVE = 4;
 const STAKE_SCAN_MESSAGES = 100;
+const STATUS_DELAY_MS = 2_000;
+const STATUS_REFRESH_MS = 10_000;
+const ACTIVITY_PHRASES = [
+  ["read", "Read files"],
+  ["execute", "Ran commands"],
+  ["other", "Used tools"],
+] as const;
+
+function activityKind(call: ToolCallView): (typeof ACTIVITY_PHRASES)[number][0] {
+  const action = call.args.action;
+  if ((call.tool === "files" || call.tool === "skills") && action === "read") return "read";
+  if (call.tool === "execute" && call.args.background !== true) return "execute";
+  if (call.tool === "sandbox" && action === "exec") return "execute";
+  return "other";
+}
+
+function elapsedLabel(s: number): string {
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+}
 
 function toolCallLine(call: ToolCallView): string {
   const purpose = typeof call.args.purpose === "string" ? call.args.purpose.replace(/\s+/g, " ").trim() : "";
@@ -262,8 +285,18 @@ export function createDiscordBot(deps: {
     let reply = "";
     let activity: string[] = [];
     let queued = false;
+    const startedAt = Date.now();
+    const kinds = new Set<string>();
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const header = (prefix: string): string => {
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      const summary = ACTIVITY_PHRASES.filter(([kind]) => kinds.has(kind))
+        .map(([, phrase], i) => (i ? phrase.toLowerCase() : phrase))
+        .join(", ");
+      return [secs > 0 ? `${prefix} for ${elapsedLabel(secs)}` : prefix, summary].filter(Boolean).join(" · ");
+    };
     const render = (): string => {
-      const status = activity.map((line) => `-# ${line}`).join("\n");
+      const status = [header("Working"), ...activity].map((line) => `-# ${line}`).join("\n");
       const room = DISCORD_MESSAGE_LIMIT - 1 - FENCE_CLOSE_RESERVE - (status ? status.length + 2 : 0);
       const body = reply ? closeOpenFence(safeClip(alignMarkdownTables(reply), room)) : "";
       return [body, status].filter(Boolean).join("\n\n");
@@ -290,18 +323,28 @@ export function createDiscordBot(deps: {
         .catch(swallowAs("discord: stream reply", undefined));
     };
     return {
+      begin(): void {
+        if (timers.length) return;
+        timers.push(setTimeout(show, STATUS_DELAY_MS), setInterval(show, STATUS_REFRESH_MS));
+      },
       stream(text: string): void {
         reply = text;
         show();
       },
       toolCalls(calls: readonly ToolCallView[]): void {
         activity = [...activity, ...calls.map(toolCallLine)].slice(-TOOL_ACTIVITY_LINES);
+        for (const call of calls) kinds.add(activityKind(call));
         show();
       },
-      async finish(text: string, key: string): Promise<void> {
+      stop(): void {
         streaming = false;
+        for (const timer of timers) clearTimeout(timer);
+      },
+      async finish(text: string, key: string): Promise<void> {
+        this.stop();
         await chain;
-        if (text) return postMessage(api, channelId, text, { key, ...(placeholder ? { editRef: placeholder } : {}) });
+        const shown = text && kinds.size ? `-# ${header("Worked")}\n\n${text}` : text;
+        if (shown) return postMessage(api, channelId, shown, { key, ...(placeholder ? { editRef: placeholder } : {}) });
         if (placeholder) await api.remove(channelId, placeholder);
       },
     };
@@ -452,10 +495,12 @@ export function createDiscordBot(deps: {
     let finished = false;
     let typing = addressed;
     let stopTyping = addressed ? startTyping(channelId) : () => {};
+    if (addressed) writer.begin();
     const typeOnceReplying = (): void => {
       if (finished || typing) return;
       typing = true;
       stopTyping = startTyping(channelId);
+      writer.begin();
     };
     try {
       let result: TurnResult;
@@ -522,6 +567,7 @@ export function createDiscordBot(deps: {
     } finally {
       finished = true;
       stopTyping();
+      writer.stop();
     }
   }
 

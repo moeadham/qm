@@ -241,6 +241,7 @@ function harness(opts: {
   snapshots?: string[];
   toolCalls?: ToolCallView[][];
   replying?: boolean;
+  holdMs?: number;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
   keychain?: KeychainApprovalView;
@@ -316,6 +317,7 @@ function harness(opts: {
     },
     async waitRun(runId: string, hooks: RunHooks = {}) {
       if (opts.replying) hooks.onReplying?.();
+      if (opts.holdMs) await new Promise((r) => setTimeout(r, opts.holdMs));
       for (const calls of opts.toolCalls ?? []) {
         hooks.onToolCalls?.(calls);
         await new Promise((r) => setTimeout(r, 5));
@@ -1335,22 +1337,22 @@ test("a streamed reply posts one placeholder, edits it as text grows, records it
   await plugin.stop();
 
   assert.equal(api.sent.length, 1);
-  assert.equal(api.sent[0]!.content, "Thinking");
+  assert.equal(api.sent[0]!.content, "Thinking\n\n-# Working");
   assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
   assert.deepEqual(
     api.edits.map((e) => e.content),
-    ["Thinking about it", "Done."],
+    ["Thinking about it\n\n-# Working", "Done."],
   );
 });
 
-test("raw tool calls show in the placeholder under the streamed text until the final reply replaces them", async () => {
+test("tool calls show under a working summary until the final reply replaces them with a worked summary", async () => {
   const h = harness({
     toolCalls: [
-      [{ tool: "bash", args: { command: "echo `hi`" } }],
+      [{ tool: "execute", args: { command: "echo `hi`" } }],
       [
-        { tool: "read", args: { path: "a.ts" } },
-        { tool: "read", args: { path: "b.ts" } },
-        { tool: "read", args: { path: "c.ts" } },
+        { tool: "files", args: { action: "read", path: "a.ts" } },
+        { tool: "files", args: { action: "read", path: "b.ts" } },
+        { tool: "files", args: { action: "read", path: "c.ts" } },
       ],
     ],
     snapshots: ["Found it"],
@@ -1361,17 +1363,14 @@ test("raw tool calls show in the placeholder under the streamed text until the f
   await until(() => h.acked.length === 1, "ack");
   await plugin.stop();
 
-  const read = (path: string) => `-# 🔧 \`read {"path":"${path}"}\``;
+  const read = (path: string) => `-# 🔧 \`files {"action":"read","path":"${path}"}\``;
+  const status = ["-# Working · Read files, ran commands", read("a.ts"), read("b.ts"), read("c.ts")].join("\n");
   assert.equal(api.sent.length, 1);
-  assert.equal(api.sent[0]!.content, '-# 🔧 `bash {"command":"echo ˋhiˋ"}`');
+  assert.equal(api.sent[0]!.content, '-# Working · Ran commands\n-# 🔧 `execute {"command":"echo ˋhiˋ"}`');
   assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
   assert.deepEqual(
     api.edits.map((e) => e.content),
-    [
-      [read("a.ts"), read("b.ts"), read("c.ts")].join("\n"),
-      `Found it\n\n${[read("a.ts"), read("b.ts"), read("c.ts")].join("\n")}`,
-      "Done.",
-    ],
+    [status, `Found it\n\n${status}`, "-# Worked · Read files, ran commands\n\nDone."],
   );
 });
 
@@ -1382,7 +1381,7 @@ test("a streamed reply that is mid code block shows the block closed", async () 
   await until(() => h.acked.length === 1, "ack");
   await plugin.stop();
 
-  assert.equal(api.sent[0]!.content, "Here:\n```ts\nconst a = 1;\n```");
+  assert.equal(api.sent[0]!.content, "Here:\n```ts\nconst a = 1;\n```\n\n-# Working");
 });
 
 test("a tool call's purpose is shown in place of its raw arguments, as on the web", async () => {
@@ -1404,6 +1403,7 @@ test("a tool call's purpose is shown in place of its raw arguments, as on the we
   assert.equal(
     api.sent[0]!.content,
     [
+      "-# Working · Ran commands, used tools",
       "-# 🔧 List org credentials",
       '-# 🔧 `read {"path":"a.ts"}`',
       "-# 🔧 Ask \\*\\_ops\\_\\* \\<@123> via \\[docs\\](https://x.test)",
@@ -1421,7 +1421,10 @@ test("secret-looking tool arguments are redacted in the tool lines", async () =>
   await until(() => h.acked.length === 1, "ack");
   await plugin.stop();
 
-  assert.equal(api.sent[0]!.content, '-# 🔧 `webhooks {"action":"create","secret":"[redacted]"}`');
+  assert.equal(
+    api.sent[0]!.content,
+    '-# Working · Used tools\n-# 🔧 `webhooks {"action":"create","secret":"[redacted]"}`',
+  );
 });
 
 test("tool lines under a reply that is mid code block stay outside the block", async () => {
@@ -1435,7 +1438,26 @@ test("tool lines under a reply that is mid code block stay outside the block", a
   await until(() => h.acked.length === 1, "ack");
   await plugin.stop();
 
-  assert.equal(api.edits[0]!.content, 'Here:\n```ts\nconst a = 1;\n```\n\n-# 🔧 `bash {"command":"ls"}`');
+  assert.equal(
+    api.edits[0]!.content,
+    'Here:\n```ts\nconst a = 1;\n```\n\n-# Working · Used tools\n-# 🔧 `bash {"command":"ls"}`',
+  );
+});
+
+test("a slow turn with no output yet shows a working status that the reply then replaces", async () => {
+  const h = harness({ holdMs: 2_600, result: () => ({ status: "ok", reply: "Done." }) });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack", 5_000);
+  await plugin.stop();
+
+  assert.equal(api.sent.length, 1);
+  assert.equal(api.sent[0]!.content, "-# Working for 2s");
+  assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
+  assert.deepEqual(
+    api.edits.map((e) => e.content),
+    ["Done."],
+  );
 });
 
 test("a tool-only placeholder is recorded for recovery and removed when the turn ends without text", async () => {
