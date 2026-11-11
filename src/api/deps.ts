@@ -147,7 +147,7 @@ export interface ServerDeps {
   refreshCustomProviders?: () => Promise<void>;
   brandingDefault?: OrgBranding;
   harnessId?: string;
-  harnessCarriedModelAuth?: ModelProvider;
+  harnessCarriedModelAuth?: () => Promise<ModelProvider | undefined>;
   admin?: AdminService;
   inviteMailer?: InviteMailer;
   emailAuthPrincipals?: readonly string[];

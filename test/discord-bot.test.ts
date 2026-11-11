@@ -1974,6 +1974,35 @@ test("/qm model in a DM sets only this conversation's session, from the user's C
   }
 });
 
+test("/qm model shows the model actually answering when the saved one is no longer available", async () => {
+  const { built, runtime } = await subscribedApp("anthropic");
+  const threadRef = `discord:dm:${DM}`;
+  const session = await built.sessions.getOrCreateByThread(
+    threadRef,
+    "dm",
+    "personal:alice@example.com" as never,
+    undefined,
+    "discord",
+  );
+  await built.sessions.addParticipant(session.id, "alice@example.com");
+  await built.sessions.setRuntime(session.id, { harnessId: "pi", modelId: "codex/gpt-5.6-sol" });
+  const h = harness({ runtime, sessions: built.sessions });
+  const api = new FakeDiscord();
+  api.channels.set(DM, { id: DM, type: 1 });
+  const { handlers, plugin } = await boot(h, api);
+  try {
+    handlers.onInteraction(modelCommand(ALICE, DM));
+    await until(() => api.ephemeral.length > 0, "/qm model");
+    const header = api.ephemeral.at(-1)!.split("\n\n")[0]!;
+    assert.match(
+      header,
+      /Current: \*\*(?!codex\/gpt-5\.6-sol).+\*\* · .+ \(default — \*\*codex\/gpt-5\.6-sol\*\* isn't available right now\)$/,
+    );
+  } finally {
+    await plugin.stop();
+  }
+});
+
 test("/qm model in a server thread sets that thread's session, including Claude subscription models", async () => {
   const { built, runtime } = await subscribedApp("anthropic");
   const threadRef = `discord:ch:${CHANNEL}:thread-7`;

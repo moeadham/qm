@@ -81,10 +81,11 @@ async function modelPicker(
   const found = await core.modelMenu(principal, threadRef);
   if (found === undefined) return "Model selection isn't available on this QM.";
   if (!found) return MODEL_AFTER_FIRST_MESSAGE;
-  const { menu, session, current } = found;
+  const { menu, session, current, skipped } = found;
   const groups = modelGroups(menu);
   const currentGroup = modelGroup(menu, current.harnessId, current.modelId);
-  const header = `⚙️ **Model for this conversation**\nCurrent: **${plainLabel(menu, current.modelId)}** · ${currentGroup.label}${session.runtime ? "" : " (default)"}`;
+  const pinNote = skipped ? ` (default — **${skipped.modelId}** isn't available right now)` : "";
+  const header = `⚙️ **Model for this conversation**\nCurrent: **${plainLabel(menu, current.modelId)}** · ${currentGroup.label}${session.runtime ? pinNote : " (default)"}`;
   if (!groups.size) return NO_MODELS;
   const group = groupKey ? groups.get(groupKey) : undefined;
   if (!group)

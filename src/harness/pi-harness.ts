@@ -1539,8 +1539,10 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     ...(await opts?.resolveProviderKeys?.()),
   });
   const modelGateway = opts?.modelGateway;
-  const companyServedId = (id: string) => (opts?.companyModelId ? opts.companyModelId(id) : id);
-  const requiredModel = (id: string, company = true) => getRequiredModel(company ? companyServedId(id) : id, company);
+  const companyServedId = (id: string, keys: ProviderKeys) =>
+    CODEX_SUBSCRIPTION_PROVIDER in keys && opts?.companyModelId ? opts.companyModelId(id) : id;
+  const requiredModel = (id: string, companyKeys: ProviderKeys | undefined) =>
+    getRequiredModel(companyKeys ? companyServedId(id, companyKeys) : id, !!companyKeys);
   const keyForModel = (keys: ProviderKeys, model: Model<Api>): string | undefined =>
     modelGatewayRequest(modelGateway, model)?.apiKey ?? keys[String(model.provider)];
   const captureRequests = opts?.captureRequests ?? true;
@@ -1580,6 +1582,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     history: SessionEntry[],
     priorTurns: ConversationTurn[] | undefined,
     turnProviderKeys: ProviderKeys | undefined,
+    companyKeys: ProviderKeys | undefined,
     ref: TurnSession["ref"],
     tools: ToolDefinition[],
     loadImage: ReplayImageLoader | undefined,
@@ -1597,7 +1600,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     const composedPrompt = systemPrompt + (seedPlan === "preamble" ? replayPreamble(history) : "");
 
     const modelRuntime = await buildModelRuntime(
-      turnProviderKeys ?? (await resolveProviderKeys()),
+      turnProviderKeys ?? companyKeys ?? (await resolveProviderKeys()),
       turnProviderKeys ? undefined : modelGateway,
       systemCacheSplit ? "long" : undefined,
     );
@@ -1746,7 +1749,8 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     {
       async runTurn(dispatched: HarnessTurnInput): Promise<HarnessTurnResult> {
         const desiredModelId = dispatched.runtime?.modelId ?? resolveModelId(dispatched.scopeLabel);
-        const baseModel = requiredModel(desiredModelId, !dispatched.providerKeys);
+        const companyKeys = dispatched.providerKeys ? undefined : await resolveProviderKeys();
+        const baseModel = requiredModel(desiredModelId, companyKeys);
         const turnModelGateway = dispatched.providerKeys ? undefined : modelGateway;
         const wantFast = wantsFastMode(dispatched.runtime?.fastMode, desiredModelId);
         const ref: TurnSession["ref"] = {
@@ -1781,6 +1785,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           turn.history,
           turn.priorTurns,
           turn.providerKeys,
+          companyKeys,
           ref,
           tools,
           turn.loadImage,
@@ -2094,7 +2099,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
             const fromId = (entry.agentSession.model as { id?: string } | undefined)?.id;
             if (fromId) refusedModelIds.add(fromId);
             const configured = opts?.resolveFallbackRuntime?.();
-            const servedModelId = (id: string) => (turn.providerKeys ? id : companyServedId(id));
+            const servedModelId = (id: string) => (companyKeys ? companyServedId(id, companyKeys) : id);
             const fallbackId = fromId
               ? refusalFallbackModelId(
                   fromId,
@@ -2399,7 +2404,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         try {
           const providerKeys = await resolveProviderKeys();
           const modelId = detectModelId();
-          const model = requiredModel(modelId);
+          const model = requiredModel(modelId, providerKeys);
           if (!keyForModel(providerKeys, model)) return { respond: true, undecided: true };
           const detectSystemPrompt = buildDetectionPrompt(detect.reactionGuidance);
           const prompt = renderDetectPrompt(detect);
@@ -2422,28 +2427,32 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         const providerKeys = await resolveProviderKeys();
         const runtime = await buildModelRuntime(providerKeys, modelGateway);
         const summarize = (compactModelId: string) =>
-          summarizeHistory(input.history, requiredModel(compactModelId), (summaryModel, context, options) => {
-            input.recordModelCall({
-              model: compactModelId,
-              inputTokens: countTokens(context.systemPrompt ?? "") + countTokens(JSON.stringify(context.messages)),
-              entryCount: input.history.length,
-            });
-            return runtime.streamSimple(summaryModel, context, options);
-          });
+          summarizeHistory(
+            input.history,
+            requiredModel(compactModelId, providerKeys),
+            (summaryModel, context, options) => {
+              input.recordModelCall({
+                model: compactModelId,
+                inputTokens: countTokens(context.systemPrompt ?? "") + countTokens(JSON.stringify(context.messages)),
+                entryCount: input.history.length,
+              });
+              return runtime.streamSimple(summaryModel, context, options);
+            },
+          );
         try {
           return await summarize(primaryId);
         } catch (error) {
           const fallbackId = refusalFallbackModelId(
             primaryId,
             opts?.resolveFallbackRuntime?.()?.modelId,
-            (id) => !!resolveModel(companyServedId(id)),
+            (id) => !!resolveModel(companyServedId(id, providerKeys)),
           );
           if (
             !(error instanceof ProviderTurnError) ||
             error.code !== "refusal" ||
             !fallbackId ||
-            !resolveModel(companyServedId(fallbackId)) ||
-            companyServedId(fallbackId) === companyServedId(primaryId)
+            !resolveModel(companyServedId(fallbackId, providerKeys)) ||
+            companyServedId(fallbackId, providerKeys) === companyServedId(primaryId, providerKeys)
           )
             throw error;
           console.error(
@@ -2459,15 +2468,15 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
       },
 
       async oneShot(systemPrompt: string, prompt: string): Promise<string | undefined> {
-        const model = requiredModel(resolveModelId());
         const providerKeys = await resolveProviderKeys();
+        const model = requiredModel(resolveModelId(), providerKeys);
         if (!keyForModel(providerKeys, model)) return undefined;
         return oneShot("pi-oneshot", model, providerKeys, systemPrompt, prompt, { modelGateway });
       },
 
       async judge(systemPrompt: string, prompt: string, signal?: AbortSignal): Promise<string | undefined> {
-        const model = requiredModel(judgeModelId());
         const providerKeys = await resolveProviderKeys();
+        const model = requiredModel(judgeModelId(), providerKeys);
         if (!keyForModel(providerKeys, model)) return undefined;
         return oneShot("pi-judge", model, providerKeys, systemPrompt, prompt, {
           modelGateway,
@@ -2486,8 +2495,8 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
       }) {
         try {
           const modelId = configuredScreenModel ?? detectModelId();
-          const model = requiredModel(modelId);
           const providerKeys = await resolveProviderKeys();
+          const model = requiredModel(modelId, providerKeys);
           if (!keyForModel(providerKeys, model)) return undefined;
           recordModelCall({
             model: modelId,
@@ -2518,8 +2527,8 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         const ackModelId = auxiliaryModelForProvider("anthropic");
         if (!ackModelId) return undefined;
         try {
-          const model = requiredModel(ackModelId);
           const providerKeys = await resolveProviderKeys();
+          const model = requiredModel(ackModelId, providerKeys);
           const apiKey = keyForModel(providerKeys, model);
           if (!apiKey) return undefined;
           const prompt = `Candidates: ${candidates.join(", ")}\n\nMessage: ${text.slice(0, 2000)}`;
@@ -2534,8 +2543,8 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
 
       async generateTitle(transcript: string): Promise<string | undefined> {
         if (!transcript.trim()) return undefined;
-        const model = requiredModel(titleModelId());
         const providerKeys = await resolveProviderKeys();
+        const model = requiredModel(titleModelId(), providerKeys);
         if (!keyForModel(providerKeys, model)) return undefined;
         const out = await oneShot(
           "pi-title",
@@ -2550,8 +2559,8 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
 
       async summarizeApproval(command: string, reason: string, purpose?: string): Promise<string | undefined> {
         if (!command.trim()) return undefined;
-        const model = requiredModel(titleModelId());
         const providerKeys = await resolveProviderKeys();
+        const model = requiredModel(titleModelId(), providerKeys);
         if (!keyForModel(providerKeys, model)) return undefined;
         const prompt = [
           `Policy flagged this as: ${reason}`,

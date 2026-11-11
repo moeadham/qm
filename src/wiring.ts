@@ -1,7 +1,7 @@
 import type { MemoryEmbedder } from "./model/embeddings.ts";
 import { createTranscriber } from "./model/transcribe.ts";
 import { nonDeploymentCredential, withDeploymentCredentials } from "./credentials/deployment-credentials.ts";
-import { isHarnessId, resolveEmbeddingModel } from "./model/pi-models.ts";
+import { isHarnessId, resolveEmbeddingModel, type ModelProvider } from "./model/pi-models.ts";
 import { createPostgresTeamStore, type TeamStore } from "./teams/teams.ts";
 import { brokerCredentialAuthHeader } from "./api/credential-broker.ts";
 import type { DecisionBackend } from "./decisions/decisions.ts";
@@ -72,7 +72,7 @@ import {
   baseModelProviders,
   configuredModelForHarness,
   enabledSandboxBackends,
-  harnessCarriedModelAuth,
+  harnessCarriedModelAuth as staticCarriedModelAuth,
   providerKeysPresent,
   type Config,
 } from "./config.ts";
@@ -328,12 +328,7 @@ import { createMemorySessionStore } from "./sessions/memory-session-store.ts";
 import { createPostgresSessionStore } from "./sessions/postgres-session-store.ts";
 import type { SessionStore } from "./sessions/session-store.ts";
 import { createMockHarness } from "./harness/mock-harness.ts";
-import {
-  fileCompanyChatGPTAuth,
-  keychainCompanyChatGPTAuth,
-  type CompanyChatGPTAuth,
-} from "./model/company-chatgpt-auth.ts";
-import { keychainHarnessAuthEnv } from "./credentials/harness-auth-env.ts";
+import { fileCompanyChatGPTAuth } from "./model/company-chatgpt-auth.ts";
 import { createClaudeHarness, claudeHarnessConfigOptions } from "./harness/claude-harness.ts";
 import { createPiHarness, piHarnessConfigOptions, type ProviderKeys } from "./harness/pi-harness.ts";
 import { createHarnessRouter, resolveRuntimeChoiceDurable } from "./harness/harness-router.ts";
@@ -446,6 +441,7 @@ import { createPostgresErrorLog } from "./admin/postgres-error-log.ts";
 import { createMetricsSink, type MetricsSink } from "./admin/metrics-sink.ts";
 import { createPostgresMetricsSink } from "./admin/postgres-metrics-sink.ts";
 import { errMessage, reportFailureAs, swallowAs } from "./util/errors.ts";
+import { ProviderTurnError } from "./core/turn-error.ts";
 import { sleep, withTimeout } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
 
@@ -519,6 +515,7 @@ export interface BuiltApp {
   secretDrops: SecretDropStore;
   browserModelGateway?: ModelGatewayTransportConfig;
   resolveBrowserCompanyKeys: (includeSubscription?: boolean) => Promise<ProviderKeys>;
+  harnessCarriedModelAuth: () => Promise<ModelProvider | undefined>;
   modelGateway: ModelGateway;
   modelCredentials: ModelCredentialStore;
   userModelCredentials: UserModelCredentialStore;
@@ -671,7 +668,7 @@ export function buildApp(
       const direct = await directModelCredentials.availability();
       return {
         ...direct,
-        ...(directProviderAvailability.codexOAuth ? { codexOAuth: true } : {}),
+        ...((await companyCodex()) ? { codexOAuth: true } : {}),
         modelIds: new Set(Object.keys(gatewayTransport?.models ?? {})),
       };
     },
@@ -1320,6 +1317,24 @@ export function buildApp(
   // same encryption, ownership, admin visibility, and removal flows as
   // every other personal credential.
   const userModelCredentials = createUserModelCredentialStore({ keychain: credentialStore });
+  const orgModelAccount = scopeId("org", config.orgId);
+  const companyChatGPTFile = config.codexAuthFile ? fileCompanyChatGPTAuth(config.codexAuthFile) : undefined;
+  const orgChatGPT = (): Promise<boolean> =>
+    userModelCredentials
+      .subscription(orgModelAccount, "openai")
+      .then((status) => status !== undefined)
+      .catch(swallowAs("model: org ChatGPT login lookup", false));
+  const companyCodex = async (): Promise<boolean> => Boolean(companyChatGPTFile) || orgChatGPT();
+  const harnessCarriedModelAuth = async (): Promise<ModelProvider | undefined> => {
+    const configured = staticCarriedModelAuth(config);
+    const [claude, codex] = await Promise.all([
+      config.harness === "claude" &&
+        userModelCredentials.subscription(orgModelAccount, "anthropic").then((status) => status !== undefined),
+      companyCodex(),
+    ]).catch(swallowAs("model: org subscription lookup", [false, false]));
+    if (claude || configured === "anthropic") return "anthropic";
+    return codex ? "openai" : configured;
+  };
   const keychain: Keychain | undefined = keychainKeyMaterial ? credentialStore : undefined;
   const serviceCreds = withDeploymentCredentials(
     credentialStore,
@@ -1436,19 +1451,18 @@ export function buildApp(
       ...customKeys,
     };
   };
-  let companyChatGPTAuth: CompanyChatGPTAuth | undefined;
-  if (config.codexAuthCredential && keychain)
-    companyChatGPTAuth = keychainCompanyChatGPTAuth({ keychain, credentialId: config.codexAuthCredential });
-  else if (config.codexAuthFile) companyChatGPTAuth = fileCompanyChatGPTAuth(config.codexAuthFile);
   const resolveCompanySubscriptionKeys = async (): Promise<ProviderKeys> => {
-    if (!companyChatGPTAuth) return {};
     try {
-      const token = await companyChatGPTAuth.accessToken();
-      return token ? { [CODEX_SUBSCRIPTION_PROVIDER]: token } : {};
+      const token =
+        (await userModelCredentials.derivedOAuth(orgModelAccount, "openai"))?.accessToken ??
+        (await companyChatGPTFile?.accessToken());
+      if (token) return { [CODEX_SUBSCRIPTION_PROVIDER]: token };
     } catch (e) {
-      console.error(`[model] company ChatGPT auth (${companyChatGPTAuth.description}) unreadable: ${errMessage(e)}`);
-      return {};
+      console.error(`[model] company ChatGPT login unreadable: ${errMessage(e)}`);
     }
+    const configured = await companyCodex();
+    if (configured) console.error("[model] company ChatGPT login has no usable token; reconnect it in Admin → Models");
+    return configured ? { [CODEX_SUBSCRIPTION_PROVIDER]: "" } : {};
   };
   const resolvePiProviderKeys = async (): Promise<ProviderKeys> => ({
     ...(await resolveModelProviderKeys()),
@@ -1482,7 +1496,7 @@ export function buildApp(
         resolveBaseModelId: () => orgBaseModelId() ?? defaultForHarness("pi"),
         resolveFallbackRuntime: () => configStore.getPurposeRuntime("fallback"),
         resolveProviderKeys: resolvePiProviderKeys,
-        ...(directProviderAvailability.codexOAuth ? { companyModelId } : {}),
+        companyModelId,
         signals: runSignals,
         mcpTools,
       }),
@@ -1491,14 +1505,14 @@ export function buildApp(
       "claude",
       createClaudeHarness({
         ...claudeHarnessConfigOptions(config),
-        ...(config.claudeAuthCredential && keychain
-          ? {
-              authEnv: keychainHarnessAuthEnv(keychain, config.claudeAuthCredential, [
-                "CLAUDE_CODE_OAUTH_TOKEN",
-                "ANTHROPIC_AUTH_TOKEN",
-              ]),
-            }
-          : {}),
+        orgOauthToken: async () => {
+          const token = (await userModelCredentials.derivedOAuth(orgModelAccount, "anthropic"))?.accessToken;
+          if (token || !(await userModelCredentials.subscription(orgModelAccount, "anthropic"))) return token;
+          throw new ProviderTurnError(
+            "The organization's Claude login needs to be reconnected. An admin can reconnect it in Admin → Models.",
+            { code: "auth", retryable: false, raw: "company Claude login has no usable token" },
+          );
+        },
         signals: runSignals,
         mcpTools,
       }),
@@ -3045,6 +3059,7 @@ export function buildApp(
     secretDrops,
     browserModelGateway: gatewayTransport,
     resolveBrowserCompanyKeys,
+    harnessCarriedModelAuth,
     modelGateway,
     modelCredentials,
     userModelCredentials,
@@ -3132,7 +3147,6 @@ export function serverDeps(
   slackEnvBotToken?: string,
 ): Omit<ServerDeps, "control"> {
   const configuredModel = configuredModelForHarness(config, config.harness);
-  const carriedModelAuth = harnessCarriedModelAuth(config);
   return {
     externalSlackPolicies: config.externalSlackPolicies,
     browserModelGateway: built.browserModelGateway,
@@ -3170,7 +3184,7 @@ export function serverDeps(
     mcpServers: built.mcpServers,
     mcpToolService: built.mcpToolService,
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
-    ...(carriedModelAuth ? { harnessCarriedModelAuth: carriedModelAuth } : {}),
+    harnessCarriedModelAuth: built.harnessCarriedModelAuth,
     harnessId: config.harness,
     connectorTokens: built.connectorTokens,
     slackInstallation: built.slackInstallation,

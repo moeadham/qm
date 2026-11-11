@@ -1175,7 +1175,7 @@ async function getSurfaceConfig(ctx: ApiCtx): Promise<void> {
         providerStatus.openai ||
         providerStatus.openrouter ||
         providerStatus.modelIds?.size ||
-        deps.harnessCarriedModelAuth,
+        (await deps.harnessCarriedModelAuth?.()),
       ),
     }),
     externalSlackParticipants,

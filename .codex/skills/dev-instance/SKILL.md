@@ -145,8 +145,8 @@ The dev instance should exercise the real system:
   explicit `HARNESS=claude`. Pass `DEV_INSTANCE_ALLOW_MOCK=1` for a deliberate no-model
   wiring check. Pi's GPT models can also use a ChatGPT subscription: set `CODEX_AUTH_FILE`
   to a local Codex CLI `auth.json`. The auth-file path is for local dev instances; deployed
-  production processes use an API key or a keychain credential (`CODEX_AUTH_CREDENTIAL` /
-  `CLAUDE_AUTH_CREDENTIAL`), whose secret lives encrypted in its owner's keychain.
+  production processes use an API key or an org Claude or ChatGPT login an admin connects
+  in Admin → Models.
 - real durability: uses `DATABASE_URL` when supplied; otherwise starts/reuses a local
   Docker Postgres container and runs core with `SESSION_STORE=postgres` and
   `RUN_STORE=postgres`

@@ -859,6 +859,9 @@ export function createKeychain(deps: {
   }
 
   async function connectorTokenForRecord(rec: KeychainCredential): Promise<string | null> {
+    const known = normalizeConnectorRecord(rec) ?? rec;
+    if (known.expiresAt === undefined || now() < known.expiresAt - oauthRefreshMargin)
+      return tryDecrypt(known, (r) => decryptSecret(r.secretEnc, deps.key));
     return lock.withLock(`keychain-oauth:${rec.id}`, async () => {
       const current = normalizeConnectorRecord(await deps.creds.get(rec.id));
       if (!current) return null;

@@ -188,7 +188,7 @@ export interface OrchestratorDeps {
   ) => Promise<{ ok: true; runtime?: import("../../types.ts").SessionRuntime } | { ok: false; error: string }>;
   validateScheduledRuntime?: (
     scope: import("../../types.ts").ScopeId,
-    choice: import("../../harness/harness.ts").RuntimeChoice,
+    choice: Omit<import("../../harness/harness.ts").RuntimeChoice, "harnessId"> & { harnessId: string },
     purpose?: import("../../resolution/config-store.ts").RuntimePurpose,
     actorId?: string,
   ) => Promise<string | null>;

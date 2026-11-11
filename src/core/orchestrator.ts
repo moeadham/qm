@@ -1299,14 +1299,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               ? pinSessionRuntime(session, actor.id, runtime)
               : Promise.resolve({ ok: false as const, error: "pinning is not available" }),
           problem: async (runtime) =>
-            isHarnessId(runtime.harnessId)
-              ? ((await deps.validateScheduledRuntime?.(
-                  scopeId,
-                  { ...runtime, harnessId: runtime.harnessId },
-                  undefined,
-                  actor.id,
-                )) ?? null)
-              : `harness ${runtime.harnessId} is not available`,
+            (await deps.validateScheduledRuntime?.(scopeId, runtime, undefined, actor.id)) ?? null,
         },
         session.runtime,
         input.surface === "web" && !automatedTurn ? input : { ...input, pinRuntime: undefined },

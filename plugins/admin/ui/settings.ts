@@ -18,6 +18,8 @@ export { configureFlags, loadFlags } from "./settings-flags.ts";
 export { configureDecisions, loadDecisions } from "./settings-decisions.ts";
 import { brandingCard } from "./settings-branding.ts";
 import { mountRuntimes } from "./settings-runtimes.ts";
+import { mountModelAccounts } from "./settings-model-accounts.ts";
+export { configureModelAccounts, loadModelAccounts } from "./settings-model-accounts.ts";
 export { configureRuntimes } from "./settings-runtimes.ts";
 import { html } from "lit";
 import { classMap } from "lit/directives/class-map.js";
@@ -212,6 +214,7 @@ export function mountCards() {
   mountProviders();
   mountCredentials();
   mountRuntimes();
+  mountModelAccounts();
   for (const [key, s] of states) {
     const id = (
       { soul: "card-soul", branding: "card-branding", "webui-models": "card-webui-models" } as Record<string, string>

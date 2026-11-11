@@ -1,4 +1,6 @@
+import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
@@ -878,4 +880,40 @@ test("Claude records the stop when the worker cancels a turn before any output",
     entries.filter((e) => e.type !== "user").map((e) => e.payload),
     [{ kind: "turn_stopped", reason: "because the run was cancelled" }],
   );
+});
+
+test("the organization's Claude login replaces stray Anthropic env auth, and a personal login still wins", async () => {
+  currentScript = async function* (prompts) {
+    await prompts[Symbol.asyncIterator]().next();
+    yield resultMessage("done");
+  };
+  const harness = createClaudeHarness({
+    env: {
+      ANTHROPIC_API_KEY: "env-key",
+      ANTHROPIC_BASE_URL: "https://proxy.invalid",
+      CLAUDE_CODE_OAUTH_TOKEN: "env-token",
+    },
+    orgOauthToken: async () => "org-token",
+  });
+  await harness.turns.runTurn(harnessTurn().turn);
+  const orgEnv = capturedOptions.env as NodeJS.ProcessEnv;
+  assert.equal(orgEnv.CLAUDE_CODE_OAUTH_TOKEN, "org-token");
+  assert.equal(orgEnv.ANTHROPIC_API_KEY, undefined);
+  assert.equal(orgEnv.ANTHROPIC_BASE_URL, undefined);
+  await harness.turns.runTurn(harnessTurn({ claudeOauthToken: "personal-token" }).turn);
+  assert.equal((capturedOptions.env as NodeJS.ProcessEnv).CLAUDE_CODE_OAUTH_TOKEN, "personal-token");
+});
+
+test("a Claude turn stops when the organization's login cannot produce a token", async () => {
+  capturedOptions = {};
+  const harness = createClaudeHarness({
+    env: { CLAUDE_CODE_OAUTH_TOKEN: "env-token" },
+    orgOauthToken: async () => {
+      throw new Error("reconnect the organization's Claude login");
+    },
+  });
+  const before = readdirSync(tmpdir()).filter((name) => name.startsWith("qm-claude-")).length;
+  await assert.rejects(harness.turns.runTurn(harnessTurn().turn), /reconnect the organization's Claude login/);
+  assert.deepEqual(capturedOptions, {});
+  assert.equal(readdirSync(tmpdir()).filter((name) => name.startsWith("qm-claude-")).length, before);
 });

@@ -29,6 +29,7 @@ interface UserCredentialConnection {
 export interface UserModelCredentialStore {
   get(userId: string, provider: ModelProvider): Promise<UserModelCredential | null>;
   connections(userId: string): Promise<UserCredentialConnection[]>;
+  subscription(userId: string, provider: ModelProvider): Promise<"active" | "reconnect" | undefined>;
   setApiKey(userId: string, provider: ModelProvider, apiKey: string): Promise<void>;
   setOAuth(userId: string, provider: ModelProvider, tokens: UserOAuthTokens): Promise<void>;
   /**
@@ -118,6 +119,12 @@ export function createUserModelCredentialStore(input: { keychain: Keychain }): U
           found.push({ provider, kind: cred.kind, ...(cred.oauth?.needsReconnect ? { needsReconnect: true } : {}) });
       }
       return found;
+    },
+
+    async subscription(userId, provider) {
+      const cred = await oauthCredential(userId, provider);
+      if (!cred) return undefined;
+      return cred.oauth?.needsReconnect ? "reconnect" : "active";
     },
 
     async setApiKey(userId, provider, apiKey) {

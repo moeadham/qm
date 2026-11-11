@@ -29,7 +29,7 @@ export function tokenExpiry(raw: { expires_in?: number; access_token?: string })
   return typeof exp === "number" ? exp * 1000 : undefined;
 }
 
-export function asObject(value: unknown): JsonObject | null {
+function asObject(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
 }
 
@@ -44,7 +44,7 @@ export function authTokens(auth: JsonObject): { access: string; refresh: string;
   };
 }
 
-export function authAccountId(auth: JsonObject): string | undefined {
+function authAccountId(auth: JsonObject): string | undefined {
   const tokens = authTokens(auth);
   return tokens ? (chatgptAccountIdFromToken(tokens.id) ?? chatgptAccountIdFromToken(tokens.access)) : undefined;
 }

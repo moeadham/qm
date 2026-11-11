@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createInsecureTestServer } from "../src/api/server.ts";
 import { buildApp, type BuiltApp } from "../src/wiring.ts";
-import { providerKeysPresent, harnessCarriedModelAuth } from "../src/config.ts";
+import { providerKeysPresent } from "../src/config.ts";
 import { testConfig } from "./support/test-config.ts";
 import { createModelCredentialStore, type StoredModelCredential } from "../src/model/model-credential-store.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
@@ -35,7 +35,7 @@ function start(
     userModelCredentials: built.userModelCredentials,
     modelCredentialFetch,
     harnessId: config.harness ?? "pi",
-    ...(harnessCarriedModelAuth(appConfig) ? { harnessCarriedModelAuth: harnessCarriedModelAuth(appConfig) } : {}),
+    harnessCarriedModelAuth: built.harnessCarriedModelAuth,
     providerKeys: providerKeysPresent(appConfig),
     admin: built.admin,
     auditLog: built.auditLog,
@@ -659,6 +659,47 @@ test("company runtime reads exclude personal-only models without changing the re
     assert.deepEqual(await (await fetch(url)).json(), personal);
     assert.equal((await fetch(`${url}&account=unknown`)).status, 400);
     assert.equal(await srv.built.config.getRuntimeSelectionDurable("personal:alice"), null);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("admins connect, read, and disconnect the organization's subscription logins, even when personal accounts are off", async () => {
+  const srv = start();
+  try {
+    srv.built.config.setIndividualModelAuthMode("org-only");
+    const outsider = await fetch(`${srv.base}/v1/admin/model-accounts`, {
+      headers: { "content-type": "application/json", "x-admin-actor": "nobody@default-org" },
+    });
+    assert.equal(outsider.status, 403);
+    const empty = await fetch(`${srv.base}/v1/admin/model-accounts`, { headers: ADMIN });
+    assert.deepEqual(await empty.json(), { connections: [] });
+
+    const started = await fetch(`${srv.base}/v1/admin/model-accounts/claude/start`, {
+      method: "POST",
+      headers: ADMIN,
+      body: "{}",
+    });
+    assert.equal(started.status, 200);
+    const prompt = (await started.json()) as { authorizeUrl: string; verifier: string };
+    assert.equal(new URL(prompt.authorizeUrl).searchParams.get("state"), prompt.verifier);
+
+    await srv.built.userModelCredentials.setOAuth("org:default-org", "anthropic", {
+      accessToken: "org-claude-access",
+      refreshToken: "org-claude-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    });
+    const connected = await fetch(`${srv.base}/v1/admin/model-accounts`, { headers: ADMIN });
+    assert.deepEqual(await connected.json(), { connections: [{ provider: "anthropic", kind: "oauth" }] });
+    assert.deepEqual(await srv.built.userModelCredentials.connections("admin-alice@default-org"), []);
+
+    const removed = await fetch(`${srv.base}/v1/admin/model-accounts/disconnect`, {
+      method: "POST",
+      headers: ADMIN,
+      body: JSON.stringify({ provider: "claude" }),
+    });
+    assert.equal(removed.status, 200);
+    assert.deepEqual(await srv.built.userModelCredentials.connections("org:default-org"), []);
   } finally {
     await srv.close();
   }
