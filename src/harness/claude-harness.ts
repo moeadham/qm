@@ -302,6 +302,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
 
   const runPrompt = async (turn: HarnessTurnInput, toolsEnabled = true): Promise<HarnessTurnResult> => {
     if (turn.cancel?.aborted) return { reply: "", stopped: true };
+    const oauthToken = turn.claudeOauthToken ?? (await opts.orgOauthToken?.());
     const documentTextBudget = { remaining: 100_000 };
     const preparedDocuments = await documentBlocks(
       turn.documents ?? [],
@@ -417,7 +418,6 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
     let streamedText = "";
     let initialUserEchoSkipped = false;
     const seenUserMessages = new Set<string>();
-    const oauthToken = turn.claudeOauthToken ?? (await opts.orgOauthToken?.());
     const sdkQuery = query({
       prompt: queue,
       options: {

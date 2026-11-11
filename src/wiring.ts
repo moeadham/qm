@@ -1329,7 +1329,7 @@ export function buildApp(
     const configured = staticCarriedModelAuth(config);
     const [claude, codex] = await Promise.all([
       config.harness === "claude" &&
-        userModelCredentials.subscription(orgModelAccount, "anthropic").then((status) => status === "active"),
+        userModelCredentials.subscription(orgModelAccount, "anthropic").then((status) => status !== undefined),
       companyCodex(),
     ]).catch(swallowAs("model: org subscription lookup", [false, false]));
     if (claude || configured === "anthropic") return "anthropic";
