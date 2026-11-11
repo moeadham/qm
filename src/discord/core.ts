@@ -16,26 +16,17 @@ import { setSessionRuntime } from "../api/session-runtime.ts";
 import type { SessionStore } from "../sessions/session-store.ts";
 import type { RuntimeChoice } from "../harness/harness.ts";
 import type { Session, SessionRuntime, TurnOrigin } from "../types.ts";
-import { resolveTurnOrigin } from "../core/turn-origin.ts";
+import { resolveTurnOrigin, resumesOwnersTask } from "../core/turn-origin.ts";
+import { deliversRunResult } from "../delivery/run-result-delivery.ts";
 import {
   createSurfaceCoreClient,
   type SurfaceCoreClient,
   type SurfaceCoreClientDeps,
 } from "../surfaces/surface-core-client.ts";
 
-export type WatchableRun =
-  | {
-      kind: "reply";
-      runId: string;
-      threadRef: string;
-      target: string;
-      dm: boolean;
-      origin: TurnOrigin;
-      placeholder?: string;
-    }
-  | { kind: "status"; runId: string; threadRef: string };
-
-const RESUMED_SURFACES = new Set(["secret-drop", "keychain-ask"]);
+export type WatchableRun = { runId: string; threadRef: string; placeholder?: string } & (
+  { kind: "reply"; target: string; dm: boolean; origin: TurnOrigin } | { kind: "status" }
+);
 
 export interface DiscordCoreClient extends SurfaceCoreClient {
   watchableRuns(): Promise<WatchableRun[]>;
@@ -112,26 +103,20 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     ...createSurfaceCoreClient("discord", deps),
     async watchableRuns() {
       const watchable: WatchableRun[] = [];
-      for (const threadRef of await deps.runs.activeSessionIds("discord:")) {
+      for (const threadRef of await deps.runs.activeSessionIds()) {
+        if (!threadRef.startsWith("discord:")) continue;
         const run = await deps.runs.activeForThread(threadRef);
-        if (!run || run.request.swarm || run.request.privateSessionMessage) continue;
-        if (RESUMED_SURFACES.has(run.request.surface ?? "")) {
-          watchable.push({ kind: "status", runId: run.id, threadRef });
+        if (!run || !deliversRunResult(run)) continue;
+        const placeholder = run.deliveryState?.editRef ? undefined : run.deliveryState?.replyRef;
+        const seen = { runId: run.id, threadRef, ...(placeholder ? { placeholder } : {}) };
+        if (resumesOwnersTask(run.request)) {
+          watchable.push({ ...seen, kind: "status" });
           continue;
         }
         const origin = resolveTurnOrigin(run.request);
         const target = run.request.deliveryTarget;
         if (run.request.surface !== "discord" || !target || origin.kind === "ambient") continue;
-        const placeholder = run.deliveryState?.editRef ? undefined : run.deliveryState?.replyRef;
-        watchable.push({
-          kind: "reply",
-          runId: run.id,
-          threadRef,
-          target,
-          dm: run.request.conversation.kind === "dm",
-          origin,
-          ...(placeholder ? { placeholder } : {}),
-        });
+        watchable.push({ ...seen, kind: "reply", target, dm: run.request.conversation.kind === "dm", origin });
       }
       return watchable;
     },

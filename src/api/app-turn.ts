@@ -15,6 +15,7 @@ import {
   isPersonAuthored,
   isSessionTurn,
   resolveTurnOrigin,
+  resumesOwnersTask,
 } from "../core/turn-origin.ts";
 import { conversationScope } from "../resolution/resolution-service.ts";
 import { isTerminal, leaseLapsed } from "../runs/run-store.ts";
@@ -513,7 +514,7 @@ export function createTurnMethods(
         const liveOriginKind = live ? resolveTurnOrigin(live.request).kind : undefined;
         const personIntoAutomation =
           liveOriginKind === "automation" &&
-          !(live?.request.surface === "secret-drop" && live.request.actor.id === actor.id) &&
+          !(live && resumesOwnersTask(live.request) && live.request.actor.id === actor.id) &&
           (origin.kind === "human" || (origin.kind === "ambient" && origin.live === true)) &&
           !(origin.kind === "human" && isHalt(req.text));
         if (live && redeliveryKey && live.dedupKey === redeliveryKey) return { status: "silent" };

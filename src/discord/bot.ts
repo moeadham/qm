@@ -512,37 +512,36 @@ export function createDiscordBot(deps: {
     };
   }
 
-  const followed = new Set<string>();
   const abandoned = new Set<string>();
 
   async function watchRun(run: WatchableRun): Promise<void> {
     const { runId } = run;
-    if (followed.has(runId) || abandoned.has(runId) || flow.inFlightRuns.has(runId) || submitting.has(run.threadRef))
+    if (abandoned.has(runId) || flow.inFlightRuns.has(runId) || submitting.has(run.threadRef)) return;
+    if (run.kind === "reply") {
+      await converse(
+        run.target,
+        {
+          start: (hooks) => flow.followRun(runId, hooks),
+          dm: run.dm,
+          origin: run.origin,
+          ...(run.placeholder ? { placeholder: run.placeholder } : {}),
+        },
+        { addressed: true, key: `run:${runId}` },
+      );
       return;
-    followed.add(runId);
+    }
+    const channelId = discordThreadChannel(run.threadRef);
+    if (!channelId) return;
+    flow.inFlightRuns.add(runId);
     try {
-      if (run.kind === "reply") {
-        await converse(
-          run.target,
-          {
-            start: (hooks) => flow.followRun(runId, hooks),
-            dm: run.dm,
-            origin: run.origin,
-            ...(run.placeholder ? { placeholder: run.placeholder } : {}),
-          },
-          { addressed: true, key: `run:${runId}` },
-        );
-        return;
-      }
-      const channelId = discordThreadChannel(run.threadRef);
-      if (channelId) await showStatus(channelId, runId);
+      await showStatus(channelId, runId, run.placeholder);
     } finally {
-      followed.delete(runId);
+      flow.inFlightRuns.delete(runId);
     }
   }
 
-  async function showStatus(channelId: string, runId: string): Promise<void> {
-    const writer = createReplyWriter(channelId, async () => {});
+  async function showStatus(channelId: string, runId: string, placeholder?: string): Promise<void> {
+    const writer = createReplyWriter(channelId, (messageId) => core.reportRunReplyRef(runId, messageId), placeholder);
     const stopTyping = startTyping(channelId);
     writer.begin();
     try {
