@@ -241,7 +241,8 @@ function harness(opts: {
   snapshots?: string[];
   toolCalls?: ToolCallView[][];
   replying?: boolean;
-  holdMs?: number;
+  queuedMs?: number;
+  steeredAfterMs?: number;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
   keychain?: KeychainApprovalView;
@@ -313,11 +314,16 @@ function harness(opts: {
     async submitTurn(body) {
       h.turns.push({ ...body, surface: "discord" });
       if (body.approval && opts.consumeApprovals) delete opts.approvals?.[body.approval.requestId];
+      if (opts.steeredAfterMs !== undefined) {
+        await new Promise((r) => setTimeout(r, opts.steeredAfterMs));
+        return { status: "queued", runId: "run-running", steered: true };
+      }
       return { status: "queued", runId: `run-${h.turns.length}` };
     },
     async waitRun(runId: string, hooks: RunHooks = {}) {
+      if (opts.queuedMs) await new Promise((r) => setTimeout(r, opts.queuedMs));
+      hooks.onRunning?.();
       if (opts.replying) hooks.onReplying?.();
-      if (opts.holdMs) await new Promise((r) => setTimeout(r, opts.holdMs));
       for (const calls of opts.toolCalls ?? []) {
         hooks.onToolCalls?.(calls);
         await new Promise((r) => setTimeout(r, 5));
@@ -1444,20 +1450,31 @@ test("tool lines under a reply that is mid code block stay outside the block", a
   );
 });
 
-test("a slow turn with no output yet shows a working status that the reply then replaces", async () => {
-  const h = harness({ holdMs: 2_600, result: () => ({ status: "ok", reply: "Done." }) });
+test("a turn waiting for a worker shows a queued status that turns into working, then the reply", async () => {
+  const h = harness({ queuedMs: 2_300, result: () => ({ status: "ok", reply: "Done." }) });
   const { api, handlers, plugin } = await boot(h);
   handlers.onMessage(dm(ALICE, "go"));
-  await until(() => h.acked.length === 1, "ack", 5_000);
+  await until(() => h.acked.length === 1, "ack");
   await plugin.stop();
 
   assert.equal(api.sent.length, 1);
-  assert.equal(api.sent[0]!.content, "-# Working for 2s");
+  assert.match(api.sent[0]!.content, /^-# Queued for \d+s$/);
   assert.deepEqual(h.replyRefs, [["run-1", api.sent[0]!.id]]);
   assert.deepEqual(
     api.edits.map((e) => e.content),
-    ["Done."],
+    ["-# Working", "Done."],
   );
+});
+
+test("a message folded into a running turn after a slow submit leaves no status message behind", async () => {
+  const h = harness({ steeredAfterMs: 2_300 });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.turns.length === 1, "submitted");
+  await new Promise((r) => setTimeout(r, 2_600));
+  await plugin.stop();
+
+  assert.deepEqual(api.sent, []);
 });
 
 test("a tool-only placeholder is recorded for recovery and removed when the turn ends without text", async () => {

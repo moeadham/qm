@@ -40,6 +40,7 @@ interface TurnHooks {
   deferDeliveryAck?: boolean;
   onQueued?: (runId: string) => void | Promise<void>;
   onSteered?: (runId: string) => void | Promise<void>;
+  onRunning?: () => void;
   onReplying?: () => void;
   onFirstBlock?: (text: string) => void;
   onSurfacePosted?: () => void;
@@ -131,6 +132,7 @@ export function createTurnFlow(
     let result: TurnResult | null;
     try {
       result = await core.waitRun(runId, {
+        ...(hooks.onRunning ? { onRunning: hooks.onRunning } : {}),
         ...(hooks.onReplying ? { onReplying: hooks.onReplying } : {}),
         ...(hooks.onFirstBlock ? { onFirstBlock: hooks.onFirstBlock } : {}),
         ...(hooks.onSurfacePosted ? { onSurfacePosted: hooks.onSurfacePosted } : {}),
