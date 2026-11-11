@@ -520,7 +520,7 @@ export function createDiscordBot(deps: {
       if (reactions.length && trigger) await reactTo(channelId, trigger, reactions);
       const runId = queuedRunId;
       try {
-        await writer.finish(reply, runId ? `run:${runId}` : key, true);
+        await writer.finish(reply, runId ? `run:${runId}` : key, result.status === "ok");
         if (result.attachments?.length) {
           const problems = await sendDiscordFiles(api, core, channelId, result.attachments, {
             key: runId ? `run:${runId}` : key,

@@ -1477,6 +1477,19 @@ test("a message folded into a running turn after a slow submit leaves no status 
   assert.deepEqual(api.sent, []);
 });
 
+test("a failed turn that used tools posts its failure note without a worked summary", async () => {
+  const h = harness({
+    toolCalls: [[{ tool: "execute", args: { command: "ls" } }]],
+    result: () => ({ status: "failed", reason: "boom" }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.match(api.edits.at(-1)!.content, /^⚠️ /);
+});
+
 test("a tool-only placeholder is recorded for recovery and removed when the turn ends without text", async () => {
   const h = harness({
     toolCalls: [[{ tool: "execute", args: { command: "ls" } }]],
