@@ -3,6 +3,7 @@ import { modelGatewayRequest, type ModelGatewayTransportConfig } from "./provide
 import type { Context, ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { buildModelRuntime, type ProviderKeys } from "../harness/pi-harness.ts";
 import { zeroUsage } from "../harness/replay.ts";
+import { reportFailure } from "../util/errors.ts";
 import {
   CODEX_SUBSCRIPTION_PROVIDER,
   codexSubscriptionModelId,
@@ -18,11 +19,9 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 export class BrowserCompletionError extends Error {
   readonly status: number;
-  readonly detail: string | undefined;
-  constructor(message: string, status = 400, detail?: string) {
+  constructor(message: string, status = 400) {
     super(message);
     this.status = status;
-    this.detail = detail;
   }
 }
 
@@ -135,9 +134,6 @@ export async function nativeBrowserCompletion(
   }
   const runtime = await runtimeFactory(keys, gateway);
   const modelApi = model.api;
-  let toolChoice: object = { type: "function", name: "browser_result" };
-  if (modelApi === "anthropic-messages") toolChoice = { type: "auto" };
-  if (modelApi === "openai-completions") toolChoice = { type: "function", function: { name: "browser_result" } };
   const result = await runtime.completeSimple(model, context, {
     signal: input.signal,
     maxTokens: Math.min(limit, model.maxTokens),
@@ -146,21 +142,34 @@ export async function nativeBrowserCompletion(
       ? (raw) => {
           const payload = object(raw);
           if (!payload) throw new BrowserCompletionError("Invalid model request");
+          let toolChoice: object = { type: "function", name: "browser_result" };
+          if (modelApi === "anthropic-messages") toolChoice = { type: "auto" };
+          if (modelApi === "openai-completions")
+            toolChoice = { type: "function", function: { name: "browser_result" } };
           return { ...payload, tool_choice: toolChoice };
         }
       : undefined,
   });
-  const replyText = result.content
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("");
-  const evidence = `${model.id} stopReason=${result.stopReason}${result.errorMessage ? ` error=${result.errorMessage}` : ""} text=${JSON.stringify(replyText.slice(0, 500))}`;
   if (result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "length")
-    throw new BrowserCompletionError("Selected AI account could not complete the browser request", 502, evidence);
+    throw new BrowserCompletionError("Selected AI account could not complete the browser request", 502);
   const structured = result.content.find((part) => part.type === "toolCall" && part.name === "browser_result");
-  if (schema && !structured)
-    throw new BrowserCompletionError("Selected AI account did not return a structured browser result", 502, evidence);
-  const text = structured?.type === "toolCall" ? JSON.stringify(structured.arguments) : replyText;
+  if (schema && !structured) {
+    const error = new BrowserCompletionError("Selected AI account did not return a structured browser result", 502);
+    const textChars = result.content.reduce((n, part) => n + (part.type === "text" ? part.text.length : 0), 0);
+    reportFailure(
+      "browser model completion",
+      error,
+      `${model.id} stopReason=${result.stopReason} textChars=${textChars}`,
+    );
+    throw error;
+  }
+  const text =
+    structured?.type === "toolCall"
+      ? JSON.stringify(structured.arguments)
+      : result.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("");
   return {
     id: "browser-completion",
     object: "chat.completion",

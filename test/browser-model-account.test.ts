@@ -127,7 +127,8 @@ test("ChatGPT browser inference uses refreshed subscription auth and native stru
   });
 });
 
-test("Claude browser inference lets the model choose the result tool instead of forcing it", async () => {
+test("Claude browser inference lets the model choose the result tool instead of forcing it", async (t) => {
+  const logged = t.mock.method(console, "error", () => {});
   const built = buildApp(testConfig());
   await built.userModelCredentials.setApiKey("U1", "anthropic", "personal-anthropic");
   await built.config.setPersonalModelAuth("U1", true, "anthropic");
@@ -176,12 +177,9 @@ test("Claude browser inference lets the model choose the result tool instead of 
   assert.equal((await request("tool")).choices[0]?.message.content, '{"done":true}');
   await assert.rejects(
     request("text"),
-    (error: unknown) =>
-      error instanceof BrowserCompletionError &&
-      error.status === 502 &&
-      Boolean(error.detail?.includes("stopReason=stop")) &&
-      Boolean(error.detail?.includes("It is done.")),
+    (error: unknown) => error instanceof BrowserCompletionError && error.status === 502,
   );
+  assert.ok(logged.mock.calls.some((call) => String(call.arguments[0]).includes("stopReason=stop textChars=11")));
 });
 
 test("Claude subscription browser requests fail without deriving or sending credentials", async () => {
