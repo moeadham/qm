@@ -188,6 +188,35 @@ test("a steered turn persists every reply, not only the last result's", async ()
   assert.deepEqual(userTexts, ["what is the capital of france?", "now do the other three"]);
 });
 
+test("a steer the SDK folds into the running turn still ends the turn after its one result", async () => {
+  const signals = createMemoryRunSignalStore();
+  const runId = "run-steer-folded";
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    yield (await iterator.next()).value as unknown as FakeSdkMessage;
+    await signals.send(runId, { kind: "steer", text: "wait, check all of them", ts: "123.789" });
+    yield (await iterator.next()).value as unknown as FakeSdkMessage;
+    yield assistantMessage("msg_A", "Checked all of them.", {
+      input_tokens: 3,
+      output_tokens: 8,
+      cache_read_input_tokens: 50,
+      cache_creation_input_tokens: 0,
+    });
+    yield resultMessage("Checked all of them.");
+    if (!(await iterator.next()).done) yield resultMessage("unexpected prompt");
+  };
+
+  const harness = createClaudeHarness({ signals, turnWallClockMs: 3_000 });
+  const { turn, entries } = harnessTurn({ runId });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "Checked all of them.");
+  assert.deepEqual(
+    entries.filter((entry) => entry.type === "user").map((entry) => (entry.payload as { text: string }).text),
+    ["what is the capital of france?", "wait, check all of them"],
+  );
+});
+
 for (const shutdown of [false, true]) {
   test(`a user stop stays explicit when shutdown=${shutdown}`, async () => {
     const cancel = new AbortController();
