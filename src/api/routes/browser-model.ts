@@ -5,6 +5,7 @@ import { resolveBrowserModel } from "../../model/browser-model.ts";
 import { BrowserCompletionError, nativeBrowserCompletion } from "../../model/browser-completion.ts";
 import { BROWSER_MODEL_AUD } from "../../auth/capability-token.ts";
 import { sendJson } from "../http.ts";
+import { httpFailure, reportFailure } from "../../util/errors.ts";
 import type { ApiCtx, Route } from "./route.ts";
 
 const REQUEST_FIELDS = new Set([
@@ -97,7 +98,7 @@ async function browserModel(ctx: ApiCtx): Promise<void> {
       redirect: "error",
     });
     if (!response.ok) {
-      await response.body?.cancel();
+      reportFailure("browser model gateway", new Error(await httpFailure(response)), target);
       return sendJson(res, response.status === 429 ? 429 : 502, {
         error: "Selected AI account could not complete the browser request",
       });
@@ -105,6 +106,12 @@ async function browserModel(ctx: ApiCtx): Promise<void> {
     const result = await response.json();
     sendJson(res, 200, result);
   } catch (error) {
+    if (!controller.signal.aborted && (!(error instanceof BrowserCompletionError) || error.status >= 500))
+      reportFailure(
+        "browser model completion",
+        error,
+        error instanceof BrowserCompletionError ? error.detail : capability.browserModel,
+      );
     if (error instanceof BrowserCompletionError) return sendJson(res, error.status, { error: error.message });
     if (!res.destroyed) sendJson(res, 502, { error: "Selected AI account could not complete the browser request" });
   } finally {

@@ -18,9 +18,11 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 export class BrowserCompletionError extends Error {
   readonly status: number;
-  constructor(message: string, status = 400) {
+  readonly detail: string | undefined;
+  constructor(message: string, status = 400, detail?: string) {
     super(message);
     this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -148,18 +150,17 @@ export async function nativeBrowserCompletion(
         }
       : undefined,
   });
+  const replyText = result.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("");
+  const evidence = `${model.id} stopReason=${result.stopReason}${result.errorMessage ? ` error=${result.errorMessage}` : ""} text=${JSON.stringify(replyText.slice(0, 500))}`;
   if (result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "length")
-    throw new BrowserCompletionError("Selected AI account could not complete the browser request", 502);
+    throw new BrowserCompletionError("Selected AI account could not complete the browser request", 502, evidence);
   const structured = result.content.find((part) => part.type === "toolCall" && part.name === "browser_result");
   if (schema && !structured)
-    throw new BrowserCompletionError("Selected AI account did not return a structured browser result", 502);
-  const text =
-    structured?.type === "toolCall"
-      ? JSON.stringify(structured.arguments)
-      : result.content
-          .filter((part) => part.type === "text")
-          .map((part) => part.text)
-          .join("");
+    throw new BrowserCompletionError("Selected AI account did not return a structured browser result", 502, evidence);
+  const text = structured?.type === "toolCall" ? JSON.stringify(structured.arguments) : replyText;
   return {
     id: "browser-completion",
     object: "chat.completion",

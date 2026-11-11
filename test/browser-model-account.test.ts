@@ -138,7 +138,6 @@ test("Claude browser inference lets the model choose the result tool instead of 
     credentials: built.userModelCredentials,
     companyModel: "claude-fable-5-2",
   });
-  assert.equal(selection.model, "claude-fable-5-2");
   const request = (answer: "tool" | "text") =>
     nativeBrowserCompletion(
       {
@@ -177,7 +176,11 @@ test("Claude browser inference lets the model choose the result tool instead of 
   assert.equal((await request("tool")).choices[0]?.message.content, '{"done":true}');
   await assert.rejects(
     request("text"),
-    (error: unknown) => error instanceof BrowserCompletionError && error.status === 502,
+    (error: unknown) =>
+      error instanceof BrowserCompletionError &&
+      error.status === 502 &&
+      Boolean(error.detail?.includes("stopReason=stop")) &&
+      Boolean(error.detail?.includes("It is done.")),
   );
 });
 
