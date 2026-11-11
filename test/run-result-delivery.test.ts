@@ -180,7 +180,7 @@ test("runResultDelivery finishes a surface's reply placeholder in place after a 
 });
 
 test("runResultDelivery removes a surface's leftover reply placeholder when the run has nothing to send", () => {
-  const spine = run({ deliveryState: { replyRef: "171.003" } });
+  const spine = run({ result: { status: "ok", reply: "" }, deliveryState: { replyRef: "171.003" } });
   spine.request = { ...spine.request, surfaceTools: true };
   assert.deepEqual(runResultDelivery(spine)?.destination.delete, { messageTs: "171.003" });
   assert.deepEqual(
@@ -191,6 +191,17 @@ test("runResultDelivery removes a surface's leftover reply placeholder when the 
     },
   );
   assert.equal(runResultDelivery(run({ result: { status: "silent" }, deliveryState: { editRef: "171.005" } })), null);
+});
+
+test("runResultDelivery keeps a reply placeholder the surface turns into a notice", () => {
+  for (const result of [
+    { status: "pending_approval", reason: "waiting" },
+    { status: "refused", reason: "policy" },
+    { status: "ok", reply: "", stopped: true },
+  ] as const) {
+    const d = runResultDelivery(run({ result, deliveryState: { replyRef: "171.006" } }));
+    assert.equal(d?.destination.delete, undefined, result.status);
+  }
 });
 
 test("runResultDelivery links the admin error page when a resolver is wired", () => {

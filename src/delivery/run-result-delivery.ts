@@ -72,8 +72,13 @@ export function runResultDelivery(run: Run, adminUrlFor?: AdminUrlFor): RunResul
     return { destination, text: standaloneFailureText(run.result)!, provenance, idempotencyKey };
   }
   const replyRef = run.deliveryState?.editRef ? undefined : run.deliveryState?.replyRef;
+  const result = run.result;
+  const showsNothing =
+    result?.status === "silent" ||
+    result?.status === "react" ||
+    (result?.status === "ok" && !result.reply?.trim() && !result.stopped && !result.attachments?.length);
   const nothingToSend = (): RunResultDelivery | null =>
-    replyRef
+    replyRef && showsNothing
       ? {
           destination: { type: surface, target, delete: { messageTs: replyRef } },
           text: "",
