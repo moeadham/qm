@@ -516,6 +516,7 @@ export function createDiscordBot(deps: {
 
   async function watchRun(run: WatchableRun): Promise<void> {
     const { runId } = run;
+    if ((await core.activeRunForThread(run.threadRef)) !== runId) return;
     if (abandoned.has(runId) || flow.inFlightRuns.has(runId) || submitting.has(run.threadRef)) return;
     if (run.kind === "reply") {
       await converse(
@@ -526,7 +527,7 @@ export function createDiscordBot(deps: {
           origin: run.origin,
           ...(run.placeholder ? { placeholder: run.placeholder } : {}),
         },
-        { addressed: true, key: `run:${runId}` },
+        { addressed: true, key: `run:${runId}`, quiet: run.quiet },
       );
       return;
     }

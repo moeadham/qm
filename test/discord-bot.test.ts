@@ -274,6 +274,7 @@ function harness(opts: {
     fulfilled: [],
     core: undefined as unknown as DiscordCoreClient,
   };
+  const watched = [...(opts.watchable ?? [])];
   const real = createDiscordCoreClient({
     app: {} as never,
     blobTransfer: {} as never,
@@ -340,6 +341,9 @@ function harness(opts: {
     },
     async watchableRuns() {
       return opts.watchable?.splice(0) ?? [];
+    },
+    async activeRunForThread(threadRef) {
+      return watched.find((run) => run.threadRef === threadRef)?.runId;
     },
     async reportRunReplyRef(runId, replyRef) {
       h.replyRefs.push([runId, replyRef]);
@@ -1504,6 +1508,7 @@ test("a run the bot did not start reuses its status message for live status and 
         target: DM,
         dm: true,
         origin: { kind: "human", messageTs: "m1" },
+        quiet: false,
         placeholder: "status-1",
       },
     ],
@@ -2416,4 +2421,43 @@ test("/qm model with no models available answers in words instead of sending an 
   await plugin.stop();
   assert.equal(api.replies[0]!.content, "You don't have any models to choose from here.");
   assert.equal(api.replies[0]!.select, undefined);
+});
+
+test("the watcher waits for a fresh run's starter to record its status message, and keeps approval resumes quiet", async () => {
+  const now = Date.now();
+  const run = (id: string, threadRef: string, createdAt: number, extra: Record<string, unknown> = {}) => ({
+    id,
+    sessionId: threadRef,
+    status: "running",
+    createdAt,
+    request: {
+      surface: "discord",
+      deliveryTarget: "T1",
+      actor: { id: "U1" },
+      conversation: { kind: "channel", threadRef },
+      origin: { kind: "human", messageTs: "m1" },
+      ...extra,
+    },
+  });
+  const runs = new Map<string, Record<string, unknown>>([
+    ["discord:ch:P:fresh", run("fresh", "discord:ch:P:fresh", now)],
+    ["discord:ch:P:old", run("old", "discord:ch:P:old", now - 60_000, { approval: { requestId: "a1" } })],
+    ["discord:ch:P:posted", { ...run("posted", "discord:ch:P:posted", now), deliveryState: { replyRef: "s1" } }],
+  ]);
+  const core = createDiscordCoreClient({
+    runs: {
+      onTerminal: () => {},
+      activeSessionIds: async () => [...runs.keys(), "slack:C1"],
+      activeForThread: async (id: string) => runs.get(id) ?? null,
+    },
+  } as never);
+
+  const seen = await core.watchableRuns();
+  assert.deepEqual(
+    seen.map((w) => [w.runId, w.kind === "reply" ? w.quiet : undefined, w.placeholder]),
+    [
+      ["old", true, undefined],
+      ["posted", false, "s1"],
+    ],
+  );
 });

@@ -24,8 +24,10 @@ import {
   type SurfaceCoreClientDeps,
 } from "../surfaces/surface-core-client.ts";
 
+const STATUS_ADOPT_WAIT_MS = 5_000;
+
 export type WatchableRun = { runId: string; threadRef: string; placeholder?: string } & (
-  { kind: "reply"; target: string; dm: boolean; origin: TurnOrigin } | { kind: "status" }
+  { kind: "reply"; target: string; dm: boolean; origin: TurnOrigin; quiet: boolean } | { kind: "status" }
 );
 
 export interface DiscordCoreClient extends SurfaceCoreClient {
@@ -108,6 +110,7 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
         const run = await deps.runs.activeForThread(threadRef);
         if (!run || !deliversRunResult(run)) continue;
         const placeholder = run.deliveryState?.editRef ? undefined : run.deliveryState?.replyRef;
+        if (!placeholder && Date.now() - run.createdAt < STATUS_ADOPT_WAIT_MS) continue;
         const seen = { runId: run.id, threadRef, ...(placeholder ? { placeholder } : {}) };
         if (resumesOwnersTask(run.request)) {
           watchable.push({ ...seen, kind: "status" });
@@ -116,7 +119,14 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
         const origin = resolveTurnOrigin(run.request);
         const target = run.request.deliveryTarget;
         if (run.request.surface !== "discord" || !target || origin.kind === "ambient") continue;
-        watchable.push({ ...seen, kind: "reply", target, dm: run.request.conversation.kind === "dm", origin });
+        watchable.push({
+          ...seen,
+          kind: "reply",
+          target,
+          dm: run.request.conversation.kind === "dm",
+          origin,
+          quiet: Boolean(run.request.approval),
+        });
       }
       return watchable;
     },
