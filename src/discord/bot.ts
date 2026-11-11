@@ -20,6 +20,7 @@ import {
   type DiscordChannel,
   type DiscordMessage,
 } from "./api.ts";
+import { escapeMarkdown } from "./approval-cards.ts";
 import type { DiscordCoreClient } from "./core.ts";
 import type { ToolCallView } from "../surfaces/surface-core-client.ts";
 import { downloadDiscordFile, receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
@@ -63,6 +64,8 @@ const FENCE_CLOSE_RESERVE = 4;
 const STAKE_SCAN_MESSAGES = 100;
 
 function toolCallLine(call: ToolCallView): string {
+  const purpose = typeof call.args.purpose === "string" ? call.args.purpose.replace(/\s+/g, " ").trim() : "";
+  if (purpose) return `🔧 ${escapeMarkdown(safeClip(redactSecrets(purpose), TOOL_ARGS_LIMIT))}`;
   const args = safeClip(redactSecrets(JSON.stringify(call.args)), TOOL_ARGS_LIMIT);
   return `🔧 \`${`${call.tool} ${args}`.replaceAll("`", "ˋ")}\``;
 }

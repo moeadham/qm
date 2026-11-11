@@ -32,7 +32,7 @@ export function parseApprovalButton(customId: string): ApprovalButton | null {
   return null;
 }
 
-function escapeMarkdown(text: string): string {
+export function escapeMarkdown(text: string): string {
   return text.replace(/[\\*_~`|]/g, "\\$&");
 }
 

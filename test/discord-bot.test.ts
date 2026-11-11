@@ -1385,6 +1385,28 @@ test("a streamed reply that is mid code block shows the block closed", async () 
   assert.equal(api.sent[0]!.content, "Here:\n```ts\nconst a = 1;\n```");
 });
 
+test("a tool call's purpose is shown in place of its raw arguments, as on the web", async () => {
+  const h = harness({
+    toolCalls: [
+      [
+        { tool: "execute", args: { command: "qm credentials list --org", purpose: "List org\ncredentials" } },
+        { tool: "read", args: { path: "a.ts" } },
+        { tool: "execute", args: { command: "ls", purpose: "Check *_sandbox_* health" } },
+      ],
+    ],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.equal(
+    api.sent[0]!.content,
+    ["-# 🔧 List org credentials", '-# 🔧 `read {"path":"a.ts"}`', "-# 🔧 Check \\*\\_sandbox\\_\\* health"].join("\n"),
+  );
+});
+
 test("secret-looking tool arguments are redacted in the tool lines", async () => {
   const h = harness({
     toolCalls: [[{ tool: "webhooks", args: { action: "create", secret: "abc123def456" } }]],
