@@ -76,6 +76,10 @@ export function safeChunks(text: string, max: number): string[] {
   return chunks;
 }
 
+export function closeOpenFence(text: string): string {
+  return countFenceTokens(text) % 2 === 1 ? text + FENCE_CLOSE : text;
+}
+
 export function safeClip(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, safeCutIndex(text, max))}…`;

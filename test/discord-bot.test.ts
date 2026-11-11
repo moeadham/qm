@@ -1375,6 +1375,29 @@ test("raw tool calls show in the placeholder under the streamed text until the f
   );
 });
 
+test("a streamed reply that is mid code block shows the block closed", async () => {
+  const h = harness({ snapshots: ["Here:\n```ts\nconst a = 1;"], result: () => ({ status: "ok", reply: "Done." }) });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.equal(api.sent[0]!.content, "Here:\n```ts\nconst a = 1;\n```");
+});
+
+test("secret-looking tool arguments are redacted in the tool lines", async () => {
+  const h = harness({
+    toolCalls: [[{ tool: "webhooks", args: { action: "create", secret: "abc123def456" } }]],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.equal(api.sent[0]!.content, '-# 🔧 `webhooks {"action":"create","secret":"[redacted]"}`');
+});
+
 test("tool lines under a reply that is mid code block stay outside the block", async () => {
   const h = harness({
     toolCalls: [[{ tool: "bash", args: { command: "ls" } }]],

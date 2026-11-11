@@ -2,7 +2,8 @@ import { MessageFlags } from "@discordjs/core";
 import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
-import { safeClip } from "../surfaces/safe-cut.ts";
+import { closeOpenFence, safeClip } from "../surfaces/safe-cut.ts";
+import { redactSecrets } from "../harness/redact-secrets.ts";
 import { hasRunDelivery, turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
 import type { ActorAssertion, TurnResult } from "../types.ts";
 import { errMessage, reportFailure, swallowAs } from "../util/errors.ts";
@@ -58,10 +59,11 @@ const THREAD_ALREADY_EXISTS = 160004;
 const CHANNEL_CACHE_LIMIT = 5_000;
 const TOOL_ACTIVITY_LINES = 3;
 const TOOL_ARGS_LIMIT = 300;
+const FENCE_CLOSE_RESERVE = 4;
 const STAKE_SCAN_MESSAGES = 100;
 
 function toolCallLine(call: ToolCallView): string {
-  const args = safeClip(JSON.stringify(call.args), TOOL_ARGS_LIMIT);
+  const args = safeClip(redactSecrets(JSON.stringify(call.args)), TOOL_ARGS_LIMIT);
   return `🔧 \`${`${call.tool} ${args}`.replaceAll("`", "ˋ")}\``;
 }
 
@@ -259,9 +261,8 @@ export function createDiscordBot(deps: {
     let queued = false;
     const render = (): string => {
       const status = activity.map((line) => `-# ${line}`).join("\n");
-      const room = DISCORD_MESSAGE_LIMIT - 1 - (status ? status.length + 6 : 0);
-      let body = reply ? safeClip(alignMarkdownTables(reply), room) : "";
-      if (status && body.split("```").length % 2 === 0) body += "\n```";
+      const room = DISCORD_MESSAGE_LIMIT - 1 - FENCE_CLOSE_RESERVE - (status ? status.length + 2 : 0);
+      const body = reply ? closeOpenFence(safeClip(alignMarkdownTables(reply), room)) : "";
       return [body, status].filter(Boolean).join("\n\n");
     };
     const show = (): void => {
