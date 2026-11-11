@@ -11,7 +11,7 @@ import {
   type TurnHooks,
 } from "../surfaces/turn-flow.ts";
 import type { ActorAssertion, TurnOrigin, TurnResult } from "../types.ts";
-import { errMessage, reportFailure, swallowAs } from "../util/errors.ts";
+import { errMessage, reportFailure, reportFailureAs, swallowAs } from "../util/errors.ts";
 import {
   DISCORD_MESSAGE_LIMIT,
   discordDisplayName,
@@ -526,6 +526,12 @@ export function createDiscordBot(deps: {
 
   const abandoned = new Set<string>();
 
+  function watchRuns(runs: WatchableRun[]): void {
+    const active = new Set(runs.map((run) => run.runId));
+    for (const runId of abandoned) if (!active.has(runId)) abandoned.delete(runId);
+    for (const run of runs) void watchRun(run).catch(reportFailureAs("discord: run watch", undefined));
+  }
+
   async function watchRun(run: WatchableRun): Promise<void> {
     const { runId } = run;
     if ((await core.activeRunForThread(run.threadRef)) !== runId) return;
@@ -539,7 +545,7 @@ export function createDiscordBot(deps: {
           origin: run.origin,
           ...(run.placeholder ? { placeholder: run.placeholder } : {}),
         },
-        { addressed: true, key: `run:${runId}`, quiet: run.quiet },
+        { addressed: true, key: `run:${runId}` },
       );
       return;
     }
@@ -694,5 +700,5 @@ export function createDiscordBot(deps: {
     return converse(body.deliveryTarget, submitted(body), { addressed: true, key, quiet: true });
   }
 
-  return { handleMessage, resumeTurn, watchRun };
+  return { handleMessage, resumeTurn, watchRuns };
 }

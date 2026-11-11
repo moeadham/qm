@@ -27,7 +27,7 @@ import {
 const STATUS_ADOPT_WAIT_MS = 5_000;
 
 export type WatchableRun = { runId: string; threadRef: string; placeholder?: string } & (
-  { kind: "reply"; target: string; dm: boolean; origin: TurnOrigin; quiet: boolean } | { kind: "status" }
+  { kind: "reply"; target: string; dm: boolean; origin: TurnOrigin } | { kind: "status" }
 );
 
 export interface DiscordCoreClient extends SurfaceCoreClient {
@@ -125,7 +125,6 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
           target,
           dm: run.request.conversation.kind === "dm",
           origin,
-          quiet: Boolean(run.request.approval),
         });
       }
       return watchable;

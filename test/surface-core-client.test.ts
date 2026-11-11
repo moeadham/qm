@@ -161,3 +161,17 @@ test("waitRun still gives up on a queued run that nothing ahead of it is moving"
   const failure = await followFor(t, 400, core.waitRun("r1"));
   assert.equal((failure as { code?: string } | undefined)?.code, "run_stalled");
 });
+
+test("waitRun rides out a failed lookup of the run ahead of a queued run", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  let lookups = 0;
+  const { core, finish } = queuedBehind(() => {
+    if (++lookups === 2) throw new Error("connection reset");
+    return { status: "running", leaseExpiresAt: Date.now() + 30_000 };
+  });
+  const waiting = core.waitRun("r1");
+  assert.equal(await followFor(t, 10, waiting), undefined);
+  finish();
+  t.mock.timers.tick(1_000);
+  assert.deepEqual(await waiting, { status: "ok", reply: "Done" });
+});

@@ -1558,7 +1558,6 @@ test("a run the bot did not start reuses its status message for live status and 
         target: DM,
         dm: true,
         origin: { kind: "human", messageTs: "m1" },
-        quiet: false,
         placeholder: "status-1",
       },
     ],
@@ -1579,6 +1578,29 @@ test("a run the bot did not start reuses its status message for live status and 
       ["status-1", "-# Worked · Ran commands\n\nDone."],
     ],
   );
+});
+
+test("a watched run that fails reports the failure in its status message", async () => {
+  const h = harness({
+    watchable: [
+      {
+        kind: "reply",
+        runId: "run-approved",
+        threadRef: `discord:dm:${DM}`,
+        target: DM,
+        dm: true,
+        origin: { kind: "human", messageTs: "m1" },
+        placeholder: "status-1",
+      },
+    ],
+    result: () => ({ status: "failed", reason: "boom" }),
+  });
+  const { api, plugin } = await boot(h);
+  await until(() => h.acked.includes("run-approved"), "watched run delivery ack");
+  await plugin.stop();
+
+  assert.deepEqual(api.removed, []);
+  assert.match(api.edits.at(-1)!.content, /^⚠️ /);
 });
 
 test("a run resumed after a secret-drop shows live status that is removed when it ends, leaving the reply to the resume", async () => {
@@ -2473,7 +2495,7 @@ test("/qm model with no models available answers in words instead of sending an 
   assert.equal(api.replies[0]!.select, undefined);
 });
 
-test("the watcher waits for a fresh run's starter to record its status message, and keeps approval resumes quiet", async () => {
+test("the watcher waits for a fresh run's starter to record its status message, and follows approval resumes", async () => {
   const now = Date.now();
   const run = (id: string, threadRef: string, createdAt: number, extra: Record<string, unknown> = {}) => ({
     id,
@@ -2504,10 +2526,18 @@ test("the watcher waits for a fresh run's starter to record its status message, 
 
   const seen = await core.watchableRuns();
   assert.deepEqual(
-    seen.map((w) => [w.runId, w.kind === "reply" ? w.quiet : undefined, w.placeholder]),
+    seen.map((w) => [w.runId, w.kind, w.placeholder]),
     [
-      ["old", true, undefined],
-      ["posted", false, "s1"],
+      ["old", "reply", undefined],
+      ["posted", "reply", "s1"],
     ],
   );
+  assert.deepEqual(seen[0], {
+    runId: "old",
+    threadRef: "discord:ch:P:old",
+    kind: "reply",
+    target: "T1",
+    dm: false,
+    origin: { kind: "human", messageTs: "m1" },
+  });
 });

@@ -176,8 +176,7 @@ export async function startDiscordPlugin(
 
   const watchRuns = async (): Promise<void> => {
     if (!gatewayLive) return;
-    for (const run of await core.watchableRuns())
-      void bot.watchRun(run).catch(reportFailureAs("discord: run watch", undefined));
+    bot.watchRuns(await core.watchableRuns());
   };
 
   const sweepers = [

@@ -257,10 +257,19 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
             const fb = deps.turnStream.firstBlock(runId);
             if (fb?.closed) signalFirstBlock(fb.text);
             await signalToolCalls().catch(swallowAs(`${surface}: tool call refresh`, undefined));
-            const ahead = run.status === "pending" ? await deps.runs.activeForThread(run.sessionId) : null;
-            const mark = [run, ...(ahead && ahead.id !== run.id ? [ahead] : [])]
-              .map((r) => `${r.id}:${r.status}:${r.attempts}:${r.leaseExpiresAt ?? ""}`)
-              .join("|");
+            let ahead;
+            try {
+              ahead = run.status === "pending" ? await deps.runs.activeForThread(run.sessionId) : null;
+            } catch (err) {
+              if (Date.now() - lastProgressAt >= RUN_STALL_BUDGET_MS) throw err;
+              ahead = undefined;
+            }
+            const mark =
+              ahead === undefined
+                ? lastMark
+                : [run, ...(ahead && ahead.id !== run.id ? [ahead] : [])]
+                    .map((r) => `${r.id}:${r.status}:${r.attempts}:${r.leaseExpiresAt ?? ""}`)
+                    .join("|");
             if (mark !== lastMark) {
               lastMark = mark;
               lastProgressAt = Date.now();
