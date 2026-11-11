@@ -399,7 +399,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
     if (turn.documents?.length && Array.isArray(initial.message.content)) {
       initial.message.content.push(...(preparedDocuments as unknown as typeof initial.message.content));
     }
-    let pendingPrompts = 1;
+    let awaitingResult = true;
     let stopped = false;
     let interrupted = false;
     let result: SDKResultMessage | null = null;
@@ -530,7 +530,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
                   message: baseMessage,
                   intake: { text: steer, ts, attachments: prepared?.attachments, acknowledge },
                 });
-                pendingPrompts++;
+                awaitingResult = true;
                 queue.push(message);
                 return false;
               },
@@ -648,6 +648,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
             );
             if (index >= 0) {
               const [steer] = steerPrompts.splice(index, 1);
+              awaitingResult = true;
               await flushThinking();
               await recordSteerIntake(turn, steer!.intake);
             }
@@ -699,6 +700,11 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           result = message;
           await recordStep(message);
           await flushThinking();
+          const answered = new Set(message.user_message_uuids ?? []);
+          for (const steer of steerPrompts.filter(({ message: prompt }) => answered.has(prompt.uuid ?? ""))) {
+            steerPrompts.splice(steerPrompts.indexOf(steer), 1);
+            await recordSteerIntake(turn, steer.intake);
+          }
           if (interrupted) break;
           const terminal = ref.runtimeHandoff || ref.silentRequested || ref.pausedOnApproval;
           const text = message.subtype === "success" && !terminal ? message.result.trim() : "";
@@ -706,13 +712,13 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
             await turn.emit({ type: "assistant", payload: { text }, scopeLabel: turn.scopeLabel });
           }
           streamedText = "";
-          pendingPrompts = Math.max(0, pendingPrompts - 1);
-          if (pendingPrompts > 0) continue;
+          awaitingResult = false;
+          if (steerPrompts.length > 0) continue;
           if (!signalsStopped) {
             await stopSignals?.();
             signalsStopped = true;
           }
-          if (pendingPrompts === 0) queue.close();
+          if (steerPrompts.length === 0) queue.close();
         }
       })();
       try {
@@ -747,7 +753,8 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           modelCalls: Math.max(1, callUsage.size),
         };
       };
-      if (interrupted && (pendingPrompts > 0 || finalResult?.subtype !== "success")) return stoppedPartial();
+      if (interrupted && (awaitingResult || steerPrompts.length > 0 || finalResult?.subtype !== "success"))
+        return stoppedPartial();
       if (!finalResult) {
         if (controller.signal.aborted) return stoppedPartial();
         throw new Error("Claude Agent SDK ended without a result");

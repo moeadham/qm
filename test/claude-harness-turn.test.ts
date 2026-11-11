@@ -188,6 +188,94 @@ test("a steered turn persists every reply, not only the last result's", async ()
   assert.deepEqual(userTexts, ["what is the capital of france?", "now do the other three"]);
 });
 
+test("a steer the SDK folds into the running turn still ends the turn after its one result", async () => {
+  const signals = createMemoryRunSignalStore();
+  const runId = "run-steer-folded";
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    yield (await iterator.next()).value as unknown as FakeSdkMessage;
+    await signals.send(runId, { kind: "steer", text: "wait, check all of them", ts: "123.789" });
+    yield (await iterator.next()).value as unknown as FakeSdkMessage;
+    yield assistantMessage("msg_A", "Checked all of them.", {
+      input_tokens: 3,
+      output_tokens: 8,
+      cache_read_input_tokens: 50,
+      cache_creation_input_tokens: 0,
+    });
+    yield resultMessage("Checked all of them.");
+    if (!(await iterator.next()).done) yield resultMessage("unexpected prompt");
+  };
+
+  const harness = createClaudeHarness({ signals, turnWallClockMs: 3_000 });
+  const { turn, entries } = harnessTurn({ runId });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "Checked all of them.");
+  assert.deepEqual(
+    entries.filter((entry) => entry.type === "user").map((entry) => (entry.payload as { text: string }).text),
+    ["what is the capital of france?", "wait, check all of them"],
+  );
+});
+
+test("a steer the SDK reports as answered by the turn's result ends the turn without an echo", async () => {
+  const signals = createMemoryRunSignalStore();
+  const runId = "run-steer-unechoed";
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    yield (await iterator.next()).value as unknown as FakeSdkMessage;
+    await signals.send(runId, { kind: "steer", text: "and the rest", ts: "123.790" });
+    const steer = (await iterator.next()).value as unknown as { uuid: string };
+    yield resultMessage("Did the rest too.", { user_message_uuids: [steer.uuid] });
+    if (!(await iterator.next()).done) yield resultMessage("unexpected prompt");
+  };
+
+  const harness = createClaudeHarness({ signals, turnWallClockMs: 3_000 });
+  const { turn, entries } = harnessTurn({ runId });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "Did the rest too.");
+  assert.deepEqual(
+    entries.filter((entry) => entry.type === "user").map((entry) => (entry.payload as { text: string }).text),
+    ["what is the capital of france?", "and the rest"],
+  );
+});
+
+for (const echoed of [false, true]) {
+  test(`stopping a steer's own turn after the first result reports a stop (echoed=${echoed})`, async () => {
+    const signals = createMemoryRunSignalStore();
+    const runId = `run-late-steer-${echoed}`;
+    const streaming = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const cancel = new AbortController();
+    currentScript = async function* (prompts) {
+      const iterator = prompts[Symbol.asyncIterator]();
+      yield (await iterator.next()).value as unknown as FakeSdkMessage;
+      await signals.send(runId, { kind: "steer", text: "also do X", ts: "9.1" });
+      const steer = (await iterator.next()).value as unknown as FakeSdkMessage;
+      yield resultMessage("First answer.");
+      if (echoed) yield steer;
+      yield {
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "text_delta", text: "Partial X" } },
+      };
+      streaming.resolve();
+      await release.promise;
+      yield resultMessage("X done after stop");
+    };
+
+    const harness = createClaudeHarness({ signals, turnWallClockMs: 3_000 });
+    const { turn } = harnessTurn({ runId, cancel: cancel.signal });
+    const running = harness.turns.runTurn(turn);
+    await streaming.promise;
+    cancel.abort();
+    release.resolve();
+    const result = await running;
+
+    assert.equal(result.stopped, true);
+    assert.equal(result.reply, "Partial X");
+  });
+}
+
 for (const shutdown of [false, true]) {
   test(`a user stop stays explicit when shutdown=${shutdown}`, async () => {
     const cancel = new AbortController();
