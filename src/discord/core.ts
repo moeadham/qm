@@ -6,6 +6,7 @@ import type { PrincipalLinkService } from "../identity/principal-links.ts";
 import type { RateLimiter } from "../ratelimit/rate-limiter.ts";
 import type { DeploymentAccessRequest } from "../surfaces/deploy-access.ts";
 import {
+  availableRuntimeError,
   matchRuntimeModel,
   validateRuntimeChoice,
   userRuntimeConfigBody,
@@ -15,6 +16,7 @@ import { setSessionRuntime } from "../api/session-runtime.ts";
 import type { SessionStore } from "../sessions/session-store.ts";
 import type { RuntimeChoice } from "../harness/harness.ts";
 import type { Session, SessionRuntime } from "../types.ts";
+import { isHarnessId } from "../model/pi-models.ts";
 import {
   createSurfaceCoreClient,
   type SurfaceCoreClient,
@@ -43,6 +45,7 @@ export interface SessionModels {
   session: Session;
   menu: ModelMenu;
   current: SessionRuntime;
+  skipped?: SessionRuntime;
 }
 
 export type SetModelResult =
@@ -79,7 +82,18 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     if (!session) return null;
     if (opts.refresh !== false) await deps.runtime.refreshModels?.();
     const menu = await userRuntimeConfigBody({ deps: deps.runtime }, session.scopeId, principalId);
-    return { session, menu, current: session.runtime ?? menu.effective };
+    const pinned = session.runtime;
+    if (!pinned) return { session, menu, current: menu.effective };
+    const usable =
+      isHarnessId(pinned.harnessId) &&
+      !(await availableRuntimeError(
+        { deps: deps.runtime },
+        session.scopeId,
+        { ...pinned, harnessId: pinned.harnessId },
+        undefined,
+        principalId,
+      ));
+    return usable ? { session, menu, current: pinned } : { session, menu, current: menu.effective, skipped: pinned };
   };
   return {
     ...createSurfaceCoreClient("discord", deps),
@@ -95,7 +109,8 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
       const found = await modelMenu(principalId, threadRef);
       if (!runtime || found === undefined) return { ok: false, error: "runtime_unavailable" };
       if (!found) return { ok: false, error: "no_session" };
-      const { session, menu, current } = found;
+      const { session, menu } = found;
+      const current = found.skipped ?? found.current;
       let choice: RuntimeChoice | null = null;
       if (query.toLowerCase() !== "default") {
         const match = matchRuntimeModel(menu, query, menu.approvedHarnesses);
