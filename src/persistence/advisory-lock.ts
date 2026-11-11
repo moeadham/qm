@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PgPool, PoolClient } from "./pg-pool.ts";
-import { sleep } from "../util/async.ts";
+import { createKeyedQueue, sleep } from "../util/async.ts";
 
 export interface AdvisoryLock {
   withLock<T>(key: string, fn: () => Promise<T>): Promise<T>;
@@ -109,6 +109,7 @@ export function createPostgresAdvisoryLock(
     references: number;
     keys: Map<string, { shared: boolean; count: number }>;
   };
+  const serial = createKeyedQueue<PoolClient>();
   const sessions = new AsyncLocalStorage<{ context: Context; active: boolean }>();
   const withClient = async <T>(action: (context: Context) => Promise<T>): Promise<T> => {
     const parent = sessions.getStore();
@@ -135,15 +136,19 @@ export function createPostgresAdvisoryLock(
         reservation.count++;
         keys.set(key, reservation);
         try {
-          const res = await client.query<{ locked: boolean }>(
-            `SELECT pg_try_advisory_lock${shared ? "_shared" : ""}(hashtextextended($1, 0)) AS locked`,
-            [key],
+          const res = await serial(client, () =>
+            client.query<{ locked: boolean }>(
+              `SELECT pg_try_advisory_lock${shared ? "_shared" : ""}(hashtextextended($1, 0)) AS locked`,
+              [key],
+            ),
           );
           if (res.rows[0]?.locked !== true) return { acquired: false };
           try {
             return { acquired: true, value: await fn() };
           } finally {
-            await client.query(`SELECT pg_advisory_unlock${shared ? "_shared" : ""}(hashtextextended($1, 0))`, [key]);
+            await serial(client, () =>
+              client.query(`SELECT pg_advisory_unlock${shared ? "_shared" : ""}(hashtextextended($1, 0))`, [key]),
+            );
           }
         } finally {
           if (--reservation.count === 0) keys.delete(key);

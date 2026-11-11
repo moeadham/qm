@@ -1,4 +1,5 @@
 import type { PgPool, PoolClient } from "./pg-pool.ts";
+import { createKeyedQueue } from "../util/async.ts";
 import { swallow } from "../util/errors.ts";
 
 export interface LeaderLease {
@@ -22,6 +23,7 @@ export function createPostgresLeaderLease(pg: PgPool): LeaderLease {
     lost: Set<() => void>;
   }
   let conn: Conn | null = null;
+  const serial = createKeyedQueue<PoolClient>();
   const held = new Set<string>();
 
   function drop(entry: Conn, c: PoolClient, destroy: boolean): void {
@@ -66,9 +68,9 @@ export function createPostgresLeaderLease(pg: PgPool): LeaderLease {
         const c = await entry.cp;
         let won: boolean;
         try {
-          const res = await c.query("SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS won", [
-            `leader-lease:${key}`,
-          ]);
+          const res = await serial(c, () =>
+            c.query("SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS won", [`leader-lease:${key}`]),
+          );
           won = res.rows[0]?.won === true;
         } catch (e) {
           drop(entry, c, true);
@@ -83,9 +85,9 @@ export function createPostgresLeaderLease(pg: PgPool): LeaderLease {
         } finally {
           entry.lost.delete(notifyLost);
           try {
-            const res = await c.query("SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS released", [
-              `leader-lease:${key}`,
-            ]);
+            const res = await serial(c, () =>
+              c.query("SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS released", [`leader-lease:${key}`]),
+            );
             if (res.rows[0]?.released !== true) {
               console.error(
                 `[leader-lease] unlock of ${key} reported not-held — is DATABASE_URL behind a transaction-pooling proxy?`,
