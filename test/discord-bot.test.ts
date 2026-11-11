@@ -822,19 +822,23 @@ test("a voice note reaches QM as its transcript, with the audio still attached",
   );
 });
 
-test("a voice note that can't be transcribed still reaches QM, with a note saying so", async () => {
+test("a voice note that can't be transcribed tells the sender so and still reaches QM with a note", async () => {
   const h = harness({
     transcribe: async () => {
       throw new Error("http 402 out of credit");
     },
   });
+  let api: FakeDiscord | undefined;
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async () =>
     new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } })) as unknown as typeof fetch;
   try {
-    const { handlers, plugin } = await boot(h);
+    const booted = await boot(h);
+    api = booted.api;
+    const { handlers, plugin } = booted;
     handlers.onMessage({
       ...dm(ALICE, ""),
+      id: "voice-1",
       flags: 8192,
       attachments: [
         {
@@ -851,6 +855,10 @@ test("a voice note that can't be transcribed still reaches QM, with a note sayin
   } finally {
     globalThis.fetch = realFetch;
   }
+  assert.deepEqual(
+    api!.sent.filter((s) => s.content.startsWith("⚠️")).map((s) => [s.content, s.replyTo]),
+    [["⚠️ I couldn't transcribe that voice note.", "voice-1"]],
+  );
   assert.match(h.turns[0]!.inboundNotes?.join(" ") ?? "", /voice note that couldn't be transcribed/);
   assert.equal(h.turns[0]!.text, "");
   assert.deepEqual(

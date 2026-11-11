@@ -422,6 +422,10 @@ export function createDiscordBot(deps: {
       return gate?.persisted();
     }
     const spoken = await voiceNote(m);
+    if (spoken.note)
+      await api
+        .send(m.channel_id, "⚠️ I couldn't transcribe that voice note.", { replyTo: m.id })
+        .catch(swallowAs("discord: transcription failure note", undefined));
     const text = [messageText(m), spoken.transcript ?? ""]
       .filter((part) => part.trim())
       .join("\n")
