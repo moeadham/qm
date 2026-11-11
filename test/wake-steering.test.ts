@@ -369,19 +369,20 @@ test("a person's reply never steers into a live AUTOMATION run — it enqueues b
   );
 });
 
-test("the owner of a live AUTOMATION run steers into it instead of queuing behind it", async () => {
+test("the owner's reply steers into the turn their secret-drop resumed, but still queues behind their own cron", async () => {
   const built = freshApp();
-  const channel = "C15";
-  const root = "1500.1";
-  const owned = { ...automationRun(channel, root), actor };
-  const first = await built.app.turn(owned);
-  const liveRunId = first.runId!;
+  const resumed = await built.app.turn({ ...automationRun("C15", "1500.1"), actor, surface: "secret-drop" });
+  const reply = await built.app.turn(mention("@bot use the second option", "C15", "1500.1"));
+  assert.equal(reply.runId, resumed.runId, "the owner's reply joined the resumed turn");
+  assert.deepEqual(
+    (await built.signals.takePending(resumed.runId!)).map((signal) => signal.kind),
+    ["steer"],
+  );
 
-  const reply = await built.app.turn(mention("@bot use the second option", channel, root));
-  assert.equal(reply.runId, liveRunId, "the owner's reply joined their own automation run");
-  const signals = await built.signals.takePending(liveRunId);
-  assert.equal(signals.length, 1);
-  assert.equal(signals[0]!.kind, "steer");
+  const cron = await built.app.turn({ ...automationRun("C16", "1600.1"), actor });
+  const behind = await built.app.turn(mention("@bot also check staging", "C16", "1600.1"));
+  assert.notEqual(behind.runId, cron.runId, "the owner's reply queued behind their cron");
+  assert.equal((await built.signals.takePending(cron.runId!)).length, 0);
 });
 
 test("a person's verbatim thread-follow (authored detection) also enqueues behind a live AUTOMATION run", async () => {

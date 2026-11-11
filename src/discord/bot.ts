@@ -67,11 +67,11 @@ const FENCE_CLOSE_RESERVE = 4;
 const STAKE_SCAN_MESSAGES = 100;
 const STATUS_DELAY_MS = 2_000;
 const STATUS_REFRESH_MS = 10_000;
-const WATCH_GRACE_MS = 10_000;
 interface DiscordTurn {
   start(hooks: TurnHooks): Promise<TurnResult>;
   dm: boolean;
   origin?: TurnOrigin;
+  placeholder?: string;
 }
 
 export interface TurnOutcome {
@@ -267,8 +267,12 @@ export function createDiscordBot(deps: {
     };
   }
 
-  function createReplyWriter(channelId: string, onPlaceholder: (messageId: string) => Promise<void>) {
-    let placeholder: string | undefined;
+  function createReplyWriter(
+    channelId: string,
+    onPlaceholder: (messageId: string) => Promise<void>,
+    existing?: string,
+  ) {
+    let placeholder = existing;
     let streaming = true;
     let chain: Promise<void> = Promise.resolve();
     let reply = "";
@@ -470,22 +474,90 @@ export function createDiscordBot(deps: {
     });
   }
 
+  const submitting = new Map<string, number>();
+  const holdThread = (threadRef: string): (() => void) => {
+    submitting.set(threadRef, (submitting.get(threadRef) ?? 0) + 1);
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      const left = (submitting.get(threadRef) ?? 1) - 1;
+      if (left > 0) submitting.set(threadRef, left);
+      else submitting.delete(threadRef);
+    };
+  };
+
   function submitted(body: CoreTurnBody): DiscordTurn {
     return {
-      start: (hooks) => flow.callCore(body, hooks),
+      start: async (hooks) => {
+        const release = holdThread(body.conversation.threadRef);
+        try {
+          return await flow.callCore(body, {
+            ...hooks,
+            onQueued: async (runId) => {
+              release();
+              await hooks.onQueued?.(runId);
+            },
+            onSteered: async (runId) => {
+              release();
+              await hooks.onSteered?.(runId);
+            },
+          });
+        } finally {
+          release();
+        }
+      },
       dm: body.conversation.kind === "dm",
       ...(body.origin ? { origin: body.origin } : {}),
     };
   }
 
+  const followed = new Set<string>();
+  const abandoned = new Set<string>();
+
   async function watchRun(run: WatchableRun): Promise<void> {
-    const channelId = discordThreadChannel(run.threadRef);
-    if (!channelId || flow.inFlightRuns.has(run.runId) || Date.now() - run.createdAt < WATCH_GRACE_MS) return;
-    await converse(
-      channelId,
-      { start: (hooks) => flow.followRun(run.runId, hooks), dm: run.dm, origin: run.origin },
-      { addressed: true, key: `run:${run.runId}` },
-    );
+    const { runId } = run;
+    if (followed.has(runId) || abandoned.has(runId) || flow.inFlightRuns.has(runId) || submitting.has(run.threadRef))
+      return;
+    followed.add(runId);
+    try {
+      if (run.kind === "reply") {
+        await converse(
+          run.target,
+          {
+            start: (hooks) => flow.followRun(runId, hooks),
+            dm: run.dm,
+            origin: run.origin,
+            ...(run.placeholder ? { placeholder: run.placeholder } : {}),
+          },
+          { addressed: true, key: `run:${runId}` },
+        );
+        return;
+      }
+      const channelId = discordThreadChannel(run.threadRef);
+      if (channelId) await showStatus(channelId, runId);
+    } finally {
+      followed.delete(runId);
+    }
+  }
+
+  async function showStatus(channelId: string, runId: string): Promise<void> {
+    const writer = createReplyWriter(channelId, async () => {});
+    const stopTyping = startTyping(channelId);
+    writer.begin();
+    try {
+      await core.waitRun(runId, {
+        onRunning: () => writer.running(),
+        onToolCalls: (calls) => writer.toolCalls(calls),
+      });
+    } catch (error) {
+      abandoned.add(runId);
+      throw error;
+    } finally {
+      stopTyping();
+      writer.stop();
+      await writer.finish("", `status:${runId}`);
+    }
   }
 
   async function converse(
@@ -495,9 +567,13 @@ export function createDiscordBot(deps: {
   ): Promise<TurnOutcome> {
     const { addressed, key, gate, quiet } = opts;
     let queuedRunId: string | undefined;
-    const writer = createReplyWriter(channelId, async (messageId) => {
-      if (queuedRunId) await core.reportRunReplyRef(queuedRunId, messageId);
-    });
+    const writer = createReplyWriter(
+      channelId,
+      async (messageId) => {
+        if (queuedRunId) await core.reportRunReplyRef(queuedRunId, messageId);
+      },
+      turn.placeholder,
+    );
     let accepted = false;
     const accept = (): void => {
       accepted = true;
@@ -536,6 +612,7 @@ export function createDiscordBot(deps: {
         });
       } catch (error) {
         writer.stop();
+        if (queuedRunId) abandoned.add(queuedRunId);
         if (!accepted) gate?.failed(errMessage(error));
         console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
         await writer

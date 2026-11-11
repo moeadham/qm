@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createErrorLog } from "../src/admin/error-log.ts";
 import { createDeliveryStore } from "../src/delivery/delivery-store.ts";
@@ -98,6 +98,7 @@ test("waitRun signals once when a pending run starts running", async () => {
     runs: {
       onTerminal() {},
       get: async () => ({ id: "r1", status: statuses[Math.min(polls++, statuses.length - 1)], attempts: 1 }),
+      activeForThread: async () => null,
     },
     turnStream: createTurnStream(),
     app: {
@@ -110,27 +111,53 @@ test("waitRun signals once when a pending run starts running", async () => {
   assert.deepEqual(seen, ["running after 3 polls"]);
 });
 
-test("waitRun keeps following a queued run past the stall budget instead of giving up", async (t) => {
-  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+function queuedBehind(ahead: () => { status: string; leaseExpiresAt: number } | null) {
   let status = "pending";
   const core = createSurfaceCoreClient("discord", {
-    runs: { onTerminal() {}, get: async () => ({ id: "r1", status, attempts: 0 }) },
+    runs: {
+      onTerminal() {},
+      get: async () => ({ id: "r1", sessionId: "t1", status, attempts: 0 }),
+      activeForThread: async () => {
+        const run = ahead();
+        return run
+          ? { id: "r0", sessionId: "t1", attempts: 1, ...run }
+          : { id: "r1", sessionId: "t1", status, attempts: 0 };
+      },
+    },
     turnStream: createTurnStream(),
     app: {
       getRun: async () => ({ result: { status: "ok", reply: "Done" } }),
       getRunToolEntries: async () => [],
     },
   } as unknown as SurfaceCoreClientDeps);
+  return { core, finish: () => (status = "done") };
+}
+
+async function followFor(t: TestContext, seconds: number, waiting: Promise<unknown>): Promise<unknown> {
   const flush = () => new Promise((resolve) => setImmediate(resolve));
-  const waiting = core.waitRun("r1");
   let failure: unknown;
   waiting.catch((error: unknown) => (failure = error));
-  for (let second = 0; second < 400 && failure === undefined; second++) {
+  for (let second = 0; second < seconds && failure === undefined; second++) {
     await flush();
     t.mock.timers.tick(1_000);
   }
-  status = "done";
   await flush();
+  return failure;
+}
+
+test("waitRun keeps following a queued run while the run ahead of it keeps working", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const { core, finish } = queuedBehind(() => ({ status: "running", leaseExpiresAt: Date.now() + 30_000 }));
+  const waiting = core.waitRun("r1");
+  assert.equal(await followFor(t, 400, waiting), undefined);
+  finish();
   t.mock.timers.tick(1_000);
   assert.deepEqual(await waiting, { status: "ok", reply: "Done" });
+});
+
+test("waitRun still gives up on a queued run that nothing ahead of it is moving", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const { core } = queuedBehind(() => null);
+  const failure = await followFor(t, 400, core.waitRun("r1"));
+  assert.equal((failure as { code?: string } | undefined)?.code, "run_stalled");
 });

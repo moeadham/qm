@@ -138,7 +138,7 @@ export interface RunStore {
 
   editPendingText(runId: string, text: string, expectedText: string): Promise<boolean>;
 
-  activeSessionIds(): Promise<string[]>;
+  activeSessionIds(prefix?: string): Promise<string[]>;
 
   list(opts?: { limit?: number; threadRef?: string }): Promise<Run[]>;
 

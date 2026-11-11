@@ -1494,29 +1494,52 @@ test("a failed turn that used tools posts its failure note without a worked summ
   assert.match(api.edits.at(-1)!.content, /^⚠️ /);
 });
 
-test("a run the bot did not start is watched with live status and its reply lands in the status message", async () => {
+test("a run the bot did not start reuses its status message for live status and the reply", async () => {
   const h = harness({
     watchable: [
       {
-        runId: "run-drop",
+        kind: "reply",
+        runId: "run-left",
         threadRef: `discord:dm:${DM}`,
-        createdAt: Date.now() - 60_000,
+        target: DM,
         dm: true,
-        origin: { kind: "automation" },
+        origin: { kind: "human", messageTs: "m1" },
+        placeholder: "status-1",
       },
     ],
     toolCalls: [[{ tool: "execute", args: { command: "ls", purpose: "Check the workspace" } }]],
     result: () => ({ status: "ok", reply: "Done." }),
   });
   const { api, plugin } = await boot(h);
-  await until(() => h.acked.includes("run-drop"), "watched run delivery ack");
+  await until(() => h.acked.includes("run-left"), "watched run delivery ack");
   await plugin.stop();
 
   assert.deepEqual(h.turns, []);
+  assert.deepEqual(api.sent, []);
+  assert.deepEqual(h.replyRefs, []);
+  assert.deepEqual(
+    api.edits.map((edit) => [edit.messageId, edit.content]),
+    [
+      ["status-1", "-# Working · Ran commands\n-# 🔧 Check the workspace"],
+      ["status-1", "-# Worked · Ran commands\n\nDone."],
+    ],
+  );
+});
+
+test("a run resumed after a secret-drop shows live status that is removed when it ends, leaving the reply to the resume", async () => {
+  const h = harness({
+    watchable: [{ kind: "status", runId: "run-drop", threadRef: `discord:dm:${DM}` }],
+    toolCalls: [[{ tool: "execute", args: { command: "ls", purpose: "Check the workspace" } }]],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, plugin } = await boot(h);
+  await until(() => api.removed.length === 1, "status removed");
+  await plugin.stop();
+
   assert.equal(api.sent.length, 1);
   assert.equal(api.sent[0]!.content, "-# Working · Ran commands\n-# 🔧 Check the workspace");
-  assert.deepEqual(h.replyRefs, [["run-drop", api.sent[0]!.id]]);
-  assert.equal(api.edits.at(-1)!.content, "-# Worked · Ran commands\n\nDone.");
+  assert.deepEqual(api.removed, [api.sent[0]!.id]);
+  assert.deepEqual(h.acked, []);
 });
 
 test("a tool-only placeholder is recorded for recovery and removed when the turn ends without text", async () => {

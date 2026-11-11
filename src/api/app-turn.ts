@@ -513,7 +513,7 @@ export function createTurnMethods(
         const liveOriginKind = live ? resolveTurnOrigin(live.request).kind : undefined;
         const personIntoAutomation =
           liveOriginKind === "automation" &&
-          live?.request.actor.id !== actor.id &&
+          !(live?.request.surface === "secret-drop" && live.request.actor.id === actor.id) &&
           (origin.kind === "human" || (origin.kind === "ambient" && origin.live === true)) &&
           !(origin.kind === "human" && isHalt(req.text));
         if (live && redeliveryKey && live.dedupKey === redeliveryKey) return { status: "silent" };

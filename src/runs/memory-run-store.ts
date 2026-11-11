@@ -296,9 +296,9 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       return true;
     },
 
-    async activeSessionIds() {
+    async activeSessionIds(prefix = "") {
       const ids = new Set<string>();
-      for (const r of runs.values()) if (!isTerminal(r.status)) ids.add(r.sessionId);
+      for (const r of runs.values()) if (!isTerminal(r.status) && r.sessionId.startsWith(prefix)) ids.add(r.sessionId);
       return [...ids];
     },
 

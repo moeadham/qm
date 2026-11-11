@@ -555,8 +555,11 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
       return rows.length > 0;
     },
 
-    async activeSessionIds(): Promise<string[]> {
-      const { rows } = await q("SELECT DISTINCT session_id FROM runs WHERE status IN ('pending','running')");
+    async activeSessionIds(prefix = ""): Promise<string[]> {
+      const { rows } = await q(
+        "SELECT DISTINCT session_id FROM runs WHERE status IN ('pending','running') AND starts_with(session_id, $1)",
+        [prefix],
+      );
       return rows.map((r) => r.session_id as string);
     },
 

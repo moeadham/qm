@@ -23,13 +23,19 @@ import {
   type SurfaceCoreClientDeps,
 } from "../surfaces/surface-core-client.ts";
 
-export interface WatchableRun {
-  runId: string;
-  threadRef: string;
-  createdAt: number;
-  dm: boolean;
-  origin: TurnOrigin;
-}
+export type WatchableRun =
+  | {
+      kind: "reply";
+      runId: string;
+      threadRef: string;
+      target: string;
+      dm: boolean;
+      origin: TurnOrigin;
+      placeholder?: string;
+    }
+  | { kind: "status"; runId: string; threadRef: string };
+
+const RESUMED_SURFACES = new Set(["secret-drop", "keychain-ask"]);
 
 export interface DiscordCoreClient extends SurfaceCoreClient {
   watchableRuns(): Promise<WatchableRun[]>;
@@ -106,18 +112,25 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
     ...createSurfaceCoreClient("discord", deps),
     async watchableRuns() {
       const watchable: WatchableRun[] = [];
-      for (const threadRef of await deps.runs.activeSessionIds()) {
-        if (!threadRef.startsWith("discord:")) continue;
+      for (const threadRef of await deps.runs.activeSessionIds("discord:")) {
         const run = await deps.runs.activeForThread(threadRef);
-        if (!run) continue;
+        if (!run || run.request.swarm || run.request.privateSessionMessage) continue;
+        if (RESUMED_SURFACES.has(run.request.surface ?? "")) {
+          watchable.push({ kind: "status", runId: run.id, threadRef });
+          continue;
+        }
         const origin = resolveTurnOrigin(run.request);
-        if (origin.kind === "ambient") continue;
+        const target = run.request.deliveryTarget;
+        if (run.request.surface !== "discord" || !target || origin.kind === "ambient") continue;
+        const placeholder = run.deliveryState?.editRef ? undefined : run.deliveryState?.replyRef;
         watchable.push({
+          kind: "reply",
           runId: run.id,
           threadRef,
-          createdAt: run.createdAt,
+          target,
           dm: run.request.conversation.kind === "dm",
           origin,
+          ...(placeholder ? { placeholder } : {}),
         });
       }
       return watchable;
