@@ -127,7 +127,7 @@ test("ChatGPT browser inference uses refreshed subscription auth and native stru
   });
 });
 
-test("Claude browser inference lets the model choose the result tool and retries once when it answers in text", async () => {
+test("Claude browser inference lets the model choose the result tool instead of forcing it", async () => {
   const built = buildApp(testConfig());
   await built.userModelCredentials.setApiKey("U1", "anthropic", "personal-anthropic");
   await built.config.setPersonalModelAuth("U1", true, "anthropic");
@@ -139,45 +139,46 @@ test("Claude browser inference lets the model choose the result tool and retries
     companyModel: "claude-fable-5-2",
   });
   assert.equal(selection.model, "claude-fable-5-2");
-  const toolChoices: unknown[] = [];
-  let calls = 0;
-  const result = await nativeBrowserCompletion(
-    {
-      selection,
-      actorId: "U1",
-      credentials: built.userModelCredentials,
-      signal: new AbortController().signal,
-      body: {
-        messages: [{ role: "user", content: "Inspect" }],
-        response_format: {
-          type: "json_schema",
-          json_schema: { schema: { type: "object", properties: { done: { type: "boolean" } } } },
+  const request = (answer: "tool" | "text") =>
+    nativeBrowserCompletion(
+      {
+        selection,
+        actorId: "U1",
+        credentials: built.userModelCredentials,
+        signal: new AbortController().signal,
+        body: {
+          messages: [{ role: "user", content: "Inspect" }],
+          response_format: {
+            type: "json_schema",
+            json_schema: { schema: { type: "object", properties: { done: { type: "boolean" } } } },
+          },
         },
       },
-    },
-    async () => ({
-      completeSimple: async (model, _context, options) => {
-        const payload = (await options?.onPayload?.({ model: model.id }, model)) as { tool_choice?: unknown };
-        toolChoices.push(payload.tool_choice);
-        calls++;
-        return {
-          role: "assistant",
-          api: model.api,
-          provider: model.provider,
-          model: model.id,
-          usage: zeroUsage(),
-          timestamp: Date.now(),
-          stopReason: calls === 1 ? "stop" : "toolUse",
-          content:
-            calls === 1
-              ? [{ type: "text", text: "It is done." }]
-              : [{ type: "toolCall", id: "result", name: "browser_result", arguments: { done: true } }],
-        };
-      },
-    }),
+      async () => ({
+        completeSimple: async (model, _context, options) => {
+          const payload = (await options?.onPayload?.({ model: model.id }, model)) as { tool_choice?: unknown };
+          assert.deepEqual(payload.tool_choice, { type: "auto" });
+          return {
+            role: "assistant",
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: zeroUsage(),
+            timestamp: Date.now(),
+            stopReason: answer === "tool" ? "toolUse" : "stop",
+            content:
+              answer === "tool"
+                ? [{ type: "toolCall", id: "result", name: "browser_result", arguments: { done: true } }]
+                : [{ type: "text", text: "It is done." }],
+          };
+        },
+      }),
+    );
+  assert.equal((await request("tool")).choices[0]?.message.content, '{"done":true}');
+  await assert.rejects(
+    request("text"),
+    (error: unknown) => error instanceof BrowserCompletionError && error.status === 502,
   );
-  assert.deepEqual(toolChoices, [{ type: "auto" }, { type: "auto" }]);
-  assert.equal(result.choices[0]?.message.content, '{"done":true}');
 });
 
 test("Claude subscription browser requests fail without deriving or sending credentials", async () => {

@@ -136,27 +136,21 @@ export async function nativeBrowserCompletion(
   let toolChoice: object = { type: "function", name: "browser_result" };
   if (modelApi === "anthropic-messages") toolChoice = { type: "auto" };
   if (modelApi === "openai-completions") toolChoice = { type: "function", function: { name: "browser_result" } };
-  const complete = () =>
-    runtime.completeSimple(model, context, {
-      signal: input.signal,
-      maxTokens: Math.min(limit, model.maxTokens),
-      maxRetries: 0,
-      onPayload: schema
-        ? (raw) => {
-            const payload = object(raw);
-            if (!payload) throw new BrowserCompletionError("Invalid model request");
-            return { ...payload, tool_choice: toolChoice };
-          }
-        : undefined,
-    });
-  const findStructured = (result: Awaited<ReturnType<typeof complete>>) =>
-    result.content.find((part) => part.type === "toolCall" && part.name === "browser_result");
-  let result = await complete();
-  if (schema && modelApi === "anthropic-messages" && result.stopReason === "stop" && !findStructured(result))
-    result = await complete();
+  const result = await runtime.completeSimple(model, context, {
+    signal: input.signal,
+    maxTokens: Math.min(limit, model.maxTokens),
+    maxRetries: 0,
+    onPayload: schema
+      ? (raw) => {
+          const payload = object(raw);
+          if (!payload) throw new BrowserCompletionError("Invalid model request");
+          return { ...payload, tool_choice: toolChoice };
+        }
+      : undefined,
+  });
   if (result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "length")
     throw new BrowserCompletionError("Selected AI account could not complete the browser request", 502);
-  const structured = findStructured(result);
+  const structured = result.content.find((part) => part.type === "toolCall" && part.name === "browser_result");
   if (schema && !structured)
     throw new BrowserCompletionError("Selected AI account did not return a structured browser result", 502);
   const text =
