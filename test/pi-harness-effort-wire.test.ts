@@ -11,6 +11,7 @@ for (const [modelId, upper, allowed, off, minimal] of [
   ["gpt-5", "high", ["minimal", "low", "medium", "high"], "minimal", "minimal"],
   ["gpt-6.1-sol-ultrafast", "max", ["low", "medium", "high", "xhigh", "max"], "low", "low"],
   ["gpt-6.1-sol", "max", ["low", "medium", "high", "xhigh", "max"], "low", "low"],
+  ["gpt-6.1-terra", "max", ["low", "medium", "high", "xhigh", "max"], "low", "low"],
   ["gpt-5.6-sol", "max", ["none", "low", "medium", "high", "xhigh", "max"], "none", "low"],
   ["gpt-5.6-terra", "max", ["none", "low", "medium", "high", "xhigh", "max"], "none", "low"],
   ["gpt-5.6-luna", "max", ["none", "low", "medium", "high", "xhigh", "max"], "none", "low"],

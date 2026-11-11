@@ -10,6 +10,25 @@ for (const modelId of ["claude-opus-5-5", "claude-sonnet-5-5"])
   test(`${modelId} wire requests keep mandatory thinking, caller hooks and beta headers across Pi entry points`, (t) =>
     assertMandatoryThinkingWire(t, modelId));
 
+test("claude-sonnet-4-6 sends extra-high effort as high instead of escalating it to max", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const efforts: unknown[] = [];
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    efforts.push((JSON.parse(String(init?.body)) as { output_config?: unknown }).output_config);
+    return okStream("claude-sonnet-4-6");
+  }) as typeof fetch;
+  const model = getRequiredModel("claude-sonnet-4-6", false);
+  const runtime = await buildModelRuntime({ anthropic: "sk-offline-test-key" });
+  for (const effort of ["high", "xhigh", "max"] as const) {
+    const response = await runtime.streamSimple(model, context, { reasoning: effort, maxRetries: 0 }).result();
+    assert.equal(response.stopReason, "stop", response.errorMessage);
+  }
+  assert.deepEqual(efforts, [{ effort: "high" }, { effort: "high" }, { effort: "max" }]);
+});
+
 test("claude-haiku-5-5 wire requests bind adaptive thinking at every effort and turn thinking off only without one", async (t) => {
   const originalFetch = globalThis.fetch;
   t.after(() => {

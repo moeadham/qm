@@ -100,12 +100,14 @@ test("the curated catalog contains only current model families", () => {
     SELECTABLE_BASE_MODELS.map((model) => model.id),
     [
       "claude-opus-5-5",
+      "claude-fable-5-2",
       "claude-fable-5-1",
       "claude-fable-5",
       "claude-opus-5",
       "claude-opus-4-8",
       "claude-sonnet-5-5",
       "claude-sonnet-5",
+      "claude-sonnet-4-6",
       "claude-haiku-5-5",
       "claude-haiku-4-5",
       "gpt-5.6-sol",
@@ -115,6 +117,7 @@ test("the curated catalog contains only current model families", () => {
       "gpt-6-astra-ultrafast",
       "gpt-6.1-sol",
       "gpt-6.1-sol-ultrafast",
+      "gpt-6.1-terra",
       "gpt-6-sol",
       "gpt-6-luna",
       "openrouter/auto",
@@ -124,6 +127,19 @@ test("the curated catalog contains only current model families", () => {
   assert.equal(getRequiredModel("gpt-6-astra").contextWindow, 1_050_000);
   assert.equal(getRequiredModel("gpt-6-sol").contextWindow, 1_050_000);
   assert.equal(getRequiredModel("gpt-6-luna").contextWindow, 1_050_000);
+  const terra61 = getRequiredModel("gpt-6.1-terra");
+  assert.equal(terra61.contextWindow, 1_050_000);
+  assert.deepEqual(terra61.cost, {
+    input: 1,
+    output: 5,
+    cacheRead: 0.05,
+    cacheWrite: 1.25,
+    tiers: [{ inputTokensAbove: 272_000, input: 2, output: 7.5, cacheRead: 0.1, cacheWrite: 2.5 }],
+  });
+  const fable52 = getRequiredModel("claude-fable-5-2");
+  assert.equal(String(fable52.provider), "anthropic");
+  const { input, output, cacheRead, cacheWrite } = fable52.cost;
+  assert.deepEqual({ input, output, cacheRead, cacheWrite }, { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 });
   const sol61 = getRequiredModel("gpt-6.1-sol");
   assert.equal(sol61.contextWindow, 1_050_000);
   assert.equal(sol61.maxTokens, 128_000);
