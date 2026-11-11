@@ -256,15 +256,22 @@ export function createDiscordBot(deps: {
     let chain: Promise<void> = Promise.resolve();
     let reply = "";
     let activity: string[] = [];
-    const show = (): void => {
-      if (!streaming) return;
+    let queued = false;
+    const render = (): string => {
       const status = activity.map((line) => `-# ${line}`).join("\n");
-      const room = DISCORD_MESSAGE_LIMIT - 1 - (status ? status.length + 2 : 0);
-      const body = reply ? safeClip(alignMarkdownTables(reply), room) : "";
-      const shown = [body, status].filter(Boolean).join("\n\n");
-      if (!shown.trim()) return;
+      const room = DISCORD_MESSAGE_LIMIT - 1 - (status ? status.length + 6 : 0);
+      let body = reply ? safeClip(alignMarkdownTables(reply), room) : "";
+      if (status && body.split("```").length % 2 === 0) body += "\n```";
+      return [body, status].filter(Boolean).join("\n\n");
+    };
+    const show = (): void => {
+      if (!streaming || queued) return;
+      queued = true;
       chain = chain
         .then(async () => {
+          queued = false;
+          const shown = streaming ? render() : "";
+          if (!shown.trim()) return;
           if (placeholder) return api.edit(channelId, placeholder, shown);
           const posted = await api.send(channelId, shown);
           try {
@@ -462,15 +469,16 @@ export function createDiscordBot(deps: {
             if (!text.trim()) return;
             writer.stream(text);
           },
-          onToolCalls: (calls) => writer.toolCalls(calls),
+          onToolCalls: (calls) => {
+            if (typing) writer.toolCalls(calls);
+          },
         });
       } catch (error) {
         if (!accepted) gate?.failed(errMessage(error));
         console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
-        if (typing && !quiet)
-          await writer
-            .finish(`⚠️ ${turnFailureText(error)}`, `failure:${key}`)
-            .catch(swallowAs("discord: failure note", undefined));
+        await writer
+          .finish(typing && !quiet ? `⚠️ ${turnFailureText(error)}` : "", `failure:${key}`)
+          .catch(swallowAs("discord: failure note", undefined));
         return { accepted };
       }
       if (!accepted) accept();

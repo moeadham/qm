@@ -53,7 +53,18 @@ test("expiring a delivery whose target is gone stops it being claimed and leaves
 test("waitRun reports each new tool call once with its raw arguments", async () => {
   let polls = 0;
   const entries = [
-    { seq: 3, type: "tool_call", payload: { tool: "bash", callId: "c1", step: { id: "s" }, command: "ls -la" } },
+    {
+      seq: 3,
+      type: "tool_call",
+      payload: {
+        tool: "bash",
+        callId: "c1",
+        step: { id: "s" },
+        command: "ls -la",
+        retrySafe: true,
+        rerun: { tool: "bash", input: { command: "ls -la" } },
+      },
+    },
     { seq: 4, type: "tool_result", payload: { tool: "bash", callId: "c1", result: "ok" } },
     { seq: 5, type: "tool_call", payload: { tool: "read", callId: "c2", path: "README.md" } },
   ];

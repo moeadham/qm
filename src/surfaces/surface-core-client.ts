@@ -25,6 +25,7 @@ import type {
 import type { IdentityService } from "../identity/identity-service.ts";
 import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import { swallowAs } from "../util/errors.ts";
+import { recordedToolArguments } from "../harness/replay.ts";
 import { decideDeploymentAccess, type DeploymentAccessRequest } from "./deploy-access.ts";
 import type { StagedEnvelope } from "./envelope-staging.ts";
 
@@ -199,14 +200,9 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
         for (const entry of await deps.app.getRunToolEntries(runId, undefined, toolCursor)) {
           toolCursor = entry.seq;
           if (entry.type !== "tool_call") continue;
-          const {
-            tool,
-            callId: _callId,
-            step: _step,
-            wire: _wire,
-            ...args
-          } = (entry.payload ?? {}) as Record<string, unknown>;
-          calls.push({ tool: typeof tool === "string" ? tool : "tool", args });
+          const payload = (entry.payload ?? {}) as Record<string, unknown>;
+          const { retrySafe: _retrySafe, ...args } = recordedToolArguments(payload);
+          calls.push({ tool: typeof payload.tool === "string" ? payload.tool : "tool", args });
         }
         if (calls.length) hooks.onToolCalls(calls);
       };
@@ -248,10 +244,10 @@ export function createSurfaceCoreClient(surface: string, deps: SurfaceCoreClient
             }
             signalReplying(run.deliveryState?.replying === true);
             signalSnapshot();
-            await signalToolCalls().catch(swallowAs(`${surface}: tool call refresh`, undefined));
             await emitGoal().catch(swallowAs(`${surface}: goal refresh`, undefined));
             const fb = deps.turnStream.firstBlock(runId);
             if (fb?.closed) signalFirstBlock(fb.text);
+            await signalToolCalls().catch(swallowAs(`${surface}: tool call refresh`, undefined));
             const mark = `${run.status}:${run.attempts}:${run.leaseExpiresAt ?? ""}`;
             if (mark !== lastMark) {
               lastMark = mark;

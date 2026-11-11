@@ -150,6 +150,7 @@ export interface GetEntriesOptions {
   sinceSeq?: number;
   beforeSeq?: number;
   limit?: number;
+  types?: readonly EntryType[];
 }
 
 export type SessionCategory = "conversation" | "background";

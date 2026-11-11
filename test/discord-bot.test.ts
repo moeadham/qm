@@ -491,7 +491,10 @@ test("in servers the bot answers mentions in a new thread and ignores unmentione
 });
 
 test("a reply in a thread the bot owns is heard without a mention as an ambient turn", async () => {
-  const h = harness({ result: () => ({ status: "silent" }) });
+  const h = harness({
+    toolCalls: [[{ tool: "finish_silently", args: { reason: "not for me" } }]],
+    result: () => ({ status: "silent" }),
+  });
   const api = new FakeDiscord();
   const thread = "800000000000000009";
   api.channels.set(thread, { id: thread, type: 11, parentId: CHANNEL, ownerId: BOT, guildId: GUILD });
@@ -1370,6 +1373,20 @@ test("raw tool calls show in the placeholder under the streamed text until the f
       "Done.",
     ],
   );
+});
+
+test("tool lines under a reply that is mid code block stay outside the block", async () => {
+  const h = harness({
+    toolCalls: [[{ tool: "bash", args: { command: "ls" } }]],
+    snapshots: ["Here:\n```ts\nconst a = 1;"],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, handlers, plugin } = await boot(h);
+  handlers.onMessage(dm(ALICE, "go"));
+  await until(() => h.acked.length === 1, "ack");
+  await plugin.stop();
+
+  assert.equal(api.edits[0]!.content, 'Here:\n```ts\nconst a = 1;\n```\n\n-# 🔧 `bash {"command":"ls"}`');
 });
 
 test("the gateway connects on exactly one instance while another holds the lease", async () => {
