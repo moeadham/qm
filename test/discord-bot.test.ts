@@ -1391,7 +1391,7 @@ test("a tool call's purpose is shown in place of its raw arguments, as on the we
       [
         { tool: "execute", args: { command: "qm credentials list --org", purpose: "List org\ncredentials" } },
         { tool: "read", args: { path: "a.ts" } },
-        { tool: "execute", args: { command: "ls", purpose: "Check *_sandbox_* health" } },
+        { tool: "execute", args: { command: "ls", purpose: "Ask *_ops_* <@123> via [docs](https://x.test)" } },
       ],
     ],
     result: () => ({ status: "ok", reply: "Done." }),
@@ -1403,7 +1403,11 @@ test("a tool call's purpose is shown in place of its raw arguments, as on the we
 
   assert.equal(
     api.sent[0]!.content,
-    ["-# 🔧 List org credentials", '-# 🔧 `read {"path":"a.ts"}`', "-# 🔧 Check \\*\\_sandbox\\_\\* health"].join("\n"),
+    [
+      "-# 🔧 List org credentials",
+      '-# 🔧 `read {"path":"a.ts"}`',
+      "-# 🔧 Ask \\*\\_ops\\_\\* \\<@123> via \\[docs\\](https://x.test)",
+    ].join("\n"),
   );
 });
 
