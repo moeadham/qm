@@ -867,6 +867,48 @@ test("a voice note that can't be transcribed tells the sender so and still reach
   );
 });
 
+test("a failed voice note in a server channel gets one warning, inside the thread QM opens for it", async () => {
+  const h = harness({
+    transcribe: async () => {
+      throw new Error("provider down");
+    },
+  });
+  const api = new FakeDiscord();
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } })) as unknown as typeof fetch;
+  try {
+    const { handlers, plugin } = await boot(h, api);
+    handlers.onMessage({
+      ...dm(ALICE, `<@${BOT}>`),
+      id: "800000000000000009",
+      channel_id: CHANNEL,
+      guild_id: GUILD,
+      mentions: [{ id: BOT } as never],
+      flags: 8192,
+      attachments: [
+        {
+          id: "v3",
+          filename: "voice-message.ogg",
+          size: 7,
+          url: "https://cdn.discordapp.com/attachments/1/3/voice-message.ogg",
+          content_type: "audio/ogg",
+        },
+      ],
+    });
+    await until(() => h.acked.length === 1, "turn delivered");
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  const warnings = api.sent.filter((s) => s.content.startsWith("⚠️ I couldn't transcribe"));
+  assert.deepEqual(
+    warnings.map((s) => [s.channelId, s.replyTo]),
+    [["800000000000000009", undefined]],
+  );
+});
+
 test("only a voice note QM handles is transcribed: not from unlinked people, unflagged audio, or unfollowed channels", async () => {
   let calls = 0;
   const h = harness({

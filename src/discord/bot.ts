@@ -422,10 +422,6 @@ export function createDiscordBot(deps: {
       return gate?.persisted();
     }
     const spoken = await voiceNote(m);
-    if (spoken.note)
-      await api
-        .send(m.channel_id, "⚠️ I couldn't transcribe that voice note.", { replyTo: m.id })
-        .catch(swallowAs("discord: transcription failure note", undefined));
     const text = [messageText(m), spoken.transcript ?? ""]
       .filter((part) => part.trim())
       .join("\n")
@@ -471,10 +467,22 @@ export function createDiscordBot(deps: {
       ...(await inboundFiles(m, spoken)),
       ...(place.kind === "channel" ? await threadContext(place, m) : {}),
     };
+    const accepted: AcceptGate | undefined = spoken.note
+      ? {
+          persisted: () => {
+            gate?.persisted();
+            void postMessage(api, place.channelId, "⚠️ I couldn't transcribe that voice note.", {
+              key: `${messageKey}:voice-note`,
+              ...(place.channelId === m.channel_id ? { replyTo: m.id } : {}),
+            }).catch(swallowAs("discord: transcription failure note", undefined));
+          },
+          failed: (reason) => gate?.failed(reason),
+        }
+      : gate;
     await converse(place.channelId, submitted(body), {
       addressed: relevant.addressed,
       key: messageKey,
-      ...(gate ? { gate } : {}),
+      ...(accepted ? { gate: accepted } : {}),
     });
   }
 
