@@ -648,6 +648,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
             );
             if (index >= 0) {
               const [steer] = steerPrompts.splice(index, 1);
+              awaitingResult = true;
               await flushThinking();
               await recordSteerIntake(turn, steer!.intake);
             }
@@ -752,7 +753,8 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           modelCalls: Math.max(1, callUsage.size),
         };
       };
-      if (interrupted && (awaitingResult || finalResult?.subtype !== "success")) return stoppedPartial();
+      if (interrupted && (awaitingResult || steerPrompts.length > 0 || finalResult?.subtype !== "success"))
+        return stoppedPartial();
       if (!finalResult) {
         if (controller.signal.aborted) return stoppedPartial();
         throw new Error("Claude Agent SDK ended without a result");
