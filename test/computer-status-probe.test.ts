@@ -78,6 +78,26 @@ test("computerStatus never provisions when the backend reports no machine", asyn
   assert.equal(provisions, 0, "a status check must not cold-start a box");
 });
 
+test("restarting the computer makes the turn provision its sandbox again", async () => {
+  const events: string[] = [];
+  const ctx = ctxFor({ restartComputer: async () => void events.push("restart") }, async () => handle, {
+    invalidateProvision: () => events.push("invalidate"),
+  });
+  await ctx.restartComputer();
+  assert.deepEqual(events, ["restart", "invalidate"]);
+});
+
+test("restarting a named sandbox makes the turn provision that sandbox again", async () => {
+  const events: string[] = [];
+  const ctx = ctxFor({}, async () => handle, {
+    sandboxResources: { restart: async () => void events.push("restart") } as never,
+    accessSandboxResource: async () => ({ resource: { id: "res-1" } }) as never,
+    invalidateProvision: (id) => events.push(`invalidate ${id}`),
+  });
+  await ctx.restartComputer("box");
+  assert.deepEqual(events, ["restart", "invalidate res-1"]);
+});
+
 test("a probe that hangs on the real exec path reports NOT answering within the probe bound", async () => {
   const ctx = ctxFor(
     {
@@ -118,13 +138,4 @@ test("status for an explicit sandbox probes its exec path instead of trusting th
   const status = await ctx.computerStatus("sb1");
   assert.equal(status.guestResponsive, false);
   assert.match(status.probeError ?? "", /timed out/);
-});
-
-test("restarting the computer makes the turn provision its sandbox again", async () => {
-  const events: string[] = [];
-  const ctx = ctxFor({ restartComputer: async () => void events.push("restart") }, async () => handle, {
-    invalidateProvision: () => events.push("invalidate"),
-  });
-  await ctx.restartComputer();
-  assert.deepEqual(events, ["restart", "invalidate"]);
 });

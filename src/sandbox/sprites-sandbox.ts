@@ -420,27 +420,35 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
     return latest;
   }
 
-  async function stillFaulted(name: string): Promise<SpriteCheck | undefined> {
+  async function recheck(name: string): Promise<{ faulted?: SpriteCheck; checkFailed?: string }> {
     let last: SpriteCheck | undefined;
     for (let attempt = 0; attempt < RECHECK_ATTEMPTS; attempt++) {
       if (attempt > 0) await wait(recheckIntervalMs);
-      last = await retrySpritesControl(() => sprite(name).check()).catch(() => undefined);
-      if (!last || !FAULTED_CHECK_STATUSES.has(last.status)) return undefined;
+      try {
+        last = await retrySpritesControl(() => sprite(name).check());
+      } catch (e) {
+        return { checkFailed: spritesErrorDetail(e) };
+      }
+      if (!FAULTED_CHECK_STATUSES.has(last.status)) return {};
     }
-    return last;
+    return { faulted: last };
+  }
+
+  async function bindSprite(name: string): Promise<void> {
+    forget(name);
+    await applyResources(name);
+    if (egressProxyHosts.length) await ensureEgressPolicy(name);
   }
 
   async function createSprite(name: string): Promise<void> {
-    forget(name);
     await attempt(`create ${name}`, () => client.createSprite(name, { waitForCapacity: true }));
-    await applyResources(name);
-    if (egressProxyHosts.length) await ensureEgressPolicy(name);
+    await bindSprite(name);
   }
 
   async function initializeSprite(name: string, scope: string | undefined, exists: boolean): Promise<boolean> {
     await initializationStore.put(name, { pending: true });
     try {
-      if (exists) await applyResources(name);
+      if (exists) await bindSprite(name);
       else await createSprite(name);
       const hydrated = homeSnapshots && scope ? await homeSnapshots.hydrateHome(scope, name) : false;
       await initializationStore.delete(name);
@@ -712,12 +720,13 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
           ).then(
             async (restored) => {
               if (!restored) return "no checkpoint to restore";
-              const after = await stillFaulted(name);
-              if (after) return `restored checkpoint ${restored.id} but check still reports ${describeCheck(after)}`;
+              const { faulted, checkFailed } = await recheck(name);
+              if (faulted)
+                return `restored checkpoint ${restored.id} but check still reports ${describeCheck(faulted)}`;
               reportError(
                 "agent_computer",
                 "checkpoint_restored",
-                `sprite ${name}: restart failed (${restartFailure}); ${fault}; restored checkpoint ${restored.id} from ${restored.createTime.toISOString()}`,
+                `sprite ${name}: restart failed (${restartFailure}); ${fault}; restored checkpoint ${restored.id} from ${restored.createTime.toISOString()}${checkFailed ? `; the health check after the restore failed: ${checkFailed}` : ""}`,
                 scopeLabel,
               );
               return undefined;

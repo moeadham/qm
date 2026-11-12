@@ -726,7 +726,11 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     provisionForReach,
     reclaimBox,
     provisionPending: () => provisionInFlight !== null,
-    invalidateProvision: () => {
+    invalidateProvision: (resourceId?: string) => {
+      if (resourceId !== undefined) {
+        resourcePolicy.delete(resourceId);
+        if ((box.handle ?? box.pending)?.resourceId !== resourceId) return;
+      }
       const previous = box.handle ?? box.pending;
       if (previous)
         (box.handle ? resourceHandles : resourcePendingHandles).set(previous.resourceId ?? previous.id, previous);

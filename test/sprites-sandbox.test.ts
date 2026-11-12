@@ -23,6 +23,7 @@ import { createMemoryBlobTransferStore } from "../src/persistence/blob-transfer.
 import { scopeId } from "../src/types.ts";
 import { mintCapabilityToken, EGRESS_PROXY_AUD } from "../src/auth/capability-token.ts";
 import { installFakeSprites, FAKE_SPRITES_TOKEN, type FakeSprites } from "./support/fake-sprites.ts";
+import { SpritesClient } from "@fly/sprites";
 import type { Sandbox } from "../src/sandbox/sandbox.ts";
 import { APIError, SpriteCommand } from "@fly/sprites";
 
@@ -475,6 +476,43 @@ test("a replaced sprite comes back live and egress-bound for another core that a
 
   const after = await coreB.provision(layers, { egressToken });
   assert.equal((await coreB.run(after, "echo back")).stdout.trim(), "back");
+});
+
+test("a sprite left pending without its egress policy is bound before another core uses it", async () => {
+  const shared = {
+    egressProxyUrl: "https://proxy.example.com",
+    initializationStore: createMemoryMap<{ pending: boolean }>(),
+    advisoryLock: createMemoryAdvisoryLock(),
+  };
+  const core = make(shared);
+  const egressToken = await proxyToken();
+  const before = await core.provision(layers, { egressToken });
+  await core.teardown(before);
+  const raw = new SpritesClient(FAKE_SPRITES_TOKEN, { baseURL: fake.baseUrl });
+  await raw.deleteSprite(before.id);
+  await raw.createSprite(before.id);
+  await shared.initializationStore.put(before.id, { pending: true });
+
+  await core.provision(layers, { egressToken });
+  assert.deepEqual(fake.policy(before.id), [{ domain: "proxy.example.com", action: "allow" }]);
+});
+
+test("a restored sprite whose health recheck fails is kept and the failed recheck is reported", async () => {
+  const events: Array<{ code: string; message: string }> = [];
+  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
+  const h = await s.provision(layers);
+  await s.teardown(h);
+  fake.refuseRestart(h.id);
+  fake.unhealthy(h.id, "disk unreachable");
+  const restored = () => fake.calls.some((c) => c.path.endsWith("/restore"));
+  for (let i = 0; i < 8; i++) fake.failNext(403, { match: (c) => c.path.endsWith("/check") && restored() });
+
+  await s.restartComputer!(scope);
+  assert.deepEqual(
+    events.map((e) => e.code),
+    ["checkpoint_restored"],
+  );
+  assert.match(events[0]!.message, /health check after the restore failed/);
 });
 
 test("a sprite whose checkpoint restore fails is replaced", async () => {
