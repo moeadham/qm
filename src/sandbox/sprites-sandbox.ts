@@ -102,6 +102,7 @@ const isMissing = (e: unknown): boolean => e instanceof APIError && e.statusCode
 
 const FAULTED_CHECK_STATUSES = new Set(["unhealthy", "needs_repair"]);
 const RESTORE_TIMEOUT_MS = 120_000;
+const RECHECK_ATTEMPTS = 3;
 const describeCheck = (check: SpriteCheck): string => `${check.status}${check.reason ? ` (${check.reason})` : ""}`;
 
 export function processKeepaliveScript(processId: string): string {
@@ -127,6 +128,7 @@ export interface SpritesSandboxOptions extends BlobStagingOptions {
   egressProxyAdditionalUrls?: string[];
   memoryMb?: number;
   checkpointIntervalMs?: number;
+  recheckIntervalMs?: number;
   snapshots?: HomeSnapshotStore;
   initializationStore?: DurableMap<{ pending: boolean }>;
   advisoryLock?: AdvisoryLock;
@@ -158,6 +160,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
   };
   const defaultTimeoutSec = opts.defaultTimeoutSec ?? 600;
   const checkpointIntervalMs = opts.checkpointIntervalMs ?? CHECKPOINT_INTERVAL_MS;
+  const recheckIntervalMs = opts.recheckIntervalMs ?? 10_000;
 
   const ensured = new Set<string>();
   const resourcesApplied = new Set<string>();
@@ -417,6 +420,40 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
     return latest;
   }
 
+  async function stillFaulted(name: string): Promise<SpriteCheck | undefined> {
+    let last: SpriteCheck | undefined;
+    for (let attempt = 0; attempt < RECHECK_ATTEMPTS; attempt++) {
+      if (attempt > 0) await wait(recheckIntervalMs);
+      last = await retrySpritesControl(() => sprite(name).check()).catch(() => undefined);
+      if (!last || !FAULTED_CHECK_STATUSES.has(last.status)) return undefined;
+    }
+    return last;
+  }
+
+  async function createSprite(name: string): Promise<void> {
+    forget(name);
+    await attempt(`create ${name}`, () => client.createSprite(name, { waitForCapacity: true }));
+    await applyResources(name);
+    if (egressProxyHosts.length) await ensureEgressPolicy(name);
+  }
+
+  async function initializeSprite(name: string, scope: string | undefined, exists: boolean): Promise<boolean> {
+    await initializationStore.put(name, { pending: true });
+    try {
+      if (exists) await applyResources(name);
+      else await createSprite(name);
+      const hydrated = homeSnapshots && scope ? await homeSnapshots.hydrateHome(scope, name) : false;
+      await initializationStore.delete(name);
+      ensured.add(name);
+      return hydrated;
+    } catch (e) {
+      forget(name);
+      reportError("sandbox_hydrate", "hydrate_failed", errMessage(e), scope);
+      await deleteSprite(name).catch((deleteErr) => swallow("sprites-sandbox: delete after failed hydrate", deleteErr));
+      throw e;
+    }
+  }
+
   async function checkpointIfDue(name: string, tdOpts?: TeardownOptions): Promise<void> {
     await requireInitialized(name);
     const book = checkpointBooks.get(name) ?? {};
@@ -469,35 +506,19 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
           ensured.add(name);
           return { coldStart: false };
         }
-        await initializationStore.put(name, { pending: true });
         try {
           onStatus?.("Preparing the sandbox…");
         } catch (error) {
           void error;
         }
-        const scope = base.scopeFor(name);
-        try {
-          if (!exists) await attempt(`create ${name}`, () => client.createSprite(name, { waitForCapacity: true }));
-          await applyResources(name);
-          const hydrated = homeSnapshots && scope ? await homeSnapshots.hydrateHome(scope, name) : false;
-          await initializationStore.delete(name);
-          ensured.add(name);
-          return { coldStart: !hydrated };
-        } catch (e) {
-          forget(name);
-          reportError("sandbox_hydrate", "hydrate_failed", errMessage(e), scope);
-          await deleteSprite(name).catch((deleteErr) =>
-            swallow("sprites-sandbox: delete after failed hydrate", deleteErr),
-          );
-          throw e;
-        }
+        const hydrated = await initializeSprite(name, base.scopeFor(name), exists);
+        return { coldStart: !hydrated };
       });
     },
     isProvisioned: (name) => ensured.has(name),
     async recreateScratch(name) {
       if (await spriteExists(name)) await deleteSprite(name);
-      await attempt(`create ${name}`, () => client.createSprite(name, { waitForCapacity: true }));
-      await applyResources(name);
+      await createSprite(name);
       ensured.add(name);
     },
     deleteInstance: deleteSprite,
@@ -682,7 +703,8 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
               `sprites restart ${name}: ${restartFailure}; check reports ${describeCheck(check)}, which does not authorize a rollback, so no checkpoint was restored`,
             );
           }
-          const scopeLabel = base.scopeFor(name) ?? scopeId;
+          const scope = base.scopeFor(name);
+          const scopeLabel = scope ?? scopeId;
           const unrecovered = await withTimeout(
             () => restoreLatestCheckpoint(name),
             RESTORE_TIMEOUT_MS,
@@ -690,9 +712,8 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
           ).then(
             async (restored) => {
               if (!restored) return "no checkpoint to restore";
-              const after = await retrySpritesControl(() => s.check()).catch(() => undefined);
-              if (after && FAULTED_CHECK_STATUSES.has(after.status))
-                return `restored checkpoint ${restored.id} but check still reports ${describeCheck(after)}`;
+              const after = await stillFaulted(name);
+              if (after) return `restored checkpoint ${restored.id} but check still reports ${describeCheck(after)}`;
               reportError(
                 "agent_computer",
                 "checkpoint_restored",
@@ -706,6 +727,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
           if (unrecovered === undefined) return;
           try {
             await deleteSprite(name);
+            await initializeSprite(name, scope, false);
           } catch (e) {
             throw new Error(
               `sprites restart ${name}: ${restartFailure}; ${fault}; ${unrecovered}; replacing the sandbox failed: ${errMessage(e)}`,
@@ -715,7 +737,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
           reportError(
             "agent_computer",
             "sandbox_replaced",
-            `sprite ${name}: restart failed (${restartFailure}); ${fault}; ${unrecovered}; deleted it so the next use starts a fresh sandbox`,
+            `sprite ${name}: restart failed (${restartFailure}); ${fault}; ${unrecovered}; replaced it with a fresh sandbox`,
             scopeLabel,
           );
         }),

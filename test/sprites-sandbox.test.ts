@@ -36,6 +36,7 @@ function make(extra: Record<string, unknown> = {}): Sandbox {
     token: FAKE_SPRITES_TOKEN,
     namePrefix: "qmt",
     baseUrl: fake.baseUrl,
+    recheckIntervalMs: 1,
     ...extra,
   });
 }
@@ -289,6 +290,7 @@ test("a failed egress setup releases the scratch lease instead of wedging the ke
     s.provision(layers, { scratch: { key: "job-egress" }, egressToken: await proxyToken() }),
     /readback mismatch/,
   );
+  fake.repairPolicyReadback(sandboxScopeName("qmt-scratch", "job-egress"));
   const retry = await s.provision(layers, { scratch: { key: "job-egress" } });
   assert.equal(retry.scratch, true);
   assert.equal(retry.coldStart, true, "the failed provision released its lease and the box was recreated");
@@ -452,6 +454,27 @@ test("a sprite that still needs repair after its checkpoint is restored is repla
   fake.health(h.id, "healthy", "");
   const fresh = await s.provision(layers);
   assert.equal(await s.readFile(fresh, "keep.txt"), null);
+});
+
+test("a replaced sprite comes back live and egress-bound for another core that already used it", async () => {
+  const shared = {
+    egressProxyUrl: "https://proxy.example.com",
+    initializationStore: createMemoryMap<{ pending: boolean }>(),
+    advisoryLock: createMemoryAdvisoryLock(),
+  };
+  const coreA = make(shared);
+  const coreB = make(shared);
+  const egressToken = await proxyToken();
+  const before = await coreB.provision(layers, { egressToken });
+  await coreB.teardown(before);
+  fake.refuseRestart(before.id);
+  fake.health(before.id, "needs_repair", "machine in suspended state");
+
+  await coreA.restartComputer!(scope);
+  assert.deepEqual(fake.policy(before.id), [{ domain: "proxy.example.com", action: "allow" }]);
+
+  const after = await coreB.provision(layers, { egressToken });
+  assert.equal((await coreB.run(after, "echo back")).stdout.trim(), "back");
 });
 
 test("a sprite whose checkpoint restore fails is replaced", async () => {

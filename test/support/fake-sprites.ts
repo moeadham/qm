@@ -48,6 +48,7 @@ export interface FakeSprites {
   refuseDelete(status?: number): void;
   rateLimitCreate(retryAfterSeconds: number): void;
   breakPolicyReadback(name: string): void;
+  repairPolicyReadback(name: string): void;
   setPressure(name: string, p: { full10: number; full60: number; load1: number }): void;
   restarts(): string[];
   reset(): void;
@@ -477,6 +478,9 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     },
     breakPolicyReadback: (name) => {
       brokenReadback.add(name);
+    },
+    repairPolicyReadback: (name) => {
+      brokenReadback.delete(name);
     },
     setPressure: (name, p) => {
       const home = ensureDir(name);

@@ -7,7 +7,11 @@ import type { Sandbox, SandboxHandle } from "../src/sandbox/sandbox.ts";
 const handle: SandboxHandle = { id: "h", rootDir: "/workspace" };
 const healthy = { machine: "healthy", listed: "warm", provisioned: true, guestResponsive: true };
 
-function ctxFor(sandbox: Partial<Sandbox>, provision: ToolContextDeps["provision"]) {
+function ctxFor(
+  sandbox: Partial<Sandbox>,
+  provision: ToolContextDeps["provision"],
+  extra: Partial<ToolContextDeps> = {},
+) {
   const scope = scopeId("channel", "C1");
   const layers: WorkspaceLayer[] = [{ scopeId: scope, mountPath: "", mode: "rw" }];
   return createToolContext({
@@ -21,6 +25,7 @@ function ctxFor(sandbox: Partial<Sandbox>, provision: ToolContextDeps["provision
     deploy: {} as never,
     acl: {} as never,
     createdBy: "U1",
+    ...extra,
   });
 }
 
@@ -113,4 +118,13 @@ test("status for an explicit sandbox probes its exec path instead of trusting th
   const status = await ctx.computerStatus("sb1");
   assert.equal(status.guestResponsive, false);
   assert.match(status.probeError ?? "", /timed out/);
+});
+
+test("restarting the computer makes the turn provision its sandbox again", async () => {
+  const events: string[] = [];
+  const ctx = ctxFor({ restartComputer: async () => void events.push("restart") }, async () => handle, {
+    invalidateProvision: () => events.push("invalidate"),
+  });
+  await ctx.restartComputer();
+  assert.deepEqual(events, ["restart", "invalidate"]);
 });

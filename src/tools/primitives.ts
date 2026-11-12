@@ -837,6 +837,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       }
       if (!writableScopeId) throw new Error("this turn has no scoped computer to restart");
       await deps.sandbox.restartComputer(writableScopeId);
+      deps.invalidateProvision?.();
     },
     async execute(
       command: string,
