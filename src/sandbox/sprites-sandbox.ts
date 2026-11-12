@@ -100,7 +100,6 @@ export async function retrySpritesControl<T>(operation: () => Promise<T>, timeou
 
 const isMissing = (e: unknown): boolean => e instanceof APIError && e.statusCode === 404;
 
-const FAULTED_CHECK_STATUSES = new Set(["unhealthy", "needs_repair"]);
 const describeCheck = (check: SpriteCheck): string => `${check.status}${check.reason ? ` (${check.reason})` : ""}`;
 
 export function processKeepaliveScript(processId: string): string {
@@ -675,10 +674,10 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
               { cause: e },
             );
           }
-          const fault = FAULTED_CHECK_STATUSES.has(check.status) ? `check reports ${describeCheck(check)}` : undefined;
+          const fault = check.status === "unhealthy" ? `check reports ${describeCheck(check)}` : undefined;
           if (fault === undefined) {
             throw new Error(
-              `sprites restart ${name}: ${restartFailure}; the health check reports no fault, so no checkpoint was restored`,
+              `sprites restart ${name}: ${restartFailure}; check reports ${describeCheck(check)}, which does not authorize a rollback, so no checkpoint was restored`,
             );
           }
           let restored: Checkpoint | undefined;
