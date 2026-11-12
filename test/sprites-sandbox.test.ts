@@ -406,6 +406,18 @@ test("a refused restart on a faulted sprite restores the latest checkpoint", asy
   assert.match(restored!.message, /restored checkpoint v1/);
 });
 
+test("a refused restart on a sprite that needs repair restores the latest checkpoint", async () => {
+  const h = await sandbox.provision(layers);
+  await sandbox.writeFile(h, "keep.txt", "before\n");
+  await sandbox.teardown(h);
+  await sandbox.writeFile(h, "keep.txt", "after\n");
+  fake.refuseRestart(h.id);
+  fake.health(h.id, "needs_repair", "machine in suspended state");
+
+  await sandbox.restartComputer!(scope);
+  assert.equal(await sandbox.readFile(h, "keep.txt"), "before\n");
+});
+
 test("a refused restart with a healthy check restores nothing and surfaces the refusal", async () => {
   const h = await sandbox.provision(layers);
   await sandbox.teardown(h);
