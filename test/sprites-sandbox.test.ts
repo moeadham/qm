@@ -23,9 +23,8 @@ import { createMemoryBlobTransferStore } from "../src/persistence/blob-transfer.
 import { scopeId } from "../src/types.ts";
 import { mintCapabilityToken, EGRESS_PROXY_AUD } from "../src/auth/capability-token.ts";
 import { installFakeSprites, FAKE_SPRITES_TOKEN, type FakeSprites } from "./support/fake-sprites.ts";
-import { SpritesClient } from "@fly/sprites";
 import type { Sandbox } from "../src/sandbox/sandbox.ts";
-import { APIError, SpriteCommand } from "@fly/sprites";
+import { APIError, SpriteCommand, SpritesClient } from "@fly/sprites";
 
 let fake: FakeSprites;
 let sandbox: Sandbox;
