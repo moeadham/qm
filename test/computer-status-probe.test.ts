@@ -7,7 +7,11 @@ import type { Sandbox, SandboxHandle } from "../src/sandbox/sandbox.ts";
 const handle: SandboxHandle = { id: "h", rootDir: "/workspace" };
 const healthy = { machine: "healthy", listed: "warm", provisioned: true, guestResponsive: true };
 
-function ctxFor(sandbox: Partial<Sandbox>, provision: ToolContextDeps["provision"]) {
+function ctxFor(
+  sandbox: Partial<Sandbox>,
+  provision: ToolContextDeps["provision"],
+  extra: Partial<ToolContextDeps> = {},
+) {
   const scope = scopeId("channel", "C1");
   const layers: WorkspaceLayer[] = [{ scopeId: scope, mountPath: "", mode: "rw" }];
   return createToolContext({
@@ -21,6 +25,7 @@ function ctxFor(sandbox: Partial<Sandbox>, provision: ToolContextDeps["provision
     deploy: {} as never,
     acl: {} as never,
     createdBy: "U1",
+    ...extra,
   });
 }
 
@@ -71,6 +76,26 @@ test("computerStatus never provisions when the backend reports no machine", asyn
   });
   assert.deepEqual(await ctx.computerStatus(), none);
   assert.equal(provisions, 0, "a status check must not cold-start a box");
+});
+
+test("restarting the computer makes the turn provision its sandbox again", async () => {
+  const events: string[] = [];
+  const ctx = ctxFor({ restartComputer: async () => void events.push("restart") }, async () => handle, {
+    invalidateProvision: () => events.push("invalidate"),
+  });
+  await ctx.restartComputer();
+  assert.deepEqual(events, ["restart", "invalidate"]);
+});
+
+test("restarting a named sandbox makes the turn provision that sandbox again", async () => {
+  const events: string[] = [];
+  const ctx = ctxFor({}, async () => handle, {
+    sandboxResources: { restart: async () => void events.push("restart") } as never,
+    accessSandboxResource: async () => ({ resource: { id: "res-1" } }) as never,
+    invalidateProvision: (id) => events.push(`invalidate ${id}`),
+  });
+  await ctx.restartComputer("box");
+  assert.deepEqual(events, ["restart", "invalidate res-1"]);
 });
 
 test("a probe that hangs on the real exec path reports NOT answering within the probe bound", async () => {

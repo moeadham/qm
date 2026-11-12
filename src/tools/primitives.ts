@@ -496,7 +496,7 @@ export interface ToolContextDeps {
   grantedHandles: GrantedHandle[];
   context?: TurnContext;
   sandboxResources?: SandboxResources;
-  invalidateProvision?: () => void;
+  invalidateProvision?: (resourceId?: string) => void;
   workspace: WorkspaceStore;
   deploy: DeployService;
   acl: AclStore;
@@ -829,14 +829,17 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       if (sandboxId !== undefined) {
         const resources = deps.sandboxResources;
         if (!resources) throw new Error("sandbox inventory unavailable");
-        await accessSandbox(sandboxId);
-        return resources.restart(deps.createdBy, sandboxId);
+        const { resource } = await accessSandbox(sandboxId);
+        await resources.restart(deps.createdBy, sandboxId);
+        deps.invalidateProvision?.(resource.id);
+        return;
       }
       if (!deps.sandbox.restartComputer) {
         throw new CapabilityUnsupportedError(deps.sandbox.profile.backend, "restarting the computer");
       }
       if (!writableScopeId) throw new Error("this turn has no scoped computer to restart");
       await deps.sandbox.restartComputer(writableScopeId);
+      deps.invalidateProvision?.();
     },
     async execute(
       command: string,

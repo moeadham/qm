@@ -244,6 +244,9 @@ test("turn default changes invalidate cached provisioning while explicit calls d
   assert.equal((await router.run(old, "still old")).stdout, old.id);
   const [x, y] = await Promise.all([turn.provisionResource(a.id), turn.provisionResource(a.id)]);
   assert.equal(x, y);
+  turn.invalidateProvision(a.id);
+  assert.notEqual(await turn.provisionResource(a.id), x, "a restarted sandbox is provisioned again");
+  assert.equal(await turn.provision(), next, "the default box is untouched by another sandbox's restart");
   await turn.reclaimBox();
   assert.deepEqual(released.sort(), [a.backingScopeId, b.backingScopeId].sort());
 });
