@@ -5,7 +5,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import assert from "node:assert/strict";
 import type { APIInteraction } from "@discordjs/core";
 import { startDiscordPlugin, assertOneChatPlatform, discordConfigFromEnv } from "../src/discord/index.ts";
-import { createDiscordCoreClient, type DiscordCoreClient } from "../src/discord/core.ts";
+import { createDiscordCoreClient, type DiscordCoreClient, type WatchableRun } from "../src/discord/core.ts";
 import {
   components,
   createDiscordGateway,
@@ -242,6 +242,7 @@ function harness(opts: {
   toolCalls?: ToolCallView[][];
   replying?: boolean;
   queuedMs?: number;
+  watchable?: WatchableRun[];
   steeredAfterMs?: number;
   approvals?: Record<string, StoredApprovalView>;
   consumeApprovals?: boolean;
@@ -273,6 +274,7 @@ function harness(opts: {
     fulfilled: [],
     core: undefined as unknown as DiscordCoreClient,
   };
+  const watched = [...(opts.watchable ?? [])];
   const real = createDiscordCoreClient({
     app: {} as never,
     blobTransfer: {} as never,
@@ -336,6 +338,12 @@ function harness(opts: {
     },
     async ackRunDelivery(runId) {
       h.acked.push(runId);
+    },
+    async watchableRuns() {
+      return opts.watchable?.splice(0) ?? [];
+    },
+    async activeRunForThread(threadRef) {
+      return watched.find((run) => run.threadRef === threadRef)?.runId;
     },
     async reportRunReplyRef(runId, replyRef) {
       h.replyRefs.push([runId, replyRef]);
@@ -814,19 +822,23 @@ test("a voice note reaches QM as its transcript, with the audio still attached",
   );
 });
 
-test("a voice note that can't be transcribed still reaches QM, with a note saying so", async () => {
+test("a voice note that can't be transcribed tells the sender so and still reaches QM with a note", async () => {
   const h = harness({
     transcribe: async () => {
       throw new Error("http 402 out of credit");
     },
   });
+  let api: FakeDiscord | undefined;
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async () =>
     new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } })) as unknown as typeof fetch;
   try {
-    const { handlers, plugin } = await boot(h);
+    const booted = await boot(h);
+    api = booted.api;
+    const { handlers, plugin } = booted;
     handlers.onMessage({
       ...dm(ALICE, ""),
+      id: "voice-1",
       flags: 8192,
       attachments: [
         {
@@ -843,11 +855,57 @@ test("a voice note that can't be transcribed still reaches QM, with a note sayin
   } finally {
     globalThis.fetch = realFetch;
   }
+  assert.deepEqual(
+    api!.sent.filter((s) => s.content.startsWith("⚠️")).map((s) => [s.content, s.replyTo]),
+    [["⚠️ I couldn't transcribe that voice note.", "voice-1"]],
+  );
   assert.match(h.turns[0]!.inboundNotes?.join(" ") ?? "", /voice note that couldn't be transcribed/);
   assert.equal(h.turns[0]!.text, "");
   assert.deepEqual(
     h.turns[0]!.attachments?.map((a) => a.name),
     ["voice-message.ogg"],
+  );
+});
+
+test("a failed voice note in a server channel gets one warning, inside the thread QM opens for it", async () => {
+  const h = harness({
+    transcribe: async () => {
+      throw new Error("provider down");
+    },
+  });
+  const api = new FakeDiscord();
+  api.channels.set(CHANNEL, { id: CHANNEL, type: 0, name: "general", guildId: GUILD });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("OGGDATA", { headers: { "content-type": "audio/ogg" } })) as unknown as typeof fetch;
+  try {
+    const { handlers, plugin } = await boot(h, api);
+    handlers.onMessage({
+      ...dm(ALICE, `<@${BOT}>`),
+      id: "800000000000000009",
+      channel_id: CHANNEL,
+      guild_id: GUILD,
+      mentions: [{ id: BOT } as never],
+      flags: 8192,
+      attachments: [
+        {
+          id: "v3",
+          filename: "voice-message.ogg",
+          size: 7,
+          url: "https://cdn.discordapp.com/attachments/1/3/voice-message.ogg",
+          content_type: "audio/ogg",
+        },
+      ],
+    });
+    await until(() => h.acked.length === 1, "turn delivered");
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  const warnings = api.sent.filter((s) => s.content.startsWith("⚠️ I couldn't transcribe"));
+  assert.deepEqual(
+    warnings.map((s) => [s.channelId, s.replyTo]),
+    [["800000000000000009", undefined]],
   );
 });
 
@@ -1488,6 +1546,77 @@ test("a failed turn that used tools posts its failure note without a worked summ
   await plugin.stop();
 
   assert.match(api.edits.at(-1)!.content, /^⚠️ /);
+});
+
+test("a run the bot did not start reuses its status message for live status and the reply", async () => {
+  const h = harness({
+    watchable: [
+      {
+        kind: "reply",
+        runId: "run-left",
+        threadRef: `discord:dm:${DM}`,
+        target: DM,
+        dm: true,
+        origin: { kind: "human", messageTs: "m1" },
+        placeholder: "status-1",
+      },
+    ],
+    toolCalls: [[{ tool: "execute", args: { command: "ls", purpose: "Check the workspace" } }]],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, plugin } = await boot(h);
+  await until(() => h.acked.includes("run-left"), "watched run delivery ack");
+  await plugin.stop();
+
+  assert.deepEqual(h.turns, []);
+  assert.deepEqual(api.sent, []);
+  assert.deepEqual(h.replyRefs, []);
+  assert.deepEqual(
+    api.edits.map((edit) => [edit.messageId, edit.content]),
+    [
+      ["status-1", "-# Working · Ran commands\n-# 🔧 Check the workspace"],
+      ["status-1", "-# Worked · Ran commands\n\nDone."],
+    ],
+  );
+});
+
+test("a watched run that fails reports the failure in its status message", async () => {
+  const h = harness({
+    watchable: [
+      {
+        kind: "reply",
+        runId: "run-approved",
+        threadRef: `discord:dm:${DM}`,
+        target: DM,
+        dm: true,
+        origin: { kind: "human", messageTs: "m1" },
+        placeholder: "status-1",
+      },
+    ],
+    result: () => ({ status: "failed", reason: "boom" }),
+  });
+  const { api, plugin } = await boot(h);
+  await until(() => h.acked.includes("run-approved"), "watched run delivery ack");
+  await plugin.stop();
+
+  assert.deepEqual(api.removed, []);
+  assert.match(api.edits.at(-1)!.content, /^⚠️ /);
+});
+
+test("a run resumed after a secret-drop shows live status that is removed when it ends, leaving the reply to the resume", async () => {
+  const h = harness({
+    watchable: [{ kind: "status", runId: "run-drop", threadRef: `discord:dm:${DM}` }],
+    toolCalls: [[{ tool: "execute", args: { command: "ls", purpose: "Check the workspace" } }]],
+    result: () => ({ status: "ok", reply: "Done." }),
+  });
+  const { api, plugin } = await boot(h);
+  await until(() => api.removed.length === 1, "status removed");
+  await plugin.stop();
+
+  assert.equal(api.sent.length, 1);
+  assert.equal(api.sent[0]!.content, "-# Working · Ran commands\n-# 🔧 Check the workspace");
+  assert.deepEqual(api.removed, [api.sent[0]!.id]);
+  assert.deepEqual(h.acked, []);
 });
 
 test("a tool-only placeholder is recorded for recovery and removed when the turn ends without text", async () => {
@@ -2364,4 +2493,51 @@ test("/qm model with no models available answers in words instead of sending an 
   await plugin.stop();
   assert.equal(api.replies[0]!.content, "You don't have any models to choose from here.");
   assert.equal(api.replies[0]!.select, undefined);
+});
+
+test("the watcher waits for a fresh run's starter to record its status message, and follows approval resumes", async () => {
+  const now = Date.now();
+  const run = (id: string, threadRef: string, createdAt: number, extra: Record<string, unknown> = {}) => ({
+    id,
+    sessionId: threadRef,
+    status: "running",
+    createdAt,
+    request: {
+      surface: "discord",
+      deliveryTarget: "T1",
+      actor: { id: "U1" },
+      conversation: { kind: "channel", threadRef },
+      origin: { kind: "human", messageTs: "m1" },
+      ...extra,
+    },
+  });
+  const runs = new Map<string, Record<string, unknown>>([
+    ["discord:ch:P:fresh", run("fresh", "discord:ch:P:fresh", now)],
+    ["discord:ch:P:old", run("old", "discord:ch:P:old", now - 60_000, { approval: { requestId: "a1" } })],
+    ["discord:ch:P:posted", { ...run("posted", "discord:ch:P:posted", now), deliveryState: { replyRef: "s1" } }],
+  ]);
+  const core = createDiscordCoreClient({
+    runs: {
+      onTerminal: () => {},
+      activeSessionIds: async () => [...runs.keys(), "slack:C1"],
+      activeForThread: async (id: string) => runs.get(id) ?? null,
+    },
+  } as never);
+
+  const seen = await core.watchableRuns();
+  assert.deepEqual(
+    seen.map((w) => [w.runId, w.kind, w.placeholder]),
+    [
+      ["old", "reply", undefined],
+      ["posted", "reply", "s1"],
+    ],
+  );
+  assert.deepEqual(seen[0], {
+    runId: "old",
+    threadRef: "discord:ch:P:old",
+    kind: "reply",
+    target: "T1",
+    dm: false,
+    origin: { kind: "human", messageTs: "m1" },
+  });
 });

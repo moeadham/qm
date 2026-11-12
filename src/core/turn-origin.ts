@@ -139,3 +139,10 @@ export function desktopClientForTurn(
     ? input.desktopClientId
     : undefined;
 }
+
+export const KEYCHAIN_ASK_SURFACE = "keychain-ask";
+export const SECRET_DROP_SURFACE = "secret-drop";
+
+export function resumesOwnersTask(request: { surface?: string }): boolean {
+  return request.surface === KEYCHAIN_ASK_SURFACE || request.surface === SECRET_DROP_SURFACE;
+}

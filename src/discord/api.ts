@@ -283,7 +283,9 @@ export function createDiscordApi(rest: REST, applicationId: string): DiscordApi 
       });
     },
     async remove(channelId, messageId) {
-      await api.channels.deleteMessage(channelId, messageId);
+      await api.channels.deleteMessage(channelId, messageId).catch((error: unknown) => {
+        if (discordErrorCode(error) !== DISCORD_UNKNOWN_MESSAGE) throw error;
+      });
     },
     async typing(channelId) {
       await api.channels.showTyping(channelId);

@@ -7,6 +7,7 @@ import { principalDestination, withWebTranscriptText } from "../reach/reach.ts";
 import { swallow } from "../util/errors.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
 import { samePerson } from "../directory/person.ts";
+import { KEYCHAIN_ASK_SURFACE, SECRET_DROP_SURFACE } from "../core/turn-origin.ts";
 
 function resolutionInput(ask: KeychainAsk, grant?: KeychainGrant): string {
   if (ask.status === "approved") {
@@ -58,7 +59,7 @@ export async function fireAskResolution(
     ...cronTriggerAuthority(cron ?? { owner: ask.requesterId, ownerScopeId: ask.requesterScopeId }),
     input: resolutionInput(ask, grant),
     fireKey: `ask:${ask.id}:${ask.status}`,
-    surface: "keychain-ask",
+    surface: KEYCHAIN_ASK_SURFACE,
     ...(cron?.runtime ? { runtime: cron.runtime } : {}),
     deferWhenBusy: true,
     ...(cron
@@ -134,7 +135,7 @@ export async function fireDropResolution(deps: TriggerDeps, drop: DropResolution
     ownerScopeId: drop.audienceScopeId,
     input: dropResolutionInput(drop),
     fireKey: `drop:${drop.id}`,
-    surface: "secret-drop",
+    surface: SECRET_DROP_SURFACE,
     ...(drop.destination ? { destination: drop.destination } : {}),
     ...(drop.threadRef ? { threadRef: drop.threadRef } : {}),
   });

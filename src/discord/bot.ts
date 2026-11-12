@@ -3,9 +3,15 @@ import { userFacingFailureClause } from "../core/failure-copy.ts";
 import { isSubagentThreadRef } from "../sessions/session-syscalls.ts";
 import { renderConversationView, type RecentMessage } from "../surfaces/conversation.ts";
 import { closeOpenFence, safeClip } from "../surfaces/safe-cut.ts";
-import { hasRunDelivery, turnFailureText, type CoreTurnBody, type TurnFlow } from "../surfaces/turn-flow.ts";
-import type { ActorAssertion, TurnResult } from "../types.ts";
-import { errMessage, reportFailure, swallowAs } from "../util/errors.ts";
+import {
+  hasRunDelivery,
+  turnFailureText,
+  type CoreTurnBody,
+  type TurnFlow,
+  type TurnHooks,
+} from "../surfaces/turn-flow.ts";
+import type { ActorAssertion, TurnOrigin, TurnResult } from "../types.ts";
+import { errMessage, reportFailure, reportFailureAs, swallowAs } from "../util/errors.ts";
 import {
   DISCORD_MESSAGE_LIMIT,
   discordDisplayName,
@@ -20,7 +26,7 @@ import {
   type DiscordMessage,
 } from "./api.ts";
 import { activityHeader, activityKind, toolCallLine, type ActivityKind } from "./activity-status.ts";
-import type { DiscordCoreClient } from "./core.ts";
+import type { DiscordCoreClient, WatchableRun } from "./core.ts";
 import type { ToolCallView } from "../surfaces/surface-core-client.ts";
 import { downloadDiscordFile, receiveDiscordFiles, sendDiscordFiles } from "./files.ts";
 import { emojiCharFor } from "../slack/emoji-map.ts";
@@ -44,8 +50,7 @@ export const DISCORD_REACTION_INSTRUCTION =
   "you're answering, so a reply can be just the directive. To react to a different message, use your surface tool's " +
   "react action with that message's id.";
 
-function triggerMessageId(body: CoreTurnBody): string | undefined {
-  const origin = body.origin;
+function triggerMessageId(origin: TurnOrigin | undefined): string | undefined {
   if (origin?.kind === "human") return origin.messageTs;
   if (origin?.kind === "ambient") return origin.entryTs;
   return undefined;
@@ -62,6 +67,13 @@ const FENCE_CLOSE_RESERVE = 4;
 const STAKE_SCAN_MESSAGES = 100;
 const STATUS_DELAY_MS = 2_000;
 const STATUS_REFRESH_MS = 10_000;
+interface DiscordTurn {
+  start(hooks: TurnHooks): Promise<TurnResult>;
+  dm: boolean;
+  origin?: TurnOrigin;
+  placeholder?: string;
+}
+
 export interface TurnOutcome {
   result?: TurnResult;
   accepted: boolean;
@@ -80,6 +92,14 @@ interface Place {
   channelRef?: string;
   channelName?: string;
   youOpenedIt?: boolean;
+}
+
+function discordThreadChannel(threadRef: string): string | undefined {
+  const [surface, kind, ...ids] = threadRef.split(":");
+  if (surface !== "discord") return undefined;
+  if (kind === "ch" && ids.length === 2) return ids[1];
+  if (kind === "dm" && ids.length === 1) return ids[0];
+  return undefined;
 }
 
 export function discordDmThreadRef(dmChannelId: string): string {
@@ -247,8 +267,12 @@ export function createDiscordBot(deps: {
     };
   }
 
-  function createReplyWriter(channelId: string, onPlaceholder: (messageId: string) => Promise<void>) {
-    let placeholder: string | undefined;
+  function createReplyWriter(
+    channelId: string,
+    onPlaceholder: (messageId: string) => Promise<void>,
+    existing?: string,
+  ) {
+    let placeholder = existing;
     let streaming = true;
     let chain: Promise<void> = Promise.resolve();
     let reply = "";
@@ -443,23 +467,131 @@ export function createDiscordBot(deps: {
       ...(await inboundFiles(m, spoken)),
       ...(place.kind === "channel" ? await threadContext(place, m) : {}),
     };
-    await converse(place.channelId, body, {
+    const accepted: AcceptGate | undefined = spoken.note
+      ? {
+          persisted: () => {
+            gate?.persisted();
+            void postMessage(api, place.channelId, "⚠️ I couldn't transcribe that voice note.", {
+              key: `${messageKey}:voice-note`,
+              ...(place.channelId === m.channel_id ? { replyTo: m.id } : {}),
+            }).catch(swallowAs("discord: transcription failure note", undefined));
+          },
+          failed: (reason) => gate?.failed(reason),
+        }
+      : gate;
+    await converse(place.channelId, submitted(body), {
       addressed: relevant.addressed,
       key: messageKey,
-      ...(gate ? { gate } : {}),
+      ...(accepted ? { gate: accepted } : {}),
     });
+  }
+
+  const submitting = new Map<string, number>();
+  const holdThread = (threadRef: string): (() => void) => {
+    submitting.set(threadRef, (submitting.get(threadRef) ?? 0) + 1);
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      const left = (submitting.get(threadRef) ?? 1) - 1;
+      if (left > 0) submitting.set(threadRef, left);
+      else submitting.delete(threadRef);
+    };
+  };
+
+  function submitted(body: CoreTurnBody): DiscordTurn {
+    return {
+      start: async (hooks) => {
+        const release = holdThread(body.conversation.threadRef);
+        try {
+          return await flow.callCore(body, {
+            ...hooks,
+            onQueued: async (runId) => {
+              release();
+              await hooks.onQueued?.(runId);
+            },
+            onSteered: async (runId) => {
+              release();
+              await hooks.onSteered?.(runId);
+            },
+          });
+        } finally {
+          release();
+        }
+      },
+      dm: body.conversation.kind === "dm",
+      ...(body.origin ? { origin: body.origin } : {}),
+    };
+  }
+
+  const abandoned = new Set<string>();
+
+  function watchRuns(runs: WatchableRun[]): void {
+    const active = new Set(runs.map((run) => run.runId));
+    for (const runId of abandoned) if (!active.has(runId)) abandoned.delete(runId);
+    for (const run of runs) void watchRun(run).catch(reportFailureAs("discord: run watch", undefined));
+  }
+
+  async function watchRun(run: WatchableRun): Promise<void> {
+    const { runId } = run;
+    if ((await core.activeRunForThread(run.threadRef)) !== runId) return;
+    if (abandoned.has(runId) || flow.inFlightRuns.has(runId) || submitting.has(run.threadRef)) return;
+    if (run.kind === "reply") {
+      await converse(
+        run.target,
+        {
+          start: (hooks) => flow.followRun(runId, hooks),
+          dm: run.dm,
+          origin: run.origin,
+          ...(run.placeholder ? { placeholder: run.placeholder } : {}),
+        },
+        { addressed: true, key: `run:${runId}` },
+      );
+      return;
+    }
+    const channelId = discordThreadChannel(run.threadRef);
+    if (!channelId) return;
+    flow.inFlightRuns.add(runId);
+    try {
+      await showStatus(channelId, runId, run.placeholder);
+    } finally {
+      flow.inFlightRuns.delete(runId);
+    }
+  }
+
+  async function showStatus(channelId: string, runId: string, placeholder?: string): Promise<void> {
+    const writer = createReplyWriter(channelId, (messageId) => core.reportRunReplyRef(runId, messageId), placeholder);
+    const stopTyping = startTyping(channelId);
+    writer.begin();
+    try {
+      await core.waitRun(runId, {
+        onRunning: () => writer.running(),
+        onToolCalls: (calls) => writer.toolCalls(calls),
+      });
+    } catch (error) {
+      abandoned.add(runId);
+      throw error;
+    } finally {
+      stopTyping();
+      writer.stop();
+      await writer.finish("", `status:${runId}`);
+    }
   }
 
   async function converse(
     channelId: string,
-    body: CoreTurnBody,
+    turn: DiscordTurn,
     opts: { addressed: boolean; key: string; gate?: AcceptGate; quiet?: boolean },
   ): Promise<TurnOutcome> {
     const { addressed, key, gate, quiet } = opts;
     let queuedRunId: string | undefined;
-    const writer = createReplyWriter(channelId, async (messageId) => {
-      if (queuedRunId) await core.reportRunReplyRef(queuedRunId, messageId);
-    });
+    const writer = createReplyWriter(
+      channelId,
+      async (messageId) => {
+        if (queuedRunId) await core.reportRunReplyRef(queuedRunId, messageId);
+      },
+      turn.placeholder,
+    );
     let accepted = false;
     const accept = (): void => {
       accepted = true;
@@ -477,7 +609,7 @@ export function createDiscordBot(deps: {
     try {
       let result: TurnResult;
       try {
-        result = await flow.callCore(body, {
+        result = await turn.start({
           deferDeliveryAck: true,
           onQueued: (runId) => {
             queuedRunId = runId;
@@ -498,6 +630,7 @@ export function createDiscordBot(deps: {
         });
       } catch (error) {
         writer.stop();
+        if (queuedRunId) abandoned.add(queuedRunId);
         if (!accepted) gate?.failed(errMessage(error));
         console.error(`[discord] turn errored for ${key}: ${errMessage(error)}`);
         await writer
@@ -508,15 +641,13 @@ export function createDiscordBot(deps: {
       writer.stop();
       if (!accepted) accept();
       if (result.steered) return { result, accepted };
-      const extracted = extractReactions(
-        quiet && result.status !== "ok" ? "" : replyText(result, typing, body.conversation.kind === "dm"),
-      );
+      const extracted = extractReactions(quiet && result.status !== "ok" ? "" : replyText(result, typing, turn.dm));
       const reply = extracted.text.trim();
       const reactions = [
         ...(result.status === "react" ? (result.reactions ?? []) : []),
         ...extracted.reactions.filter((d) => !d.target && !d.targetId).flatMap((d) => d.names),
       ];
-      const trigger = triggerMessageId(body);
+      const trigger = triggerMessageId(turn.origin);
       if (reactions.length && trigger) await reactTo(channelId, trigger, reactions);
       const runId = queuedRunId;
       try {
@@ -566,8 +697,8 @@ export function createDiscordBot(deps: {
         });
     }
     if (!body.deliveryTarget) return { accepted: false };
-    return converse(body.deliveryTarget, body, { addressed: true, key, quiet: true });
+    return converse(body.deliveryTarget, submitted(body), { addressed: true, key, quiet: true });
   }
 
-  return { handleMessage, resumeTurn };
+  return { handleMessage, resumeTurn, watchRuns };
 }

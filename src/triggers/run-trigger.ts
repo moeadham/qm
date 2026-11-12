@@ -1,3 +1,4 @@
+import { KEYCHAIN_ASK_SURFACE } from "../core/turn-origin.ts";
 import type {
   DeliveryProvenance,
   Destination,
@@ -177,7 +178,7 @@ export async function destinationVisible(
   return true;
 }
 
-const SCHEDULED_SURFACES = new Set(["cron", "loop", "keychain-ask"]);
+const SCHEDULED_SURFACES = new Set(["cron", "loop", KEYCHAIN_ASK_SURFACE]);
 
 function homeRoster(
   kind: string | null,

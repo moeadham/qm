@@ -28,6 +28,7 @@ const GATEWAY_TRANSIENT_BACKOFF_MS = 60_000;
 const DELIVERY_SWEEP_MS = 60_000;
 const DELIVERY_FOLLOWER_RETRY_MS = 5_000;
 const ENVELOPE_REPLAY_SWEEP_MS = 60_000;
+const RUN_WATCH_SWEEP_MS = 5_000;
 
 function messageKey(body: Record<string, unknown>): string | null {
   const id = body.id;
@@ -85,6 +86,7 @@ export async function startDiscordPlugin(
 
   let stopped = false;
   let connected = false;
+  let gatewayLive = false;
   let fatalCloses = 0;
   let transientFailures = 0;
   let nextAttemptAt = 0;
@@ -105,7 +107,9 @@ export async function startDiscordPlugin(
       }
       fatalCloses = 0;
       transientFailures = 0;
+      gatewayLive = true;
       console.log(`[discord] gateway connected as ${self.username}`);
+      void watchRuns().catch(reportFailureAs("discord: run watch", undefined));
       await api.registerCommands(QM_COMMANDS).catch(swallowAs("discord: register commands", undefined));
       const outcome = await ended;
       if (outcome) {
@@ -113,6 +117,7 @@ export async function startDiscordPlugin(
         throw outcome;
       }
     } finally {
+      gatewayLive = false;
       await connection.close();
       console.log("[discord] gateway closed");
     }
@@ -169,10 +174,16 @@ export async function startDiscordPlugin(
         )
       : Promise.resolve();
 
+  const watchRuns = async (): Promise<void> => {
+    if (!gatewayLive) return;
+    bot.watchRuns(await core.watchableRuns());
+  };
+
   const sweepers = [
     createSweeper(holdGateway, GATEWAY_RETRY_MS, { label: "discord gateway", immediate: true }),
     createSweeper(kickDeliveries, DELIVERY_SWEEP_MS, { label: "discord deliveries", immediate: true }),
     createSweeper(replayEnvelopes, ENVELOPE_REPLAY_SWEEP_MS, { label: "discord envelope replay" }),
+    createSweeper(watchRuns, RUN_WATCH_SWEEP_MS, { label: "discord run watch" }),
   ];
   const unsubscribe = core.onDeliveryEnqueued(kickDeliveries);
   for (const sweeper of sweepers) sweeper.start();

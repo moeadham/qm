@@ -29,8 +29,12 @@ function webTranscriptNote(run: Run, surface: string, failed: boolean): Destinat
 
 export type AdminUrlFor = (sessionId: string) => string | undefined;
 
+export function deliversRunResult(run: Run): boolean {
+  return !isSubagentThreadRef(run.sessionId) && !run.request.swarm && !run.request.privateSessionMessage;
+}
+
 export function runResultDelivery(run: Run, adminUrlFor?: AdminUrlFor): RunResultDelivery | null {
-  if (isSubagentThreadRef(run.sessionId) || run.request.swarm || run.request.privateSessionMessage) return null;
+  if (!deliversRunResult(run)) return null;
   const target = run.request.deliveryTarget;
   const surface = run.request.surface;
   if (!target || !surface) return null;

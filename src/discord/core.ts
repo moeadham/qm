@@ -15,14 +15,23 @@ import {
 import { setSessionRuntime } from "../api/session-runtime.ts";
 import type { SessionStore } from "../sessions/session-store.ts";
 import type { RuntimeChoice } from "../harness/harness.ts";
-import type { Session, SessionRuntime } from "../types.ts";
+import type { Session, SessionRuntime, TurnOrigin } from "../types.ts";
+import { resolveTurnOrigin, resumesOwnersTask } from "../core/turn-origin.ts";
+import { deliversRunResult } from "../delivery/run-result-delivery.ts";
 import {
   createSurfaceCoreClient,
   type SurfaceCoreClient,
   type SurfaceCoreClientDeps,
 } from "../surfaces/surface-core-client.ts";
 
+const STATUS_ADOPT_WAIT_MS = 5_000;
+
+export type WatchableRun = { runId: string; threadRef: string; placeholder?: string } & (
+  { kind: "reply"; target: string; dm: boolean; origin: TurnOrigin } | { kind: "status" }
+);
+
 export interface DiscordCoreClient extends SurfaceCoreClient {
+  watchableRuns(): Promise<WatchableRun[]>;
   linkedPrincipal(discordId: string): Promise<string | undefined>;
   linkUrl(discordId: string): Promise<string | undefined>;
   allowLinkPrompt(discordId: string): Promise<boolean>;
@@ -94,6 +103,32 @@ export function createDiscordCoreClient(deps: DiscordCoreClientDeps): DiscordCor
   };
   return {
     ...createSurfaceCoreClient("discord", deps),
+    async watchableRuns() {
+      const watchable: WatchableRun[] = [];
+      for (const threadRef of await deps.runs.activeSessionIds()) {
+        if (!threadRef.startsWith("discord:")) continue;
+        const run = await deps.runs.activeForThread(threadRef);
+        if (!run || !deliversRunResult(run)) continue;
+        const placeholder = run.deliveryState?.editRef ? undefined : run.deliveryState?.replyRef;
+        if (!placeholder && Date.now() - run.createdAt < STATUS_ADOPT_WAIT_MS) continue;
+        const seen = { runId: run.id, threadRef, ...(placeholder ? { placeholder } : {}) };
+        if (resumesOwnersTask(run.request)) {
+          watchable.push({ ...seen, kind: "status" });
+          continue;
+        }
+        const origin = resolveTurnOrigin(run.request);
+        const target = run.request.deliveryTarget;
+        if (run.request.surface !== "discord" || !target || origin.kind === "ambient") continue;
+        watchable.push({
+          ...seen,
+          kind: "reply",
+          target,
+          dm: run.request.conversation.kind === "dm",
+          origin,
+        });
+      }
+      return watchable;
+    },
 
     modelMenu,
 
