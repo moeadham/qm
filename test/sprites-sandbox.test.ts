@@ -414,11 +414,68 @@ test("a refused restart with a healthy check restores nothing and surfaces the r
   assert.equal(await sandbox.readFile(h, ".ro-layers.manifest"), null);
 });
 
-test("a refused restart with no checkpoint to fall back on names all three failures", async () => {
+test("a refused restart on a faulted sprite with no checkpoint replaces the sandbox", async () => {
+  const events: Array<{ code: string; message: string }> = [];
+  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
+  const h = await s.provision(layers);
+  await s.writeFile(h, "keep.txt", "lost\n");
+  fake.refuseRestart(h.id);
+  fake.unhealthy(h.id, "boot loop");
+
+  await s.restartComputer!(scope);
+  const replaced = events.find((e) => e.code === "sandbox_replaced");
+  assert.match(replaced!.message, /http 502.*boot loop.*no checkpoint to restore/s);
+
+  const fresh = await s.provision(layers);
+  assert.equal((await s.run(fresh, "echo back")).stdout.trim(), "back");
+  assert.equal(await s.readFile(fresh, "keep.txt"), null);
+});
+
+test("a sprite that still needs repair after its checkpoint is restored is replaced", async () => {
+  const events: Array<{ code: string; message: string }> = [];
+  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
+  const h = await s.provision(layers);
+  await s.writeFile(h, "keep.txt", "before\n");
+  await s.teardown(h);
+  fake.refuseRestart(h.id);
+  fake.health(h.id, "needs_repair", "machine in suspended state");
+
+  await s.restartComputer!(scope);
+  assert.deepEqual(
+    events.map((e) => e.code),
+    ["sandbox_replaced"],
+  );
+  assert.match(
+    events[0]!.message,
+    /restored checkpoint v1 but check still reports needs_repair \(machine in suspended state\)/,
+  );
+  fake.health(h.id, "healthy", "");
+  const fresh = await s.provision(layers);
+  assert.equal(await s.readFile(fresh, "keep.txt"), null);
+});
+
+test("a sprite whose checkpoint restore fails is replaced", async () => {
+  const events: Array<{ code: string; message: string }> = [];
+  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
+  const h = await s.provision(layers);
+  await s.teardown(h);
+  fake.refuseRestart(h.id);
+  fake.unhealthy(h.id, "disk unreachable");
+  fake.failNext(500, { match: (c) => c.path.endsWith("/restore") });
+
+  await s.restartComputer!(scope);
+  assert.match(events.find((e) => e.code === "sandbox_replaced")!.message, /checkpoint restore failed/);
+});
+
+test("a refused restart whose replacement also fails names every failure", async () => {
   const h = await sandbox.provision(layers);
   fake.refuseRestart(h.id);
   fake.unhealthy(h.id, "boot loop");
-  await assert.rejects(sandbox.restartComputer!(scope), /http 502.*boot loop.*no checkpoint to restore/s);
+  for (let i = 0; i < 6; i++) fake.failNext(500, { match: (c) => c.method === "DELETE" });
+  await assert.rejects(
+    sandbox.restartComputer!(scope),
+    /http 502.*boot loop.*no checkpoint to restore.*replacing the sandbox failed/s,
+  );
 });
 
 for (const submitted of [false, true]) {
@@ -752,22 +809,20 @@ test("control retries share an elapsed-time budget across backoff and SDK reques
   assert.equal(calls, 2);
 });
 
-for (const outcome of ["healthy", "unknown", "needs_repair", "403", "503"]) {
+for (const outcome of ["healthy", "unknown", "403", "503"]) {
   test(`refused restart with ${outcome} health observation never rolls back newer files`, async () => {
     const h = await sandbox.provision(layers);
     await sandbox.writeFile(h, "ledger", "old");
     await sandbox.teardown(h);
     await sandbox.writeFile(h, "ledger", "new");
     fake.refuseRestart(h.id);
-    if (outcome === "healthy" || outcome === "unknown" || outcome === "needs_repair")
-      fake.health(h.id, outcome, "machine in suspended state");
+    if (outcome === "healthy" || outcome === "unknown") fake.health(h.id, outcome, "machine is running");
     else
       for (let i = 0; i < (outcome === "503" ? 4 : 1); i++)
         fake.failNext(Number(outcome), { headers: { "retry-after": "0" }, match: (c) => c.path.endsWith("/check") });
     await assert.rejects(sandbox.restartComputer!(scope), (error: Error) => {
       assert.match(error.message, /no checkpoint was restored/);
-      if (!/^\d+$/.test(outcome))
-        assert.ok(error.message.includes(`check reports ${outcome} (machine in suspended state)`));
+      if (!/^\d+$/.test(outcome)) assert.ok(error.message.includes(`check reports ${outcome} (machine is running)`));
       return true;
     });
     assert.equal(await sandbox.readFile(h, "ledger"), "new");

@@ -390,6 +390,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
       rmSync(home, { recursive: true, force: true });
       cpSync(cp.dir, home, { recursive: true });
       gateway502.delete(name);
+      unhealthy.delete(name);
       return ndjson([
         { type: "info", data: `restoring ${cp.id}` },
         { type: "complete", data: cp.id },

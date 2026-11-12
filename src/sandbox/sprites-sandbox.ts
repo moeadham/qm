@@ -100,6 +100,8 @@ export async function retrySpritesControl<T>(operation: () => Promise<T>, timeou
 
 const isMissing = (e: unknown): boolean => e instanceof APIError && e.statusCode === 404;
 
+const FAULTED_CHECK_STATUSES = new Set(["unhealthy", "needs_repair"]);
+const RESTORE_TIMEOUT_MS = 120_000;
 const describeCheck = (check: SpriteCheck): string => `${check.status}${check.reason ? ` (${check.reason})` : ""}`;
 
 export function processKeepaliveScript(processId: string): string {
@@ -674,30 +676,47 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
               { cause: e },
             );
           }
-          const fault = check.status === "unhealthy" ? `check reports ${describeCheck(check)}` : undefined;
+          const fault = FAULTED_CHECK_STATUSES.has(check.status) ? `check reports ${describeCheck(check)}` : undefined;
           if (fault === undefined) {
             throw new Error(
               `sprites restart ${name}: ${restartFailure}; check reports ${describeCheck(check)}, which does not authorize a rollback, so no checkpoint was restored`,
             );
           }
-          let restored: Checkpoint | undefined;
+          const scopeLabel = base.scopeFor(name) ?? scopeId;
+          const unrecovered = await withTimeout(
+            () => restoreLatestCheckpoint(name),
+            RESTORE_TIMEOUT_MS,
+            "restore",
+          ).then(
+            async (restored) => {
+              if (!restored) return "no checkpoint to restore";
+              const after = await retrySpritesControl(() => s.check()).catch(() => undefined);
+              if (after && FAULTED_CHECK_STATUSES.has(after.status))
+                return `restored checkpoint ${restored.id} but check still reports ${describeCheck(after)}`;
+              reportError(
+                "agent_computer",
+                "checkpoint_restored",
+                `sprite ${name}: restart failed (${restartFailure}); ${fault}; restored checkpoint ${restored.id} from ${restored.createTime.toISOString()}`,
+                scopeLabel,
+              );
+              return undefined;
+            },
+            (e) => `checkpoint restore failed: ${errMessage(e)}`,
+          );
+          if (unrecovered === undefined) return;
           try {
-            restored = await restoreLatestCheckpoint(name);
+            await deleteSprite(name);
           } catch (e) {
             throw new Error(
-              `sprites restart ${name}: ${restartFailure}; ${fault}; checkpoint restore failed: ${errMessage(e)}`,
-              {
-                cause: e,
-              },
+              `sprites restart ${name}: ${restartFailure}; ${fault}; ${unrecovered}; replacing the sandbox failed: ${errMessage(e)}`,
+              { cause: e },
             );
           }
-          if (!restored)
-            throw new Error(`sprites restart ${name}: ${restartFailure}; ${fault}; no checkpoint to restore`);
           reportError(
             "agent_computer",
-            "checkpoint_restored",
-            `sprite ${name}: restart failed (${restartFailure}); ${fault}; restored checkpoint ${restored.id} from ${restored.createTime.toISOString()}`,
-            base.scopeFor(name) ?? scopeId,
+            "sandbox_replaced",
+            `sprite ${name}: restart failed (${restartFailure}); ${fault}; ${unrecovered}; deleted it so the next use starts a fresh sandbox`,
+            scopeLabel,
           );
         }),
       );
