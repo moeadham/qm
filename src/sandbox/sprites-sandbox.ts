@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { setTimeout as wait } from "node:timers/promises";
 import type { Readable } from "node:stream";
@@ -100,9 +101,16 @@ export async function retrySpritesControl<T>(operation: () => Promise<T>, timeou
 
 const isMissing = (e: unknown): boolean => e instanceof APIError && e.statusCode === 404;
 
-const FAULTED_CHECK_STATUSES = new Set(["unhealthy", "needs_repair"]);
 const RESTORE_TIMEOUT_MS = 120_000;
-const RECHECK_ATTEMPTS = 3;
+const PROBE_TIMEOUT_SEC = 90;
+const RECOVERY_COOLDOWN_MS = 10 * 60_000;
+const notSubmitted = (e: unknown): boolean => errMessage(e).includes("script not submitted");
+
+type Recovery = {
+  code: "sandbox_rebooted" | "checkpoint_restored" | "sandbox_replaced";
+  notice: string;
+  detail: string;
+};
 const describeCheck = (check: SpriteCheck): string => `${check.status}${check.reason ? ` (${check.reason})` : ""}`;
 
 export function processKeepaliveScript(processId: string): string {
@@ -128,7 +136,6 @@ export interface SpritesSandboxOptions extends BlobStagingOptions {
   egressProxyAdditionalUrls?: string[];
   memoryMb?: number;
   checkpointIntervalMs?: number;
-  recheckIntervalMs?: number;
   snapshots?: HomeSnapshotStore;
   initializationStore?: DurableMap<{ pending: boolean }>;
   advisoryLock?: AdvisoryLock;
@@ -152,15 +159,15 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
   const prefix = opts.namePrefix ?? "qm";
   const initializationStore = opts.initializationStore ?? createMemoryMap<{ pending: boolean }>();
   const advisoryLock = opts.advisoryLock ?? createMemoryAdvisoryLock();
+  const inLifecycle = new AsyncLocalStorage<true>();
   const withLifecycle = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
-    advisoryLock.withLock(`sprites-lifecycle:${name}`, fn);
+    advisoryLock.withLock(`sprites-lifecycle:${name}`, () => inLifecycle.run(true, fn));
   const requireInitialized = async (name: string): Promise<void> => {
     if ((await initializationStore.get(name))?.pending)
       throw new Error(`sprites ${name}: initialization is incomplete; refusing to capture or restore a checkpoint`);
   };
   const defaultTimeoutSec = opts.defaultTimeoutSec ?? 600;
   const checkpointIntervalMs = opts.checkpointIntervalMs ?? CHECKPOINT_INTERVAL_MS;
-  const recheckIntervalMs = opts.recheckIntervalMs ?? 10_000;
 
   const ensured = new Set<string>();
   const resourcesApplied = new Set<string>();
@@ -420,18 +427,119 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
     return latest;
   }
 
-  async function recheck(name: string): Promise<{ faulted?: SpriteCheck; checkFailed?: string }> {
-    let last: SpriteCheck | undefined;
-    for (let attempt = 0; attempt < RECHECK_ATTEMPTS; attempt++) {
-      if (attempt > 0) await wait(recheckIntervalMs);
-      try {
-        last = await retrySpritesControl(() => sprite(name).check());
-      } catch (e) {
-        return { checkFailed: spritesErrorDetail(e) };
-      }
-      if (!FAULTED_CHECK_STATUSES.has(last.status)) return {};
+  async function probe(name: string): Promise<string | undefined> {
+    try {
+      const r = await execRaw(name, "true", PROBE_TIMEOUT_SEC);
+      return r.code === 0 ? undefined : `a test command exited ${r.code}`;
+    } catch (e) {
+      return errMessage(e);
     }
-    return { faulted: last };
+  }
+
+  async function recoverSprite(
+    name: string,
+    scope: string | undefined,
+    requested: boolean,
+  ): Promise<Recovery | undefined> {
+    await requireInitialized(name);
+    forget(name);
+    const steps: string[] = [];
+    if (!requested) {
+      const failure = await probe(name);
+      if (!failure) return undefined;
+      steps.push(`commands failed (${failure})`);
+    }
+    const restartFailure = await sprite(name)
+      .restart()
+      .then(
+        () => undefined,
+        (e) => spritesErrorDetail(e),
+      );
+    const afterRestart = await probe(name);
+    if (!afterRestart)
+      return {
+        code: "sandbox_rebooted",
+        notice: "rebooted it; its files are intact, but background processes were stopped",
+        detail: [...steps, restartFailure ? `restart reported ${restartFailure} but it recovered` : "rebooted"].join(
+          "; ",
+        ),
+      };
+    steps.push(
+      restartFailure ? `restart failed (${restartFailure})` : `still failing after a reboot (${afterRestart})`,
+    );
+    const restored = await withTimeout(() => restoreLatestCheckpoint(name), RESTORE_TIMEOUT_MS, "restore").then(
+      async (checkpoint) => {
+        if (!checkpoint) return "no checkpoint to restore";
+        const afterRestore = await probe(name);
+        return afterRestore
+          ? `still failing after restoring checkpoint ${checkpoint.id} (${afterRestore})`
+          : checkpoint;
+      },
+      (e) => `checkpoint restore failed (${errMessage(e)})`,
+    );
+    if (typeof restored !== "string")
+      return {
+        code: "checkpoint_restored",
+        notice: `rolled it back to its checkpoint from ${restored.createTime.toISOString()}; changes made after that were lost`,
+        detail: [...steps, `restored checkpoint ${restored.id}`].join("; "),
+      };
+    steps.push(restored);
+    try {
+      await deleteSprite(name);
+      await initializeSprite(name, scope, false);
+    } catch (e) {
+      throw new Error(`sprites recovery ${name}: ${steps.join("; ")}; replacing the sandbox failed: ${errMessage(e)}`, {
+        cause: e,
+      });
+    }
+    const afterReplace = await probe(name);
+    if (afterReplace)
+      throw new Error(
+        `sprites recovery ${name}: ${steps.join("; ")}; the replacement does not answer either (${afterReplace})`,
+      );
+    return {
+      code: "sandbox_replaced",
+      notice:
+        "replaced it with a fresh computer; its files were lost, so reinstall tools and re-clone repositories as needed",
+      detail: [...steps, "replaced with a fresh sandbox"].join("; "),
+    };
+  }
+
+  function runRecovery(
+    name: string,
+    scopeLabel: string | undefined,
+    requested: boolean,
+  ): Promise<Recovery | undefined> {
+    return base.provisionQueue(`restart:${name}`, () =>
+      withLifecycle(name, async () => {
+        const recovery = await recoverSprite(name, base.scopeFor(name), requested);
+        if (recovery && (!requested || recovery.code !== "sandbox_rebooted"))
+          reportError("agent_computer", recovery.code, `sprite ${name}: ${recovery.detail}`, scopeLabel);
+        return recovery;
+      }),
+    );
+  }
+
+  const recoveries = new Map<string, { at: number; finished: boolean; done: Promise<Recovery | undefined> }>();
+
+  async function execRecovering(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
+    try {
+      return await execRaw(name, script, timeoutSec);
+    } catch (e) {
+      if (!notSubmitted(e) || inLifecycle.getStore()) throw e;
+      let recovery = recoveries.get(name);
+      if (!recovery || Date.now() - recovery.at >= RECOVERY_COOLDOWN_MS) {
+        const started = { at: Date.now(), finished: false, done: runRecovery(name, base.scopeFor(name), false) };
+        void started.done.finally(() => (started.finished = true)).catch(() => undefined);
+        recoveries.set(name, started);
+        recovery = started;
+      } else if (recovery.finished) throw e;
+      const recovered = await recovery.done;
+      const r = await execRaw(name, script, timeoutSec);
+      return recovered
+        ? { ...r, stderr: `[QM: this computer stopped responding, so QM ${recovered.notice}.]\n${r.stderr}` }
+        : r;
+    }
   }
 
   async function bindSprite(name: string): Promise<void> {
@@ -501,7 +609,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
     egressProxyUrl: opts.egressProxyUrl,
     deleteFailureCode: "sprite_delete_failed",
     onError: opts.onError,
-    exec: execRaw,
+    exec: execRecovering,
     writeAbsBytes,
     readAbsBytes,
     ensureResident(name, onStatus) {
@@ -684,73 +792,10 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
       };
     },
 
-    restartComputer(scopeId: string): Promise<void> {
+    async restartComputer(scopeId: string): Promise<string | undefined> {
       const name = sandboxScopeName(prefix, scopeId);
-      return base.provisionQueue(`restart:${name}`, () =>
-        withLifecycle(name, async () => {
-          await requireInitialized(name);
-          forget(name);
-          const s = sprite(name);
-          const restartFailure = await s.restart().then(
-            () => undefined,
-            (e) => spritesErrorDetail(e),
-          );
-          if (restartFailure === undefined) return;
-          let check: SpriteCheck;
-          try {
-            check = await retrySpritesControl(() => s.check());
-          } catch (e) {
-            throw new Error(
-              `sprites restart ${name}: ${restartFailure}; check failed: ${spritesErrorDetail(e)}; no checkpoint was restored`,
-              { cause: e },
-            );
-          }
-          const fault = FAULTED_CHECK_STATUSES.has(check.status) ? `check reports ${describeCheck(check)}` : undefined;
-          if (fault === undefined) {
-            throw new Error(
-              `sprites restart ${name}: ${restartFailure}; check reports ${describeCheck(check)}, which does not authorize a rollback, so no checkpoint was restored`,
-            );
-          }
-          const scope = base.scopeFor(name);
-          const scopeLabel = scope ?? scopeId;
-          const unrecovered = await withTimeout(
-            () => restoreLatestCheckpoint(name),
-            RESTORE_TIMEOUT_MS,
-            "restore",
-          ).then(
-            async (restored) => {
-              if (!restored) return "no checkpoint to restore";
-              const { faulted, checkFailed } = await recheck(name);
-              if (faulted)
-                return `restored checkpoint ${restored.id} but check still reports ${describeCheck(faulted)}`;
-              reportError(
-                "agent_computer",
-                "checkpoint_restored",
-                `sprite ${name}: restart failed (${restartFailure}); ${fault}; restored checkpoint ${restored.id} from ${restored.createTime.toISOString()}${checkFailed ? `; the health check after the restore failed: ${checkFailed}` : ""}`,
-                scopeLabel,
-              );
-              return undefined;
-            },
-            (e) => `checkpoint restore failed: ${errMessage(e)}`,
-          );
-          if (unrecovered === undefined) return;
-          try {
-            await deleteSprite(name);
-            await initializeSprite(name, scope, false);
-          } catch (e) {
-            throw new Error(
-              `sprites restart ${name}: ${restartFailure}; ${fault}; ${unrecovered}; replacing the sandbox failed: ${errMessage(e)}`,
-              { cause: e },
-            );
-          }
-          reportError(
-            "agent_computer",
-            "sandbox_replaced",
-            `sprite ${name}: restart failed (${restartFailure}); ${fault}; ${unrecovered}; replaced it with a fresh sandbox`,
-            scopeLabel,
-          );
-        }),
-      );
+      const recovery = await runRecovery(name, base.scopeFor(name) ?? scopeId, true);
+      return recovery && `QM ${recovery.notice}.`;
     },
 
     async teardown(handle: SandboxHandle, tdOpts?: TeardownOptions): Promise<void> {

@@ -41,6 +41,7 @@ export interface FakeSprites {
   execScripts(): string[];
   stallAfterRun(name: string): void;
   fail502(name: string): void;
+  wedge(name: string): void;
   failNext(status: number, opts?: InjectedFailure): void;
   refuseRestart(name: string): void;
   unhealthy(name: string, reason: string): void;
@@ -172,6 +173,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
   const execScripts: string[] = [];
   const calls: SpritesCall[] = [];
   const gateway502 = new Set<string>();
+  const wedged = new Set<string>();
   const stallAfterRun = new Set<string>();
   const refusedRestart = new Set<string>();
   const unhealthy = new Map<string, string>();
@@ -259,6 +261,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     if (s) rmSync(s.home, { recursive: true, force: true });
     for (const cp of checkpoints.get(name) ?? []) rmSync(cp.dir, { recursive: true, force: true });
     sprites.delete(name);
+    wedged.delete(name);
     policies.delete(name);
     resources.delete(name);
     checkpoints.delete(name);
@@ -431,7 +434,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     calls.push({ method: "WS", path: url.pathname });
     const call = calls[calls.length - 1]!;
     return {
-      refused: !sprites.has(name) || gateway502.has(name),
+      refused: !sprites.has(name) || gateway502.has(name) || wedged.has(name),
       run: (stdin) => {
         const frames = runExec(name, argv, stdin);
         call.script = execScripts[execScripts.length - 1];
@@ -457,6 +460,9 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     },
     fail502: (name) => {
       gateway502.add(name);
+    },
+    wedge: (name) => {
+      wedged.add(name);
     },
     failNext: (status, opts = {}) => {
       injected.push({ status, ...opts });
@@ -497,6 +503,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
       calls.length = 0;
       stallAfterRun.clear();
       gateway502.clear();
+      wedged.clear();
       refusedRestart.clear();
       unhealthy.clear();
       health.clear();

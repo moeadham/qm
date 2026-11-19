@@ -683,7 +683,7 @@ for (const [kind, waiting] of [
     backend.restartComputer = async () => {
       restarted = true;
     };
-    let restarting: Promise<void> | undefined;
+    let restarting: Promise<string | void> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await entered.promise;

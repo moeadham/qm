@@ -216,7 +216,7 @@ export interface ToolContext extends SurfaceToolDeps {
     input?: { backend?: string; name?: string; sandboxId?: string | null },
   ): Promise<unknown>;
   computerStatus(sandboxId?: string): Promise<ComputerStatus>;
-  restartComputer(sandboxId?: string): Promise<void>;
+  restartComputer(sandboxId?: string): Promise<string | void>;
   read(path: string, signal?: AbortSignal, sandboxId?: string): Promise<ReadResult>;
   listSkills(
     query?: string,
@@ -825,21 +825,22 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       if (!writableScopeId) throw new Error("this turn has no scoped computer");
       return probe(await deps.sandbox.computerStatus(writableScopeId), deps.provision);
     },
-    async restartComputer(sandboxId?: string): Promise<void> {
+    async restartComputer(sandboxId?: string): Promise<string | void> {
       if (sandboxId !== undefined) {
         const resources = deps.sandboxResources;
         if (!resources) throw new Error("sandbox inventory unavailable");
         const { resource } = await accessSandbox(sandboxId);
-        await resources.restart(deps.createdBy, sandboxId);
+        const note = await resources.restart(deps.createdBy, sandboxId);
         deps.invalidateProvision?.(resource.id);
-        return;
+        return note;
       }
       if (!deps.sandbox.restartComputer) {
         throw new CapabilityUnsupportedError(deps.sandbox.profile.backend, "restarting the computer");
       }
       if (!writableScopeId) throw new Error("this turn has no scoped computer to restart");
-      await deps.sandbox.restartComputer(writableScopeId);
+      const note = await deps.sandbox.restartComputer(writableScopeId);
       deps.invalidateProvision?.();
+      return note;
     },
     async execute(
       command: string,

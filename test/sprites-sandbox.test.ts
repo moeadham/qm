@@ -36,7 +36,6 @@ function make(extra: Record<string, unknown> = {}): Sandbox {
     token: FAKE_SPRITES_TOKEN,
     namePrefix: "qmt",
     baseUrl: fake.baseUrl,
-    recheckIntervalMs: 1,
     ...extra,
   });
 }
@@ -374,86 +373,126 @@ test("computerStatus names a faulted check and an unprovisioned scope", async ()
   assert.equal(s.provisioned, true);
 });
 
-test("restartComputer reboots the scope's sprite and heals a wedged exec channel", async () => {
-  const h = await sandbox.provision(layers);
+type Recorded = { code: string; message: string };
+const recording = (extra: Record<string, unknown> = {}) => {
+  const events: Recorded[] = [];
+  return { events, s: make({ onError: (e: Recorded) => events.push(e), ...extra }) };
+};
+
+test("a command that never reached a stuck sandbox reboots it, runs once, and tells the agent", async () => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
   fake.fail502(h.id);
-  await assert.rejects(sandbox.run(h, "echo back"), /WebSocket error/);
 
-  await sandbox.restartComputer!(scope);
+  const r = await s.run(h, "echo entry >> /home/sprite/workspace/ledger; echo done");
+  assert.equal(r.stdout.trim(), "done");
+  assert.match(r.stderr, /^\[QM: this computer stopped responding, so QM rebooted it; its files are intact/);
+  assert.equal(await s.readFile(h, "ledger"), "entry\n");
   assert.deepEqual(fake.restarts(), [h.id]);
-
-  const after = await sandbox.run(h, "echo back");
-  assert.equal(after.code, 0);
-  assert.equal(after.stdout.trim(), "back");
+  assert.deepEqual(
+    events.map((e) => e.code),
+    ["sandbox_rebooted"],
+  );
 });
 
-test("a refused restart on a faulted sprite restores the latest checkpoint", async () => {
-  const events: Array<{ code: string; message: string }> = [];
-  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
+test("a one-off transport failure is retried without touching the sandbox", async (t) => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  const start = SpriteCommand.prototype.start;
+  let failures = 1;
+  t.mock.method(SpriteCommand.prototype, "start", async function (this: SpriteCommand) {
+    if (failures-- > 0) throw new Error("WebSocket error: TypeError");
+    return start.call(this);
+  });
+
+  const r = await s.run(h, "echo back");
+  assert.equal(r.stdout.trim(), "back");
+  assert.equal(r.stderr, "");
+  assert.deepEqual(fake.restarts(), []);
+  assert.deepEqual(events, []);
+});
+
+test("a sandbox still stuck after a reboot is rolled back to its checkpoint", async () => {
+  const { events, s } = recording();
   const h = await s.provision(layers);
   await s.writeFile(h, "keep.txt", "before\n");
   await s.teardown(h);
   await s.writeFile(h, "keep.txt", "after\n");
   fake.refuseRestart(h.id);
-  fake.unhealthy(h.id, "machine unreachable");
   fake.fail502(h.id);
 
-  await s.restartComputer!(scope);
-  assert.deepEqual(fake.restarts(), []);
-  assert.equal(await s.readFile(h, "keep.txt"), "before\n", "the home is back at the checkpoint");
-  const restored = events.find((e) => e.code === "checkpoint_restored");
-  assert.ok(restored, "the destructive recovery is reported");
-  assert.match(restored!.message, /http 502/);
-  assert.match(restored!.message, /machine unreachable/);
-  assert.match(restored!.message, /restored checkpoint v1/);
+  const r = await s.run(h, "cat keep.txt");
+  assert.equal(r.stdout, "before\n");
+  assert.match(r.stderr, /rolled it back to its checkpoint from .*; changes made after that were lost/);
+  assert.deepEqual(
+    events.map((e) => e.code),
+    ["checkpoint_restored"],
+  );
+  assert.match(events[0]!.message, /http 502.*restored checkpoint v1/s);
 });
 
-test("a refused restart with a healthy check restores nothing and surfaces the refusal", async () => {
-  const h = await sandbox.provision(layers);
-  await sandbox.teardown(h);
-  fake.refuseRestart(h.id);
-  await assert.rejects(sandbox.restartComputer!(scope), /http 502.*does not authorize a rollback/s);
-  assert.equal(await sandbox.readFile(h, ".ro-layers.manifest"), null);
-});
+for (const checkpointed of [false, true]) {
+  test(`a wedged sandbox is replaced with a fresh one when ${checkpointed ? "its checkpoint does not help" : "it has no checkpoint"}`, async () => {
+    const { events, s } = recording();
+    const h = await s.provision(layers);
+    await s.writeFile(h, "keep.txt", "lost\n");
+    if (checkpointed) await s.teardown(h);
+    fake.wedge(h.id);
 
-test("a refused restart on a faulted sprite with no checkpoint replaces the sandbox", async () => {
-  const events: Array<{ code: string; message: string }> = [];
-  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
+    const r = await s.run(h, "test -e keep.txt || echo fresh");
+    assert.equal(r.stdout.trim(), "fresh");
+    assert.match(r.stderr, /replaced it with a fresh computer; its files were lost/);
+    assert.deepEqual(
+      events.map((e) => e.code),
+      ["sandbox_replaced"],
+    );
+    assert.match(
+      events[0]!.message,
+      checkpointed ? /still failing after restoring checkpoint v1/ : /no checkpoint to restore/,
+    );
+  });
+}
+
+test("a sandbox that fails again soon after a recovery is not recovered in a loop", async () => {
+  const s = make();
   const h = await s.provision(layers);
-  await s.writeFile(h, "keep.txt", "lost\n");
-  fake.refuseRestart(h.id);
-  fake.unhealthy(h.id, "boot loop");
-
-  await s.restartComputer!(scope);
-  const replaced = events.find((e) => e.code === "sandbox_replaced");
-  assert.match(replaced!.message, /http 502.*boot loop.*no checkpoint to restore/s);
-
-  const fresh = await s.provision(layers);
-  assert.equal((await s.run(fresh, "echo back")).stdout.trim(), "back");
-  assert.equal(await s.readFile(fresh, "keep.txt"), null);
+  fake.fail502(h.id);
+  await s.run(h, "echo first");
+  fake.fail502(h.id);
+  await assert.rejects(s.run(h, "echo second"), /script not submitted/);
+  assert.deepEqual(fake.restarts(), [h.id]);
 });
 
-test("a sprite that still needs repair after its checkpoint is restored is replaced", async () => {
-  const events: Array<{ code: string; message: string }> = [];
-  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
+test("concurrent commands that hit a stuck sandbox share one recovery", async () => {
+  const s = make();
   const h = await s.provision(layers);
-  await s.writeFile(h, "keep.txt", "before\n");
-  await s.teardown(h);
-  fake.refuseRestart(h.id);
-  fake.health(h.id, "needs_repair", "machine in suspended state");
+  fake.fail502(h.id);
+  const [a, b] = await Promise.all([s.run(h, "echo a"), s.run(h, "echo b")]);
+  assert.deepEqual([a.stdout.trim(), b.stdout.trim()], ["a", "b"]);
+  assert.deepEqual(fake.restarts(), [h.id]);
+});
 
-  await s.restartComputer!(scope);
+test("a requested restart reboots the sprite and says so without recording a fault", async () => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  const note = await s.restartComputer!(scope);
+  assert.match(note ?? "", /^QM rebooted it; its files are intact/);
+  assert.deepEqual(fake.restarts(), [h.id]);
+  assert.deepEqual(events, []);
+  assert.equal((await s.run(h, "echo back")).stdout.trim(), "back");
+});
+
+test("a requested restart that cannot bring a wedged sandbox back replaces it", async () => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  fake.wedge(h.id);
+  const note = await s.restartComputer!(scope);
+  assert.match(note ?? "", /replaced it with a fresh computer/);
   assert.deepEqual(
     events.map((e) => e.code),
     ["sandbox_replaced"],
   );
-  assert.match(
-    events[0]!.message,
-    /restored checkpoint v1 but check still reports needs_repair \(machine in suspended state\)/,
-  );
-  fake.health(h.id, "healthy", "");
-  const fresh = await s.provision(layers);
-  assert.equal(await s.readFile(fresh, "keep.txt"), null);
+  assert.equal((await s.run(h, "echo back")).stdout.trim(), "back");
 });
 
 test("a replaced sprite comes back live and egress-bound for another core that already used it", async () => {
@@ -467,8 +506,7 @@ test("a replaced sprite comes back live and egress-bound for another core that a
   const egressToken = await proxyToken();
   const before = await coreB.provision(layers, { egressToken });
   await coreB.teardown(before);
-  fake.refuseRestart(before.id);
-  fake.health(before.id, "needs_repair", "machine in suspended state");
+  fake.wedge(before.id);
 
   await coreA.restartComputer!(scope);
   assert.deepEqual(fake.policy(before.id), [{ domain: "proxy.example.com", action: "allow" }]);
@@ -496,76 +534,36 @@ test("a sprite left pending without its egress policy is bound before another co
   assert.deepEqual(fake.policy(before.id), [{ domain: "proxy.example.com", action: "allow" }]);
 });
 
-test("a restored sprite whose health recheck fails is kept and the failed recheck is reported", async () => {
-  const events: Array<{ code: string; message: string }> = [];
-  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
-  const h = await s.provision(layers);
-  await s.teardown(h);
-  fake.refuseRestart(h.id);
-  fake.unhealthy(h.id, "disk unreachable");
-  const restored = () => fake.calls.some((c) => c.path.endsWith("/restore"));
-  for (let i = 0; i < 8; i++) fake.failNext(403, { match: (c) => c.path.endsWith("/check") && restored() });
-
-  await s.restartComputer!(scope);
-  assert.deepEqual(
-    events.map((e) => e.code),
-    ["checkpoint_restored"],
-  );
-  assert.match(events[0]!.message, /health check after the restore failed/);
-});
-
-test("a sprite whose checkpoint restore fails is replaced", async () => {
-  const events: Array<{ code: string; message: string }> = [];
-  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
-  const h = await s.provision(layers);
-  await s.teardown(h);
-  fake.refuseRestart(h.id);
-  fake.unhealthy(h.id, "disk unreachable");
-  fake.failNext(500, { match: (c) => c.path.endsWith("/restore") });
-
-  await s.restartComputer!(scope);
-  assert.match(events.find((e) => e.code === "sandbox_replaced")!.message, /checkpoint restore failed/);
-});
-
-test("a refused restart whose replacement also fails names every failure", async () => {
+test("a recovery whose replacement also fails names every step", async () => {
   const h = await sandbox.provision(layers);
-  fake.refuseRestart(h.id);
-  fake.unhealthy(h.id, "boot loop");
+  fake.wedge(h.id);
   for (let i = 0; i < 6; i++) fake.failNext(500, { match: (c) => c.method === "DELETE" });
   await assert.rejects(
-    sandbox.restartComputer!(scope),
-    /http 502.*boot loop.*no checkpoint to restore.*replacing the sandbox failed/s,
+    sandbox.run(h, "echo ignored"),
+    /commands failed.*script not submitted.*no checkpoint to restore.*replacing the sandbox failed/s,
   );
 });
 
-for (const submitted of [false, true]) {
-  for (const closeOnly of [false, true]) {
-    test(`exec failures report submission state without replay or private details (submitted=${submitted}, closeOnly=${closeOnly})`, async (t) => {
-      const h = await sandbox.provision(layers);
-      if (closeOnly) {
-        const dispatch = EventTarget.prototype.dispatchEvent;
-        t.mock.method(EventTarget.prototype, "dispatchEvent", function (this: EventTarget, event: Event) {
-          return event.type === "error" || dispatch.call(this, event);
-        });
-      }
-      const before = fake.calls.filter((call) => call.method === "WS").length;
-      if (submitted) fake.stallAfterRun(h.id);
-      else fake.fail502(h.id);
-
-      await assert.rejects(sandbox.run(h, "echo entry >> /home/sprite/workspace/ledger"), (error: Error) => {
-        assert.match(
-          error.message,
-          submitted ? /script submission started; execution unknown/ : /script not submitted/,
-        );
-        for (const value of [h.id, fake.baseUrl.replace("https:", "wss:"), "cmd=", "echo entry"])
-          assert.ok(!inspect(error).includes(value));
-        return true;
+for (const closeOnly of [false, true]) {
+  test(`a command that may have reached the sandbox is reported, never retried (closeOnly=${closeOnly})`, async (t) => {
+    const h = await sandbox.provision(layers);
+    if (closeOnly) {
+      const dispatch = EventTarget.prototype.dispatchEvent;
+      t.mock.method(EventTarget.prototype, "dispatchEvent", function (this: EventTarget, event: Event) {
+        return event.type === "error" || dispatch.call(this, event);
       });
-
-      assert.equal(fake.calls.filter((call) => call.method === "WS").length, before + 1);
-      assert.equal(await sandbox.readFile(h, "ledger"), submitted ? "entry\n" : null);
+    }
+    const before = fake.calls.filter((call) => call.method === "WS").length;
+    fake.stallAfterRun(h.id);
+    await assert.rejects(sandbox.run(h, "echo entry >> /home/sprite/workspace/ledger"), (error: Error) => {
+      assert.match(error.message, /script submission started; execution unknown/);
+      for (const value of [h.id, fake.baseUrl.replace("https:", "wss:"), "cmd=", "echo entry"])
+        assert.ok(!inspect(error).includes(value));
+      return true;
     });
-  }
+    assert.equal(fake.calls.filter((call) => call.method === "WS").length, before + 1);
+    assert.equal(await sandbox.readFile(h, "ledger"), "entry\n");
+  });
 }
 
 test("exec diagnostics retain known transport reasons without raw error causes", async (t) => {
@@ -579,7 +577,7 @@ test("exec diagnostics retain known transport reasons without raw error causes",
   for (reason of ["TypeError", "unclassified provider failure"]) {
     await assert.rejects(sandbox.run(h, "echo ignored"), (error: Error) => {
       assert.match(error.message, /script not submitted/);
-      assert.ok(error.message.endsWith(reason === "TypeError" ? "TypeError" : "unknown transport error"));
+      assert.ok(error.message.includes(reason === "TypeError" ? "TypeError" : "unknown transport error"));
       assert.doesNotMatch(inspect(error), /example-secret|example\.invalid|token=/);
       return true;
     });
@@ -868,27 +866,6 @@ test("control retries share an elapsed-time budget across backoff and SDK reques
   );
   assert.equal(calls, 2);
 });
-
-for (const outcome of ["healthy", "unknown", "403", "503"]) {
-  test(`refused restart with ${outcome} health observation never rolls back newer files`, async () => {
-    const h = await sandbox.provision(layers);
-    await sandbox.writeFile(h, "ledger", "old");
-    await sandbox.teardown(h);
-    await sandbox.writeFile(h, "ledger", "new");
-    fake.refuseRestart(h.id);
-    if (outcome === "healthy" || outcome === "unknown") fake.health(h.id, outcome, "machine is running");
-    else
-      for (let i = 0; i < (outcome === "503" ? 4 : 1); i++)
-        fake.failNext(Number(outcome), { headers: { "retry-after": "0" }, match: (c) => c.path.endsWith("/check") });
-    await assert.rejects(sandbox.restartComputer!(scope), (error: Error) => {
-      assert.match(error.message, /no checkpoint was restored/);
-      if (!/^\d+$/.test(outcome)) assert.ok(error.message.includes(`check reports ${outcome} (machine is running)`));
-      return true;
-    });
-    assert.equal(await sandbox.readFile(h, "ledger"), "new");
-    assert.equal(fake.calls.filter((c) => c.path.endsWith("/restore")).length, 0);
-  });
-}
 
 test("failed hydration and failed deletion remain pending across adapters without overwriting the saved home", async () => {
   const snapshots = createMemorySnapshotStore();

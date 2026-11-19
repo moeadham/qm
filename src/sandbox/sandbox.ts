@@ -244,7 +244,7 @@ export interface Sandbox {
   listProcesses?(handle: SandboxHandle): Promise<ProcessSession[]>;
   persistHomeSnapshot?(scopeId: string): Promise<void>;
   computerStatus?(scopeId: string): Promise<ComputerStatus>;
-  restartComputer?(scopeId: string): Promise<void>;
+  restartComputer?(scopeId: string): Promise<string | void>;
   teardown(handle: SandboxHandle, opts?: TeardownOptions): Promise<void>;
   destroyScope?(scopeId: string): Promise<void>;
   reapDeepIdle?(idleMs: number, devIdleMs?: number): Promise<{ reaped: number }>;
