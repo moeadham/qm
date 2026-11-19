@@ -526,7 +526,7 @@ test("another turn's handle to a replaced sandbox fails as reset instead of runn
   fake.wedge(turnA.id);
   await assert.rejects(s.run(turnA, "echo a"), SandboxRecoveredError);
 
-  await assert.rejects(s.run(turnB, "echo b > here"), (e: Error) => {
+  await assert.rejects(s.run(turnB, "echo b"), (e: Error) => {
     assert.ok(e instanceof SandboxRecoveredError);
     assert.match(e.message, /reset since this turn set it up/);
     return true;
