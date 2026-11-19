@@ -104,6 +104,7 @@ const isMissing = (e: unknown): boolean => e instanceof APIError && e.statusCode
 const RESTORE_TIMEOUT_MS = 120_000;
 const PROBE_TIMEOUT_SEC = 30;
 const PROBE_WINDOW_MS = 45_000;
+const RECOVERY_COOLDOWN_MS = 10 * 60_000;
 class SpritesExecTransportError extends Error {
   readonly submitted: boolean;
   readonly reason: string;
@@ -546,14 +547,21 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
     );
   }
 
+  const lastRecovery = new Map<string, number>();
+
   async function execRecovering(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
     try {
       return await execRaw(name, script, timeoutSec);
     } catch (e) {
       const scope = base.scopeFor(name);
       if (!wedged(e) || !scope || inLifecycle.getStore()) throw e;
-      const recovery = await runRecovery(name, scope, false);
+      if (Date.now() - (lastRecovery.get(name) ?? 0) < RECOVERY_COOLDOWN_MS) throw e;
+      const recovery = await runRecovery(name, scope, false).catch((failure: unknown) => {
+        lastRecovery.set(name, Date.now());
+        throw failure;
+      });
       if (!recovery) throw e;
+      if (recovery.code !== "sandbox_answering") lastRecovery.set(name, Date.now());
       if (recovery.code === "sandbox_answering") return execRaw(name, script, timeoutSec);
       throw new SandboxRecoveredError(
         `QM: this computer stopped responding, so QM ${recovery.notice}. Nothing from the failed command ran; run it again.`,

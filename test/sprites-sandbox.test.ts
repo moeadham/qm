@@ -476,6 +476,16 @@ for (const checkpointed of [false, true]) {
   });
 }
 
+test("a sandbox that sticks again soon after a recovery is not recovered in a loop", async () => {
+  const s = make();
+  const h = await s.provision(layers);
+  fake.wedge(h.id, "restart");
+  await assert.rejects(s.run(h, "echo first"), /rebooted it/);
+  fake.wedge(h.id, "restart");
+  await assert.rejects(s.run(h, "echo second"), /\(script not submitted\): TypeError$/);
+  assert.deepEqual(fake.restarts(), [h.id]);
+});
+
 test("concurrent commands that hit a stuck sandbox reboot it once", async () => {
   const s = make();
   const h = await s.provision(layers);
