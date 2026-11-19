@@ -501,7 +501,7 @@ export interface ToolContextDeps {
   grantedHandles: GrantedHandle[];
   context?: TurnContext;
   sandboxResources?: SandboxResources;
-  invalidateProvision?: (resourceId?: string) => void;
+  invalidateProvision?: (stale?: { id?: string; resourceId?: string }) => void;
   workspace: WorkspaceStore;
   deploy: DeployService;
   acl: AclStore;
@@ -836,7 +836,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
         if (!resources) throw new Error("sandbox inventory unavailable");
         const { resource } = await accessSandbox(sandboxId);
         const note = await resources.restart(deps.createdBy, sandboxId);
-        deps.invalidateProvision?.(resource.id);
+        deps.invalidateProvision?.({ resourceId: resource.id });
         return note;
       }
       if (!deps.sandbox.restartComputer) {
@@ -948,7 +948,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
                 const result = await deps.sandbox.run(commandHandle, sandboxCommand, opts);
                 return { ...result, stdout: mask(result.stdout), stderr: mask(result.stderr) };
               } catch (error) {
-                if (error instanceof SandboxRecoveredError) deps.invalidateProvision?.(commandHandle.resourceId);
+                if (error instanceof SandboxRecoveredError) deps.invalidateProvision?.(commandHandle);
                 const message = errMessage(error);
                 const masked = mask(message);
                 if (masked !== message) throw new MaskedExecutionError(error, mask, masked);

@@ -435,7 +435,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
     for (;;) {
       let failure: string;
       try {
-        const r = await execRaw(name, "true", PROBE_TIMEOUT_SEC);
+        const r = await withTimeout(() => execRaw(name, "true", PROBE_TIMEOUT_SEC), PROBE_TIMEOUT_SEC * 1000, "probe");
         if (r.code === 0) return undefined;
         failure = `a test command exited ${r.code}`;
       } catch (e) {
@@ -447,7 +447,8 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
   }
 
   async function recoverSprite(name: string, scope: string, requested: boolean): Promise<Recovery | undefined> {
-    await requireInitialized(name);
+    if (requested) await requireInitialized(name);
+    else if ((await initializationStore.get(name))?.pending) return undefined;
     if (!(await spriteExists(name))) {
       if (requested) throw new Error(`sprites restart ${name}: no sandbox exists yet; one is created on next use`);
       return undefined;

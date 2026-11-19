@@ -6,7 +6,7 @@ import { scopeId } from "../src/types.ts";
 
 test("a command that reports a recovered sandbox makes the turn provision that sandbox again", async () => {
   const handle: SandboxHandle = { id: "box", rootDir: "/workspace", resourceId: "res-1" };
-  const invalidated: Array<string | undefined> = [];
+  const invalidated: Array<{ id?: string; resourceId?: string } | undefined> = [];
   const ctx = createToolContext({
     sandbox: {
       async run() {
@@ -14,7 +14,7 @@ test("a command that reports a recovered sandbox makes the turn provision that s
       },
     } as unknown as Sandbox,
     provision: async () => handle,
-    invalidateProvision: (resourceId) => invalidated.push(resourceId),
+    invalidateProvision: (stale) => invalidated.push(stale),
     layers: [{ scopeId: scopeId("personal", "recovery-tester"), mountPath: "", mode: "rw" }],
     commandPolicy: () => ({ mode: "denylist", rules: [] }),
     authorizeCommand: () => false,
@@ -26,5 +26,8 @@ test("a command that reports a recovered sandbox makes the turn provision that s
   });
 
   await assert.rejects(ctx.execute("echo hi"), /QM rebooted it/);
-  assert.deepEqual(invalidated, ["res-1"]);
+  assert.deepEqual(
+    invalidated.map((stale) => [stale?.id, stale?.resourceId]),
+    [["box", "res-1"]],
+  );
 });

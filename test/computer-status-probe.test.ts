@@ -92,7 +92,7 @@ test("restarting a named sandbox makes the turn provision that sandbox again", a
   const ctx = ctxFor({}, async () => handle, {
     sandboxResources: { restart: async () => void events.push("restart") } as never,
     accessSandboxResource: async () => ({ resource: { id: "res-1" } }) as never,
-    invalidateProvision: (id) => events.push(`invalidate ${id}`),
+    invalidateProvision: (stale) => events.push(`invalidate ${stale?.resourceId}`),
   });
   await ctx.restartComputer("box");
   assert.deepEqual(events, ["restart", "invalidate res-1"]);

@@ -515,7 +515,24 @@ test("a requested restart that cannot bring a wedged sandbox back replaces it", 
     events.map((e) => e.code),
     ["sandbox_replaced"],
   );
-  assert.equal((await s.run(h, "echo back")).stdout.trim(), "back");
+  const fresh = await s.provision(layers);
+  assert.equal((await s.run(fresh, "echo back")).stdout.trim(), "back");
+});
+
+test("another turn's handle to a replaced sandbox fails as reset instead of running outside its workspace", async () => {
+  const s = make();
+  const turnA = await s.provision(layers);
+  const turnB = await s.provision(layers);
+  fake.wedge(turnA.id);
+  await assert.rejects(s.run(turnA, "echo a"), SandboxRecoveredError);
+
+  await assert.rejects(s.run(turnB, "echo b > here"), (e: Error) => {
+    assert.ok(e instanceof SandboxRecoveredError);
+    assert.match(e.message, /reset since this turn set it up/);
+    return true;
+  });
+  const fresh = await s.provision(layers);
+  assert.match((await s.run(fresh, "pwd")).stdout.trim(), /\/workspace$/);
 });
 
 test("a requested restart of a sandbox that does not exist yet creates nothing", async () => {

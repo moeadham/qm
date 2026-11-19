@@ -244,11 +244,43 @@ test("turn default changes invalidate cached provisioning while explicit calls d
   assert.equal((await router.run(old, "still old")).stdout, old.id);
   const [x, y] = await Promise.all([turn.provisionResource(a.id), turn.provisionResource(a.id)]);
   assert.equal(x, y);
-  turn.invalidateProvision(a.id);
+  turn.invalidateProvision({ resourceId: a.id });
   assert.notEqual(await turn.provisionResource(a.id), x, "a restarted sandbox is provisioned again");
   assert.equal(await turn.provision(), next, "the default box is untouched by another sandbox's restart");
   await turn.reclaimBox();
   assert.deepEqual(released.sort(), [a.backingScopeId, b.backingScopeId].sort());
+});
+
+test("a reset reach sandbox is dropped from the turn without touching its default box", async () => {
+  const { resources, router, layers } = fixture();
+  const record = await resources.create("alice", "personal:alice", "local");
+  await resources.setDefault("alice", "personal:alice", record.id);
+  const channel = await resources.create("alice", "channel:team", "local");
+  await resources.setDefault("alice", "channel:team", channel.id);
+  const turn = createTurnSandboxes({
+    deps: { sandbox: router, sandboxResources: resources },
+    input: { origin: { kind: "user" } },
+    actor: { id: "alice", type: "internal" },
+    session: { id: "s" },
+    resolution: { layers, orgScopeId: "org" },
+    scopeId: "personal:alice",
+    memoryScopeId: "personal:alice",
+    transferId: "t",
+    turnSessionDir: "turn/s",
+    turnFilesDir: "turn/s/t",
+    connectorEnv: {},
+    ownerAuthAvailable: false,
+    visibleSkills: [],
+    visibleSkillsForTurn: async () => [],
+    emitGapWork: () => {},
+    perf: { credsMs: 0 },
+  } as unknown as TurnSandboxContext);
+  const box = await turn.provision();
+  const reach = await turn.provisionForReach("channel:team");
+  assert.equal(await turn.provisionForReach("channel:team"), reach);
+  turn.invalidateProvision(reach);
+  assert.notEqual(await turn.provisionForReach("channel:team"), reach);
+  assert.equal(await turn.provision(), box);
 });
 
 test("retirement refuses the default, waits for an active command, and prevents future execution", async () => {
