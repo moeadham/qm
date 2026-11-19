@@ -476,22 +476,15 @@ for (const checkpointed of [false, true]) {
   });
 }
 
-test("a sandbox that sticks again soon after a recovery is not recovered in a loop", async () => {
-  const s = make();
-  const h = await s.provision(layers);
-  fake.wedge(h.id, "restart");
-  await assert.rejects(s.run(h, "echo first"), /rebooted it/);
-  fake.wedge(h.id, "restart");
-  await assert.rejects(s.run(h, "echo second"), /\(script not submitted\): TypeError$/);
-  assert.deepEqual(fake.restarts(), [h.id]);
-});
-
-test("concurrent commands that hit a stuck sandbox share one recovery", async () => {
+test("concurrent commands that hit a stuck sandbox reboot it once", async () => {
   const s = make();
   const h = await s.provision(layers);
   fake.wedge(h.id, "restart");
   const results = await Promise.allSettled([s.run(h, "echo a"), s.run(h, "echo b")]);
-  for (const r of results) assert.ok(r.status === "rejected" && r.reason instanceof SandboxRecoveredError);
+  const recovered = results.filter((r) => r.status === "rejected" && r.reason instanceof SandboxRecoveredError);
+  const ran = results.filter((r) => r.status === "fulfilled");
+  assert.equal(recovered.length, 1);
+  assert.equal(ran.length, 1);
   assert.deepEqual(fake.restarts(), [h.id]);
 });
 

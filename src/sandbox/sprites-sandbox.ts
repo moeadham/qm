@@ -104,8 +104,21 @@ const isMissing = (e: unknown): boolean => e instanceof APIError && e.statusCode
 const RESTORE_TIMEOUT_MS = 120_000;
 const PROBE_TIMEOUT_SEC = 30;
 const PROBE_WINDOW_MS = 45_000;
-const RECOVERY_COOLDOWN_MS = 10 * 60_000;
-const wedged = (e: unknown): boolean => errMessage(e).endsWith("(script not submitted): TypeError");
+class SpritesExecTransportError extends Error {
+  readonly submitted: boolean;
+  readonly reason: string;
+  constructor(submitted: boolean, reason: string) {
+    super(
+      `sprites exec: WebSocket error (${submitted ? "script submission started; execution unknown" : "script not submitted"}): ${reason}`,
+    );
+    this.name = "SpritesExecTransportError";
+    this.submitted = submitted;
+    this.reason = reason;
+  }
+}
+
+const wedged = (e: unknown): boolean =>
+  e instanceof SpritesExecTransportError && !e.submitted && e.reason === "TypeError";
 
 type Recovery = {
   code: "sandbox_answering" | "sandbox_rebooted" | "checkpoint_restored" | "sandbox_replaced";
@@ -206,8 +219,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
       });
     const exited = new Promise<number>((resolve, reject) => {
       const fail = (detail: string): void => {
-        const phase = submissionStarted ? "script submission started; execution unknown" : "script not submitted";
-        reject(new Error(`sprites exec: WebSocket error (${phase}): ${detail}`));
+        reject(new SpritesExecTransportError(submissionStarted, detail));
       };
       cmd.on("error", (e) => {
         const detail =
@@ -534,33 +546,13 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
     );
   }
 
-  const recoveries = new Map<string, { at: number; finished: boolean; done: Promise<Recovery | undefined> }>();
-
-  function sharedRecovery(name: string, scope: string): Promise<Recovery | undefined> {
-    const entry = recoveries.get(name);
-    if (entry && !entry.finished) return entry.done;
-    if (entry && Date.now() - entry.at < RECOVERY_COOLDOWN_MS) return Promise.resolve(undefined);
-    const started = { at: 0, finished: false, done: runRecovery(name, scope, false) };
-    recoveries.set(name, started);
-    const settle = (keep: boolean): void => {
-      started.finished = true;
-      started.at = Date.now();
-      if (!keep && recoveries.get(name) === started) recoveries.delete(name);
-    };
-    started.done.then(
-      (r) => settle(r !== undefined && r.code !== "sandbox_answering"),
-      () => settle(true),
-    );
-    return started.done;
-  }
-
   async function execRecovering(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
     try {
       return await execRaw(name, script, timeoutSec);
     } catch (e) {
       const scope = base.scopeFor(name);
       if (!wedged(e) || !scope || inLifecycle.getStore()) throw e;
-      const recovery = await sharedRecovery(name, scope);
+      const recovery = await runRecovery(name, scope, false);
       if (!recovery) throw e;
       if (recovery.code === "sandbox_answering") return execRaw(name, script, timeoutSec);
       throw new SandboxRecoveredError(
