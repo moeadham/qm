@@ -231,7 +231,7 @@ export function createExecSandboxBase(deps: ExecSandboxBaseDeps): ExecSandboxBas
   function workspacePresent(result: ExecResult): ExecResult {
     if (result.code === WORKSPACE_MISSING_CODE && result.stderr.trim() === WORKSPACE_MISSING)
       throw new SandboxRecoveredError(
-        "QM: this computer was reset since this turn set it up, so its workspace is gone. Nothing from the command ran; run it again.",
+        "QM: this computer's workspace is missing, either because the computer was reset since this turn set it up or because the folder was deleted. Nothing from the command ran; run it again and QM will set the workspace up afresh.",
       );
     return result;
   }

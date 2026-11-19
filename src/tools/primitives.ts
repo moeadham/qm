@@ -568,6 +568,15 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
   const fallbackMounts = deps.layers.filter((l) => l.mode === "ro" && l.mountPath);
   const persistExclude = [...fallbackMounts.map((mount) => mount.mountPath!), TURN_FILES_DIR];
 
+  const droppingReset = async <T>(handle: SandboxHandle | undefined, fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (error) {
+      if (handle && error instanceof SandboxRecoveredError) deps.invalidateProvision?.(handle);
+      throw error;
+    }
+  };
+
   const accessSandbox = async (id: string): Promise<SandboxAccessPlan> => {
     if (!deps.sandboxResources || !deps.accessSandboxResource) throw new Error("sandbox inventory unavailable");
     if (!id.trim()) throw new Error("sandbox_id must name a sandbox; omit it to use the default");
@@ -808,8 +817,12 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
         if (!status.provisioned || status.lifecycleState === "paused") return status;
         try {
           const code = await withTimeout(
-            async () =>
-              (await deps.sandbox.run(await provision(), "true", { timeoutMs: COMMAND_PATH_PROBE_TIMEOUT_MS })).code,
+            async () => {
+              const handle = await provision();
+              return droppingReset(handle, () =>
+                deps.sandbox.run(handle, "true", { timeoutMs: COMMAND_PATH_PROBE_TIMEOUT_MS }),
+              ).then((r) => r.code);
+            },
             COMMAND_PATH_PROBE_TIMEOUT_MS * 2,
             "command probe",
           );
@@ -928,39 +941,40 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
             scopeLabel: reached.scopeId,
           });
         }
-        return timed("exec", async () => {
-          execOpts?.signal?.throwIfAborted();
-          const { commandEnv, secretValues, fileExecution } = await stageCredentials(
-            requested,
-            handle,
-            "command",
-            execOpts?.signal,
-          );
-          const r = await withCleanup(
-            async (): Promise<ExecResult> => {
-              const sandboxCommand = ownerAuth ? (deps.ownerAuthCommand?.(command, commandEnv) ?? command) : command;
-              const commandHandle = Object.keys(commandEnv).length
-                ? { ...handle, env: { ...handle.env, ...commandEnv } }
-                : handle;
-              const secretEnv = executionSecretEnv(commandHandle.env, secretValues);
-              const mask = createExactSecretValueMasker(Object.values(secretEnv));
-              try {
-                const result = await deps.sandbox.run(commandHandle, sandboxCommand, opts);
-                return { ...result, stdout: mask(result.stdout), stderr: mask(result.stderr) };
-              } catch (error) {
-                if (error instanceof SandboxRecoveredError) deps.invalidateProvision?.(commandHandle);
-                const message = errMessage(error);
-                const masked = mask(message);
-                if (masked !== message) throw new MaskedExecutionError(error, mask, masked);
-                throw error;
-              }
-            },
-            async () => {
-              await fileExecution?.finish();
-            },
-          );
-          return reached ? { ...r, reached } : r;
-        });
+        return timed("exec", () =>
+          droppingReset(handle, async () => {
+            execOpts?.signal?.throwIfAborted();
+            const { commandEnv, secretValues, fileExecution } = await stageCredentials(
+              requested,
+              handle,
+              "command",
+              execOpts?.signal,
+            );
+            const r = await withCleanup(
+              async (): Promise<ExecResult> => {
+                const sandboxCommand = ownerAuth ? (deps.ownerAuthCommand?.(command, commandEnv) ?? command) : command;
+                const commandHandle = Object.keys(commandEnv).length
+                  ? { ...handle, env: { ...handle.env, ...commandEnv } }
+                  : handle;
+                const secretEnv = executionSecretEnv(commandHandle.env, secretValues);
+                const mask = createExactSecretValueMasker(Object.values(secretEnv));
+                try {
+                  const result = await deps.sandbox.run(commandHandle, sandboxCommand, opts);
+                  return { ...result, stdout: mask(result.stdout), stderr: mask(result.stderr) };
+                } catch (error) {
+                  const message = errMessage(error);
+                  const masked = mask(message);
+                  if (masked !== message) throw new MaskedExecutionError(error, mask, masked);
+                  throw error;
+                }
+              },
+              async () => {
+                await fileExecution?.finish();
+              },
+            );
+            return reached ? { ...r, reached } : r;
+          }),
+        );
       });
     },
 

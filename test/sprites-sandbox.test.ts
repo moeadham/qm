@@ -528,7 +528,7 @@ test("another turn's handle to a replaced sandbox fails as reset instead of runn
 
   await assert.rejects(s.run(turnB, "echo b"), (e: Error) => {
     assert.ok(e instanceof SandboxRecoveredError);
-    assert.match(e.message, /reset since this turn set it up/);
+    assert.match(e.message, /workspace is missing/);
     return true;
   });
   const fresh = await s.provision(layers);
