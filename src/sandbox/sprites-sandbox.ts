@@ -18,7 +18,7 @@ import {
 } from "./exec-file-ops.ts";
 import type { CredentialPathSpec } from "../credentials/resident-paths.ts";
 import { ephemeralCredLinkPaths } from "../credentials/resident-paths.ts";
-import { visibleNotInstalled, visibleTools } from "./sandbox.ts";
+import { SandboxRecoveredError, visibleNotInstalled, visibleTools } from "./sandbox.ts";
 import { createExecSandboxBase, sandboxScopeName } from "./exec-sandbox-base.ts";
 import { withConnectorSdk, type ConnectorSdkBundle } from "./connector-sdk.ts";
 import { createLayerToolInstaller } from "./layer-tool-install.ts";
@@ -102,12 +102,13 @@ export async function retrySpritesControl<T>(operation: () => Promise<T>, timeou
 const isMissing = (e: unknown): boolean => e instanceof APIError && e.statusCode === 404;
 
 const RESTORE_TIMEOUT_MS = 120_000;
-const PROBE_TIMEOUT_SEC = 90;
+const PROBE_TIMEOUT_SEC = 30;
+const PROBE_WINDOW_MS = 45_000;
 const RECOVERY_COOLDOWN_MS = 10 * 60_000;
-const notSubmitted = (e: unknown): boolean => errMessage(e).includes("script not submitted");
+const wedged = (e: unknown): boolean => errMessage(e).endsWith("(script not submitted): TypeError");
 
 type Recovery = {
-  code: "sandbox_rebooted" | "checkpoint_restored" | "sandbox_replaced";
+  code: "sandbox_answering" | "sandbox_rebooted" | "checkpoint_restored" | "sandbox_replaced";
   notice: string;
   detail: string;
 };
@@ -136,6 +137,7 @@ export interface SpritesSandboxOptions extends BlobStagingOptions {
   egressProxyAdditionalUrls?: string[];
   memoryMb?: number;
   checkpointIntervalMs?: number;
+  probeWindowMs?: number;
   snapshots?: HomeSnapshotStore;
   initializationStore?: DurableMap<{ pending: boolean }>;
   advisoryLock?: AdvisoryLock;
@@ -168,6 +170,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
   };
   const defaultTimeoutSec = opts.defaultTimeoutSec ?? 600;
   const checkpointIntervalMs = opts.checkpointIntervalMs ?? CHECKPOINT_INTERVAL_MS;
+  const probeWindowMs = opts.probeWindowMs ?? PROBE_WINDOW_MS;
 
   const ensured = new Set<string>();
   const resourcesApplied = new Set<string>();
@@ -428,25 +431,32 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
   }
 
   async function probe(name: string): Promise<string | undefined> {
-    try {
-      const r = await execRaw(name, "true", PROBE_TIMEOUT_SEC);
-      return r.code === 0 ? undefined : `a test command exited ${r.code}`;
-    } catch (e) {
-      return errMessage(e);
+    const deadline = Date.now() + probeWindowMs;
+    for (;;) {
+      let failure: string;
+      try {
+        const r = await execRaw(name, "true", PROBE_TIMEOUT_SEC);
+        if (r.code === 0) return undefined;
+        failure = `a test command exited ${r.code}`;
+      } catch (e) {
+        failure = errMessage(e);
+      }
+      if (Date.now() >= deadline) return failure;
+      await wait(Math.min(5_000, probeWindowMs));
     }
   }
 
-  async function recoverSprite(
-    name: string,
-    scope: string | undefined,
-    requested: boolean,
-  ): Promise<Recovery | undefined> {
+  async function recoverSprite(name: string, scope: string, requested: boolean): Promise<Recovery | undefined> {
     await requireInitialized(name);
+    if (!(await spriteExists(name))) {
+      if (requested) throw new Error(`sprites restart ${name}: no sandbox exists yet; one is created on next use`);
+      return undefined;
+    }
     forget(name);
     const steps: string[] = [];
     if (!requested) {
       const failure = await probe(name);
-      if (!failure) return undefined;
+      if (!failure) return { code: "sandbox_answering", notice: "", detail: "a test command answered" };
       steps.push(`commands failed (${failure})`);
     }
     const restartFailure = await sprite(name)
@@ -484,9 +494,10 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
         detail: [...steps, `restored checkpoint ${restored.id}`].join("; "),
       };
     steps.push(restored);
+    let hydrated: boolean;
     try {
       await deleteSprite(name);
-      await initializeSprite(name, scope, false);
+      hydrated = await initializeSprite(name, scope, false);
     } catch (e) {
       throw new Error(`sprites recovery ${name}: ${steps.join("; ")}; replacing the sandbox failed: ${errMessage(e)}`, {
         cause: e,
@@ -499,46 +510,62 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
       );
     return {
       code: "sandbox_replaced",
-      notice:
-        "replaced it with a fresh computer; its files were lost, so reinstall tools and re-clone repositories as needed",
-      detail: [...steps, "replaced with a fresh sandbox"].join("; "),
+      notice: hydrated
+        ? "replaced it with a fresh computer restored from its last saved home; changes since then were lost"
+        : "replaced it with a fresh computer; its files were lost, so reinstall tools and re-clone repositories as needed",
+      detail: [...steps, `replaced with a fresh sandbox${hydrated ? " from the saved home" : ""}`].join("; "),
     };
   }
 
-  function runRecovery(
-    name: string,
-    scopeLabel: string | undefined,
-    requested: boolean,
-  ): Promise<Recovery | undefined> {
+  function runRecovery(name: string, scope: string, requested: boolean): Promise<Recovery | undefined> {
     return base.provisionQueue(`restart:${name}`, () =>
       withLifecycle(name, async () => {
-        const recovery = await recoverSprite(name, base.scopeFor(name), requested);
-        if (recovery && (!requested || recovery.code !== "sandbox_rebooted"))
-          reportError("agent_computer", recovery.code, `sprite ${name}: ${recovery.detail}`, scopeLabel);
-        return recovery;
+        try {
+          const recovery = await recoverSprite(name, scope, requested);
+          if (recovery && recovery.code !== "sandbox_answering" && (!requested || recovery.code !== "sandbox_rebooted"))
+            reportError("agent_computer", recovery.code, `sprite ${name}: ${recovery.detail}`, scope);
+          return recovery;
+        } catch (e) {
+          reportError("agent_computer", "recovery_failed", errMessage(e), scope);
+          throw e;
+        }
       }),
     );
   }
 
   const recoveries = new Map<string, { at: number; finished: boolean; done: Promise<Recovery | undefined> }>();
 
+  function sharedRecovery(name: string, scope: string): Promise<Recovery | undefined> {
+    const entry = recoveries.get(name);
+    if (entry && !entry.finished) return entry.done;
+    if (entry && Date.now() - entry.at < RECOVERY_COOLDOWN_MS) return Promise.resolve(undefined);
+    const started = { at: 0, finished: false, done: runRecovery(name, scope, false) };
+    recoveries.set(name, started);
+    const settle = (keep: boolean): void => {
+      started.finished = true;
+      started.at = Date.now();
+      if (!keep && recoveries.get(name) === started) recoveries.delete(name);
+    };
+    started.done.then(
+      (r) => settle(r !== undefined && r.code !== "sandbox_answering"),
+      () => settle(true),
+    );
+    return started.done;
+  }
+
   async function execRecovering(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
     try {
       return await execRaw(name, script, timeoutSec);
     } catch (e) {
-      if (!notSubmitted(e) || inLifecycle.getStore()) throw e;
-      let recovery = recoveries.get(name);
-      if (!recovery || Date.now() - recovery.at >= RECOVERY_COOLDOWN_MS) {
-        const started = { at: Date.now(), finished: false, done: runRecovery(name, base.scopeFor(name), false) };
-        void started.done.finally(() => (started.finished = true)).catch(() => undefined);
-        recoveries.set(name, started);
-        recovery = started;
-      } else if (recovery.finished) throw e;
-      const recovered = await recovery.done;
-      const r = await execRaw(name, script, timeoutSec);
-      return recovered
-        ? { ...r, stderr: `[QM: this computer stopped responding, so QM ${recovered.notice}.]\n${r.stderr}` }
-        : r;
+      const scope = base.scopeFor(name);
+      if (!wedged(e) || !scope || inLifecycle.getStore()) throw e;
+      const recovery = await sharedRecovery(name, scope);
+      if (!recovery) throw e;
+      if (recovery.code === "sandbox_answering") return execRaw(name, script, timeoutSec);
+      throw new SandboxRecoveredError(
+        `QM: this computer stopped responding, so QM ${recovery.notice}. Nothing from the failed command ran; run it again.`,
+        { cause: e },
+      );
     }
   }
 

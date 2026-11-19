@@ -250,6 +250,10 @@ export interface Sandbox {
   reapDeepIdle?(idleMs: number, devIdleMs?: number): Promise<{ reaped: number }>;
 }
 
+export class SandboxRecoveredError extends Error {
+  override name = "SandboxRecoveredError";
+}
+
 export class CapabilityUnsupportedError extends Error {
   readonly backend: string;
   readonly capability: string;

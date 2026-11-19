@@ -19,7 +19,12 @@ import { join } from "node:path";
 import { interpolateSplitEnv } from "../deployment/deployment-layer.ts";
 import type { CredentialPathSpec } from "../credentials/resident-paths.ts";
 import type { ComputerStatus, ExecResult, Sandbox, SandboxHandle } from "../sandbox/sandbox.ts";
-import { CapabilityUnsupportedError, hasParentPathSegment, supportsAgentComputerExport } from "../sandbox/sandbox.ts";
+import {
+  CapabilityUnsupportedError,
+  hasParentPathSegment,
+  SandboxRecoveredError,
+  supportsAgentComputerExport,
+} from "../sandbox/sandbox.ts";
 import type {
   ApprovalGrantModes,
   ClientToolResult,
@@ -943,6 +948,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
                 const result = await deps.sandbox.run(commandHandle, sandboxCommand, opts);
                 return { ...result, stdout: mask(result.stdout), stderr: mask(result.stderr) };
               } catch (error) {
+                if (error instanceof SandboxRecoveredError) deps.invalidateProvision?.(commandHandle.resourceId);
                 const message = errMessage(error);
                 const masked = mask(message);
                 if (masked !== message) throw new MaskedExecutionError(error, mask, masked);
