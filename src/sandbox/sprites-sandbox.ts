@@ -122,7 +122,7 @@ const wedged = (e: unknown): boolean =>
   e instanceof SpritesExecTransportError && !e.submitted && e.reason === "TypeError";
 
 type Recovery = {
-  code: "sandbox_answering" | "sandbox_rebooted" | "checkpoint_restored" | "sandbox_replaced";
+  code: "sandbox_rebooted" | "checkpoint_restored" | "sandbox_replaced";
   notice: string;
   detail: string;
 };
@@ -470,7 +470,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
     const steps: string[] = [];
     if (!requested) {
       const failure = await probe(name);
-      if (!failure) return { code: "sandbox_answering", notice: "", detail: "a test command answered" };
+      if (!failure) return undefined;
       steps.push(`commands failed (${failure})`);
     }
     const restartFailure = await sprite(name)
@@ -536,7 +536,7 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
       withLifecycle(name, async () => {
         try {
           const recovery = await recoverSprite(name, scope, requested);
-          if (recovery && recovery.code !== "sandbox_answering" && (!requested || recovery.code !== "sandbox_rebooted"))
+          if (recovery && (!requested || recovery.code !== "sandbox_rebooted"))
             reportError("agent_computer", recovery.code, `sprite ${name}: ${recovery.detail}`, scope);
           return recovery;
         } catch (e) {
@@ -560,9 +560,8 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
         lastRecovery.set(name, Date.now());
         throw failure;
       });
-      if (!recovery) throw e;
-      if (recovery.code !== "sandbox_answering") lastRecovery.set(name, Date.now());
-      if (recovery.code === "sandbox_answering") return execRaw(name, script, timeoutSec);
+      if (!recovery) return execRaw(name, script, timeoutSec);
+      lastRecovery.set(name, Date.now());
       throw new SandboxRecoveredError(
         `QM: this computer stopped responding, so QM ${recovery.notice}. Nothing from the failed command ran; run it again.`,
         { cause: e },
