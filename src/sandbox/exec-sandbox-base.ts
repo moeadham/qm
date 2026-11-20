@@ -1,4 +1,4 @@
-import { cleanupFailedProvision } from "./sandbox.ts";
+import { cleanupFailedProvision, SandboxRecoveredError } from "./sandbox.ts";
 import { randomUUID } from "node:crypto";
 import type { WorkspaceLayer } from "../types.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
@@ -19,6 +19,8 @@ const WORKSPACE_BASENAME = "workspace";
 const RO_LAYERS_TAR = ".ro-layers.tar";
 const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const PREP_TIMEOUT_SEC = 60;
+const WORKSPACE_MISSING = "__QM_WORKSPACE_MISSING__";
+const WORKSPACE_MISSING_CODE = 197;
 
 // Provider instance names are DNS-style labels; Sprites rejects anything over 63 chars.
 const MAX_SANDBOX_NAME = 63;
@@ -226,14 +228,22 @@ export function createExecSandboxBase(deps: ExecSandboxBaseDeps): ExecSandboxBas
     }
   }
 
+  function workspacePresent(result: ExecResult): ExecResult {
+    if (result.code === WORKSPACE_MISSING_CODE && result.stderr.trim() === WORKSPACE_MISSING)
+      throw new SandboxRecoveredError(
+        "QM: this computer's workspace is missing, either because the computer was reset since this turn set it up or because the folder was deleted. Nothing from the command ran; run it again and QM will set the workspace up afresh.",
+      );
+    return result;
+  }
+
   async function run(handle: SandboxHandle, command: string, execOpts?: ExecOptions): Promise<ExecResult> {
     const timeoutSec = execOpts?.timeoutMs ? Math.ceil(execOpts.timeoutMs / 1000) : defaultTimeoutSec;
     const exports = Object.entries(handle.env ?? {})
       .map(([k, v]) => `export ${k}=${shq(v)}`)
       .join("; ");
-    const script = `${nonInteractiveShellPrefix()}${exports ? exports + "; " : ""}cd ${handle.rootDir} 2>/dev/null; ${command}`;
+    const script = `${nonInteractiveShellPrefix()}${exports ? exports + "; " : ""}cd ${handle.rootDir} 2>/dev/null || { echo ${WORKSPACE_MISSING} >&2; exit ${WORKSPACE_MISSING_CODE}; }; ${command}`;
     const signal = execOpts?.signal;
-    if (!signal) return deps.exec(handle.id, script, timeoutSec);
+    if (!signal) return workspacePresent(await deps.exec(handle.id, script, timeoutSec));
     const killUid = randomUUID();
     const fireKill = () => {
       deps
@@ -244,7 +254,7 @@ export function createExecSandboxBase(deps: ExecSandboxBaseDeps): ExecSandboxBas
     const onAbort = () => fireKill();
     signal.addEventListener("abort", onAbort, { once: true });
     try {
-      return await deps.exec(handle.id, killableScript(script, killUid), timeoutSec);
+      return workspacePresent(await deps.exec(handle.id, killableScript(script, killUid), timeoutSec));
     } finally {
       signal.removeEventListener("abort", onAbort);
     }
