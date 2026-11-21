@@ -65,7 +65,7 @@ export interface SandboxResources {
   ): Promise<SandboxResource>;
   access(actorId: string, id: string): Promise<SandboxResource>;
   status(actorId: string, id: string): Promise<ComputerStatus>;
-  restart(actorId: string, id: string): Promise<void>;
+  restart(actorId: string, id: string): Promise<string | void>;
   retire(actorId: string, id: string): Promise<void>;
   use<T>(id: string, action: () => Promise<T>, exclusive?: boolean): Promise<T>;
   hold(id: string, runId: string): Promise<void>;
@@ -227,7 +227,7 @@ export function createSandboxResources(opts: {
       await authorize(actorId, record.ownerScopeId);
       const backend = opts.backends[record.backend];
       if (!backend?.restartComputer) throw new Error(`sandbox restart unavailable: ${record.backend}`);
-      await use(id, () => backend.restartComputer!(record.backingScopeId), true);
+      return use(id, () => backend.restartComputer!(record.backingScopeId), true);
     },
     async resolve(scopeId) {
       await initialize();

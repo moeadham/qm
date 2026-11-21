@@ -955,11 +955,11 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         }
         if (params.sandbox_id === null) throw new Error("null only clears a default");
         if (params.action === "restart") {
-          await tc.restartComputer(params.sandbox_id);
+          const note = await tc.restartComputer(params.sandbox_id);
           return recordResult(
             callId,
             { tool: "sandbox", action: "restart", restarted: true },
-            text("Computer restarting. Give it a moment to boot before running the next command."),
+            text(note || "Computer restarting. Give it a moment to boot before running the next command."),
           );
         }
         const s = await tc.computerStatus(params.sandbox_id);

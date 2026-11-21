@@ -16,7 +16,12 @@ import {
 } from "../src/sandbox/sprites-sandbox.ts";
 import { sandboxScopeName } from "../src/sandbox/exec-sandbox-base.ts";
 import { createLocalWorkspaceStore } from "../src/workspace/workspace-store.ts";
-import { execFailureDetail, supportsProcessSessions, supportsBlobStaging } from "../src/sandbox/sandbox.ts";
+import {
+  execFailureDetail,
+  SandboxRecoveredError,
+  supportsProcessSessions,
+  supportsBlobStaging,
+} from "../src/sandbox/sandbox.ts";
 import { createMemorySnapshotStore } from "../src/sandbox/home-snapshot.ts";
 import { sleep } from "../src/util/async.ts";
 import { createMemoryBlobTransferStore } from "../src/persistence/blob-transfer.ts";
@@ -24,7 +29,7 @@ import { scopeId } from "../src/types.ts";
 import { mintCapabilityToken, EGRESS_PROXY_AUD } from "../src/auth/capability-token.ts";
 import { installFakeSprites, FAKE_SPRITES_TOKEN, type FakeSprites } from "./support/fake-sprites.ts";
 import type { Sandbox } from "../src/sandbox/sandbox.ts";
-import { APIError, SpriteCommand } from "@fly/sprites";
+import { APIError, SpriteCommand, SpritesClient } from "@fly/sprites";
 
 let fake: FakeSprites;
 let sandbox: Sandbox;
@@ -36,6 +41,7 @@ function make(extra: Record<string, unknown> = {}): Sandbox {
     token: FAKE_SPRITES_TOKEN,
     namePrefix: "qmt",
     baseUrl: fake.baseUrl,
+    probeWindowMs: 1,
     ...extra,
   });
 }
@@ -289,6 +295,7 @@ test("a failed egress setup releases the scratch lease instead of wedging the ke
     s.provision(layers, { scratch: { key: "job-egress" }, egressToken: await proxyToken() }),
     /readback mismatch/,
   );
+  fake.repairPolicyReadback(sandboxScopeName("qmt-scratch", "job-egress"));
   const retry = await s.provision(layers, { scratch: { key: "job-egress" } });
   assert.equal(retry.scratch, true);
   assert.equal(retry.coldStart, true, "the failed provision released its lease and the box was recreated");
@@ -372,83 +379,244 @@ test("computerStatus names a faulted check and an unprovisioned scope", async ()
   assert.equal(s.provisioned, true);
 });
 
-test("restartComputer reboots the scope's sprite and heals a wedged exec channel", async () => {
-  const h = await sandbox.provision(layers);
-  fake.fail502(h.id);
-  await assert.rejects(sandbox.run(h, "echo back"), /WebSocket error/);
+type Recorded = { code: string; message: string };
+const recording = (extra: Record<string, unknown> = {}) => {
+  const events: Recorded[] = [];
+  return { events, s: make({ onError: (e: Recorded) => events.push(e), ...extra }) };
+};
+const ledger = "echo entry >> /home/sprite/workspace/ledger";
 
-  await sandbox.restartComputer!(scope);
+test("a command that hits a stuck sandbox reboots it, never runs, and tells the agent to run it again", async () => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  fake.wedge(h.id, "restart");
+
+  await assert.rejects(s.run(h, ledger), (e: Error) => {
+    assert.ok(e instanceof SandboxRecoveredError);
+    assert.match(e.message, /QM rebooted it; its files are intact.*Nothing from the failed command ran; run it again/);
+    return true;
+  });
+  assert.equal(await s.readFile(h, "ledger"), null);
   assert.deepEqual(fake.restarts(), [h.id]);
-
-  const after = await sandbox.run(h, "echo back");
-  assert.equal(after.code, 0);
-  assert.equal(after.stdout.trim(), "back");
+  assert.deepEqual(
+    events.map((e) => e.code),
+    ["sandbox_rebooted"],
+  );
+  assert.equal((await s.run(h, "echo back")).stdout.trim(), "back");
 });
 
-test("a refused restart on a faulted sprite restores the latest checkpoint", async () => {
-  const events: Array<{ code: string; message: string }> = [];
-  const s = make({ onError: (e: { code: string; message: string }) => events.push(e) });
+test("a one-off dropped connection is retried without touching the sandbox", async (t) => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  const start = SpriteCommand.prototype.start;
+  let failures = 1;
+  t.mock.method(SpriteCommand.prototype, "start", async function (this: SpriteCommand) {
+    if (failures-- > 0) throw new Error("WebSocket error: TypeError");
+    return start.call(this);
+  });
+
+  assert.equal((await s.run(h, "echo back")).stdout.trim(), "back");
+  assert.deepEqual(fake.restarts(), []);
+  assert.deepEqual(events, []);
+});
+
+test("gateway refusals and deleted sandboxes are never treated as stuck", async () => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  fake.fail502(h.id);
+  await assert.rejects(s.run(h, "echo ignored"), /non-101/);
+
+  await s.destroyScope!(scope);
+  await assert.rejects(s.run(h, "echo ignored"), /script not submitted/);
+  assert.ok(!fake.names().includes(h.id), "a deleted sandbox is not recreated");
+  assert.deepEqual(fake.restarts(), []);
+  assert.deepEqual(events, []);
+});
+
+test("a sandbox still stuck after a reboot is rolled back to its checkpoint", async () => {
+  const { events, s } = recording();
   const h = await s.provision(layers);
   await s.writeFile(h, "keep.txt", "before\n");
   await s.teardown(h);
   await s.writeFile(h, "keep.txt", "after\n");
-  fake.refuseRestart(h.id);
-  fake.unhealthy(h.id, "machine unreachable");
-  fake.fail502(h.id);
+  fake.wedge(h.id, "restore");
 
-  await s.restartComputer!(scope);
-  assert.deepEqual(fake.restarts(), []);
-  assert.equal(await s.readFile(h, "keep.txt"), "before\n", "the home is back at the checkpoint");
-  const restored = events.find((e) => e.code === "checkpoint_restored");
-  assert.ok(restored, "the destructive recovery is reported");
-  assert.match(restored!.message, /http 502/);
-  assert.match(restored!.message, /machine unreachable/);
-  assert.match(restored!.message, /restored checkpoint v1/);
+  await assert.rejects(
+    s.run(h, "cat keep.txt"),
+    /rolled it back to its checkpoint from .*; changes made after that were lost/,
+  );
+  assert.equal(await s.readFile(h, "keep.txt"), "before\n");
+  assert.deepEqual(
+    events.map((e) => e.code),
+    ["checkpoint_restored"],
+  );
+  assert.match(events[0]!.message, /still failing after a reboot.*restored checkpoint v1/s);
 });
 
-test("a refused restart with a healthy check restores nothing and surfaces the refusal", async () => {
-  const h = await sandbox.provision(layers);
-  await sandbox.teardown(h);
-  fake.refuseRestart(h.id);
-  await assert.rejects(sandbox.restartComputer!(scope), /http 502.*reports no fault/s);
-  assert.equal(await sandbox.readFile(h, ".ro-layers.manifest"), null);
+for (const checkpointed of [false, true]) {
+  test(`a wedged sandbox is replaced with a fresh one when ${checkpointed ? "its checkpoint does not help" : "it has no checkpoint"}`, async () => {
+    const { events, s } = recording();
+    const h = await s.provision(layers);
+    await s.writeFile(h, "keep.txt", "lost\n");
+    if (checkpointed) await s.teardown(h);
+    fake.wedge(h.id);
+
+    await assert.rejects(s.run(h, "echo ignored"), /replaced it with a fresh computer; its files were lost/);
+    assert.deepEqual(
+      events.map((e) => e.code),
+      ["sandbox_replaced"],
+    );
+    assert.match(
+      events[0]!.message,
+      checkpointed ? /still failing after restoring checkpoint v1/ : /no checkpoint to restore/,
+    );
+    const fresh = await s.provision(layers);
+    assert.equal(await s.readFile(fresh, "keep.txt"), null);
+    assert.equal((await s.run(fresh, "echo back")).stdout.trim(), "back");
+  });
+}
+
+test("a sandbox that sticks again soon after a recovery is not recovered in a loop", async () => {
+  const s = make();
+  const h = await s.provision(layers);
+  fake.wedge(h.id, "restart");
+  await assert.rejects(s.run(h, "echo first"), /rebooted it/);
+  fake.wedge(h.id, "restart");
+  await assert.rejects(s.run(h, "echo second"), /\(script not submitted\): TypeError$/);
+  assert.deepEqual(fake.restarts(), [h.id]);
 });
 
-test("a refused restart with no checkpoint to fall back on names all three failures", async () => {
-  const h = await sandbox.provision(layers);
-  fake.refuseRestart(h.id);
-  fake.unhealthy(h.id, "boot loop");
-  await assert.rejects(sandbox.restartComputer!(scope), /http 502.*boot loop.*no checkpoint to restore/s);
+test("concurrent commands that hit a stuck sandbox reboot it once", async () => {
+  const s = make();
+  const h = await s.provision(layers);
+  fake.wedge(h.id, "restart");
+  const results = await Promise.allSettled([s.run(h, "echo a"), s.run(h, "echo b")]);
+  const recovered = results.filter((r) => r.status === "rejected" && r.reason instanceof SandboxRecoveredError);
+  const ran = results.filter((r) => r.status === "fulfilled");
+  assert.equal(recovered.length, 1);
+  assert.equal(ran.length, 1);
+  assert.deepEqual(fake.restarts(), [h.id]);
 });
 
-for (const submitted of [false, true]) {
-  for (const closeOnly of [false, true]) {
-    test(`exec failures report submission state without replay or private details (submitted=${submitted}, closeOnly=${closeOnly})`, async (t) => {
-      const h = await sandbox.provision(layers);
-      if (closeOnly) {
-        const dispatch = EventTarget.prototype.dispatchEvent;
-        t.mock.method(EventTarget.prototype, "dispatchEvent", function (this: EventTarget, event: Event) {
-          return event.type === "error" || dispatch.call(this, event);
-        });
-      }
-      const before = fake.calls.filter((call) => call.method === "WS").length;
-      if (submitted) fake.stallAfterRun(h.id);
-      else fake.fail502(h.id);
+test("a requested restart reboots the sprite and says so without recording a fault", async () => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  const note = await s.restartComputer!(scope);
+  assert.match(note ?? "", /^QM rebooted it; its files are intact/);
+  assert.deepEqual(fake.restarts(), [h.id]);
+  assert.deepEqual(events, []);
+  assert.equal((await s.run(h, "echo back")).stdout.trim(), "back");
+});
 
-      await assert.rejects(sandbox.run(h, "echo entry >> /home/sprite/workspace/ledger"), (error: Error) => {
-        assert.match(
-          error.message,
-          submitted ? /script submission started; execution unknown/ : /script not submitted/,
-        );
-        for (const value of [h.id, fake.baseUrl.replace("https:", "wss:"), "cmd=", "echo entry"])
-          assert.ok(!inspect(error).includes(value));
-        return true;
+test("a requested restart that cannot bring a wedged sandbox back replaces it", async () => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  fake.wedge(h.id);
+  const note = await s.restartComputer!(scope);
+  assert.match(note ?? "", /replaced it with a fresh computer/);
+  assert.deepEqual(
+    events.map((e) => e.code),
+    ["sandbox_replaced"],
+  );
+  const fresh = await s.provision(layers);
+  assert.equal((await s.run(fresh, "echo back")).stdout.trim(), "back");
+});
+
+test("another turn's handle to a replaced sandbox fails as reset instead of running outside its workspace", async () => {
+  const s = make();
+  const turnA = await s.provision(layers);
+  const turnB = await s.provision(layers);
+  fake.wedge(turnA.id);
+  await assert.rejects(s.run(turnA, "echo a"), SandboxRecoveredError);
+
+  await assert.rejects(s.run(turnB, "echo b"), (e: Error) => {
+    assert.ok(e instanceof SandboxRecoveredError);
+    assert.match(e.message, /workspace is missing/);
+    return true;
+  });
+  const fresh = await s.provision(layers);
+  assert.match((await s.run(fresh, "pwd")).stdout.trim(), /\/workspace$/);
+});
+
+test("a requested restart of a sandbox that does not exist yet creates nothing", async () => {
+  await assert.rejects(sandbox.restartComputer!(scope), /no sandbox exists yet/);
+  assert.deepEqual(fake.names(), []);
+});
+
+test("a replaced sprite comes back live and egress-bound for another core that already used it", async () => {
+  const shared = {
+    egressProxyUrl: "https://proxy.example.com",
+    initializationStore: createMemoryMap<{ pending: boolean }>(),
+    advisoryLock: createMemoryAdvisoryLock(),
+  };
+  const coreA = make(shared);
+  const coreB = make(shared);
+  const egressToken = await proxyToken();
+  const before = await coreB.provision(layers, { egressToken });
+  await coreB.teardown(before);
+  fake.wedge(before.id);
+
+  await coreA.restartComputer!(scope);
+  assert.deepEqual(fake.policy(before.id), [{ domain: "proxy.example.com", action: "allow" }]);
+
+  const after = await coreB.provision(layers, { egressToken });
+  assert.equal((await coreB.run(after, "echo back")).stdout.trim(), "back");
+});
+
+test("a sprite left pending without its egress policy is bound before another core uses it", async () => {
+  const shared = {
+    egressProxyUrl: "https://proxy.example.com",
+    initializationStore: createMemoryMap<{ pending: boolean }>(),
+    advisoryLock: createMemoryAdvisoryLock(),
+  };
+  const core = make(shared);
+  const egressToken = await proxyToken();
+  const before = await core.provision(layers, { egressToken });
+  await core.teardown(before);
+  const raw = new SpritesClient(FAKE_SPRITES_TOKEN, { baseURL: fake.baseUrl });
+  await raw.deleteSprite(before.id);
+  await raw.createSprite(before.id);
+  await shared.initializationStore.put(before.id, { pending: true });
+
+  await core.provision(layers, { egressToken });
+  assert.deepEqual(fake.policy(before.id), [{ domain: "proxy.example.com", action: "allow" }]);
+});
+
+test("a recovery whose replacement also fails names every step and records the failure", async () => {
+  const { events, s } = recording();
+  const h = await s.provision(layers);
+  fake.wedge(h.id);
+  for (let i = 0; i < 6; i++) fake.failNext(500, { match: (c) => c.method === "DELETE" });
+  await assert.rejects(
+    s.run(h, "echo ignored"),
+    /commands failed.*TypeError.*no checkpoint to restore.*replacing the sandbox failed/s,
+  );
+  assert.deepEqual(
+    events.map((e) => e.code),
+    ["recovery_failed"],
+  );
+});
+
+for (const closeOnly of [false, true]) {
+  test(`a command that may have reached the sandbox is reported, never retried (closeOnly=${closeOnly})`, async (t) => {
+    const h = await sandbox.provision(layers);
+    if (closeOnly) {
+      const dispatch = EventTarget.prototype.dispatchEvent;
+      t.mock.method(EventTarget.prototype, "dispatchEvent", function (this: EventTarget, event: Event) {
+        return event.type === "error" || dispatch.call(this, event);
       });
-
-      assert.equal(fake.calls.filter((call) => call.method === "WS").length, before + 1);
-      assert.equal(await sandbox.readFile(h, "ledger"), submitted ? "entry\n" : null);
+    }
+    const before = fake.calls.filter((call) => call.method === "WS").length;
+    fake.stallAfterRun(h.id);
+    await assert.rejects(sandbox.run(h, "echo entry >> /home/sprite/workspace/ledger"), (error: Error) => {
+      assert.match(error.message, /script submission started; execution unknown/);
+      for (const value of [h.id, fake.baseUrl.replace("https:", "wss:"), "cmd=", "echo entry"])
+        assert.ok(!inspect(error).includes(value));
+      return true;
     });
-  }
+    assert.equal(fake.calls.filter((call) => call.method === "WS").length, before + 1);
+    assert.equal(await sandbox.readFile(h, "ledger"), "entry\n");
+  });
 }
 
 test("exec diagnostics retain known transport reasons without raw error causes", async (t) => {
@@ -462,7 +630,7 @@ test("exec diagnostics retain known transport reasons without raw error causes",
   for (reason of ["TypeError", "unclassified provider failure"]) {
     await assert.rejects(sandbox.run(h, "echo ignored"), (error: Error) => {
       assert.match(error.message, /script not submitted/);
-      assert.ok(error.message.endsWith(reason === "TypeError" ? "TypeError" : "unknown transport error"));
+      assert.ok(error.message.includes(reason === "TypeError" ? "TypeError" : "unknown transport error"));
       assert.doesNotMatch(inspect(error), /example-secret|example\.invalid|token=/);
       return true;
     });
@@ -751,23 +919,6 @@ test("control retries share an elapsed-time budget across backoff and SDK reques
   );
   assert.equal(calls, 2);
 });
-
-for (const outcome of ["healthy", "unknown", "403", "503"]) {
-  test(`refused restart with ${outcome} health observation never rolls back newer files`, async () => {
-    const h = await sandbox.provision(layers);
-    await sandbox.writeFile(h, "ledger", "old");
-    await sandbox.teardown(h);
-    await sandbox.writeFile(h, "ledger", "new");
-    fake.refuseRestart(h.id);
-    if (outcome === "healthy" || outcome === "unknown") fake.health(h.id, outcome, "machine is running");
-    else
-      for (let i = 0; i < (outcome === "503" ? 4 : 1); i++)
-        fake.failNext(Number(outcome), { headers: { "retry-after": "0" }, match: (c) => c.path.endsWith("/check") });
-    await assert.rejects(sandbox.restartComputer!(scope), /no checkpoint was restored/);
-    assert.equal(await sandbox.readFile(h, "ledger"), "new");
-    assert.equal(fake.calls.filter((c) => c.path.endsWith("/restore")).length, 0);
-  });
-}
 
 test("failed hydration and failed deletion remain pending across adapters without overwriting the saved home", async () => {
   const snapshots = createMemorySnapshotStore();

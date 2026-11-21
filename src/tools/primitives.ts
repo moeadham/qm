@@ -19,7 +19,12 @@ import { join } from "node:path";
 import { interpolateSplitEnv } from "../deployment/deployment-layer.ts";
 import type { CredentialPathSpec } from "../credentials/resident-paths.ts";
 import type { ComputerStatus, ExecResult, Sandbox, SandboxHandle } from "../sandbox/sandbox.ts";
-import { CapabilityUnsupportedError, hasParentPathSegment, supportsAgentComputerExport } from "../sandbox/sandbox.ts";
+import {
+  CapabilityUnsupportedError,
+  hasParentPathSegment,
+  SandboxRecoveredError,
+  supportsAgentComputerExport,
+} from "../sandbox/sandbox.ts";
 import type {
   ApprovalGrantModes,
   ClientToolResult,
@@ -216,7 +221,7 @@ export interface ToolContext extends SurfaceToolDeps {
     input?: { backend?: string; name?: string; sandboxId?: string | null },
   ): Promise<unknown>;
   computerStatus(sandboxId?: string): Promise<ComputerStatus>;
-  restartComputer(sandboxId?: string): Promise<void>;
+  restartComputer(sandboxId?: string): Promise<string | void>;
   read(path: string, signal?: AbortSignal, sandboxId?: string): Promise<ReadResult>;
   listSkills(
     query?: string,
@@ -496,7 +501,7 @@ export interface ToolContextDeps {
   grantedHandles: GrantedHandle[];
   context?: TurnContext;
   sandboxResources?: SandboxResources;
-  invalidateProvision?: () => void;
+  invalidateProvision?: (stale?: { id?: string; resourceId?: string }) => void;
   workspace: WorkspaceStore;
   deploy: DeployService;
   acl: AclStore;
@@ -562,6 +567,15 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       : undefined);
   const fallbackMounts = deps.layers.filter((l) => l.mode === "ro" && l.mountPath);
   const persistExclude = [...fallbackMounts.map((mount) => mount.mountPath!), TURN_FILES_DIR];
+
+  const droppingReset = async <T>(handle: SandboxHandle | undefined, fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (error) {
+      if (handle && error instanceof SandboxRecoveredError) deps.invalidateProvision?.(handle);
+      throw error;
+    }
+  };
 
   const accessSandbox = async (id: string): Promise<SandboxAccessPlan> => {
     if (!deps.sandboxResources || !deps.accessSandboxResource) throw new Error("sandbox inventory unavailable");
@@ -803,8 +817,12 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
         if (!status.provisioned || status.lifecycleState === "paused") return status;
         try {
           const code = await withTimeout(
-            async () =>
-              (await deps.sandbox.run(await provision(), "true", { timeoutMs: COMMAND_PATH_PROBE_TIMEOUT_MS })).code,
+            async () => {
+              const handle = await provision();
+              return droppingReset(handle, () =>
+                deps.sandbox.run(handle, "true", { timeoutMs: COMMAND_PATH_PROBE_TIMEOUT_MS }),
+              ).then((r) => r.code);
+            },
             COMMAND_PATH_PROBE_TIMEOUT_MS * 2,
             "command probe",
           );
@@ -825,18 +843,22 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       if (!writableScopeId) throw new Error("this turn has no scoped computer");
       return probe(await deps.sandbox.computerStatus(writableScopeId), deps.provision);
     },
-    async restartComputer(sandboxId?: string): Promise<void> {
+    async restartComputer(sandboxId?: string): Promise<string | void> {
       if (sandboxId !== undefined) {
         const resources = deps.sandboxResources;
         if (!resources) throw new Error("sandbox inventory unavailable");
-        await accessSandbox(sandboxId);
-        return resources.restart(deps.createdBy, sandboxId);
+        const { resource } = await accessSandbox(sandboxId);
+        const note = await resources.restart(deps.createdBy, sandboxId);
+        deps.invalidateProvision?.({ resourceId: resource.id });
+        return note;
       }
       if (!deps.sandbox.restartComputer) {
         throw new CapabilityUnsupportedError(deps.sandbox.profile.backend, "restarting the computer");
       }
       if (!writableScopeId) throw new Error("this turn has no scoped computer to restart");
-      await deps.sandbox.restartComputer(writableScopeId);
+      const note = await deps.sandbox.restartComputer(writableScopeId);
+      deps.invalidateProvision?.();
+      return note;
     },
     async execute(
       command: string,
@@ -919,38 +941,40 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
             scopeLabel: reached.scopeId,
           });
         }
-        return timed("exec", async () => {
-          execOpts?.signal?.throwIfAborted();
-          const { commandEnv, secretValues, fileExecution } = await stageCredentials(
-            requested,
-            handle,
-            "command",
-            execOpts?.signal,
-          );
-          const r = await withCleanup(
-            async (): Promise<ExecResult> => {
-              const sandboxCommand = ownerAuth ? (deps.ownerAuthCommand?.(command, commandEnv) ?? command) : command;
-              const commandHandle = Object.keys(commandEnv).length
-                ? { ...handle, env: { ...handle.env, ...commandEnv } }
-                : handle;
-              const secretEnv = executionSecretEnv(commandHandle.env, secretValues);
-              const mask = createExactSecretValueMasker(Object.values(secretEnv));
-              try {
-                const result = await deps.sandbox.run(commandHandle, sandboxCommand, opts);
-                return { ...result, stdout: mask(result.stdout), stderr: mask(result.stderr) };
-              } catch (error) {
-                const message = errMessage(error);
-                const masked = mask(message);
-                if (masked !== message) throw new MaskedExecutionError(error, mask, masked);
-                throw error;
-              }
-            },
-            async () => {
-              await fileExecution?.finish();
-            },
-          );
-          return reached ? { ...r, reached } : r;
-        });
+        return timed("exec", () =>
+          droppingReset(handle, async () => {
+            execOpts?.signal?.throwIfAborted();
+            const { commandEnv, secretValues, fileExecution } = await stageCredentials(
+              requested,
+              handle,
+              "command",
+              execOpts?.signal,
+            );
+            const r = await withCleanup(
+              async (): Promise<ExecResult> => {
+                const sandboxCommand = ownerAuth ? (deps.ownerAuthCommand?.(command, commandEnv) ?? command) : command;
+                const commandHandle = Object.keys(commandEnv).length
+                  ? { ...handle, env: { ...handle.env, ...commandEnv } }
+                  : handle;
+                const secretEnv = executionSecretEnv(commandHandle.env, secretValues);
+                const mask = createExactSecretValueMasker(Object.values(secretEnv));
+                try {
+                  const result = await deps.sandbox.run(commandHandle, sandboxCommand, opts);
+                  return { ...result, stdout: mask(result.stdout), stderr: mask(result.stderr) };
+                } catch (error) {
+                  const message = errMessage(error);
+                  const masked = mask(message);
+                  if (masked !== message) throw new MaskedExecutionError(error, mask, masked);
+                  throw error;
+                }
+              },
+              async () => {
+                await fileExecution?.finish();
+              },
+            );
+            return reached ? { ...r, reached } : r;
+          }),
+        );
       });
     },
 

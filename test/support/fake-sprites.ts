@@ -41,6 +41,7 @@ export interface FakeSprites {
   execScripts(): string[];
   stallAfterRun(name: string): void;
   fail502(name: string): void;
+  wedge(name: string, clearedBy?: "restart" | "restore" | "replace"): void;
   failNext(status: number, opts?: InjectedFailure): void;
   refuseRestart(name: string): void;
   unhealthy(name: string, reason: string): void;
@@ -48,6 +49,7 @@ export interface FakeSprites {
   refuseDelete(status?: number): void;
   rateLimitCreate(retryAfterSeconds: number): void;
   breakPolicyReadback(name: string): void;
+  repairPolicyReadback(name: string): void;
   setPressure(name: string, p: { full10: number; full60: number; load1: number }): void;
   restarts(): string[];
   reset(): void;
@@ -66,6 +68,7 @@ interface Engine {
 interface FakeExec {
   run(stdin: Buffer): { frames: Buffer[]; dropAfterRun: boolean };
   refused: boolean;
+  dropped: boolean;
 }
 
 const engines = new Map<string, Engine>();
@@ -95,6 +98,10 @@ class FakeWebSocket extends EventTarget {
       if (this.closed) return;
       if (exec.refused) {
         this.fail("Received network error or non-101 status code.");
+        return;
+      }
+      if (exec.dropped) {
+        this.fail("TypeError");
         return;
       }
       this.readyState = FakeWebSocket.OPEN;
@@ -171,6 +178,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
   const execScripts: string[] = [];
   const calls: SpritesCall[] = [];
   const gateway502 = new Set<string>();
+  const wedged = new Map<string, "restart" | "restore" | "replace">();
   const stallAfterRun = new Set<string>();
   const refusedRestart = new Set<string>();
   const unhealthy = new Map<string, string>();
@@ -258,6 +266,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     if (s) rmSync(s.home, { recursive: true, force: true });
     for (const cp of checkpoints.get(name) ?? []) rmSync(cp.dir, { recursive: true, force: true });
     sprites.delete(name);
+    wedged.delete(name);
     policies.delete(name);
     resources.delete(name);
     checkpoints.delete(name);
@@ -341,6 +350,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
       if (refusedRestart.has(name)) return Response.json({ error: "upstream restart failed" }, { status: 502 });
       restarts.push(name);
       gateway502.delete(name);
+      if (wedged.get(name) === "restart") wedged.delete(name);
       return Response.json({ sprite_name: name, machine_id: "m1", message: "queued" }, { status: 202 });
     }
     if (sub === "policy/network") {
@@ -390,6 +400,8 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
       rmSync(home, { recursive: true, force: true });
       cpSync(cp.dir, home, { recursive: true });
       gateway502.delete(name);
+      if (wedged.get(name) !== "replace") wedged.delete(name);
+      unhealthy.delete(name);
       return ndjson([
         { type: "info", data: `restoring ${cp.id}` },
         { type: "complete", data: cp.id },
@@ -430,6 +442,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     const call = calls[calls.length - 1]!;
     return {
       refused: !sprites.has(name) || gateway502.has(name),
+      dropped: wedged.has(name),
       run: (stdin) => {
         const frames = runExec(name, argv, stdin);
         call.script = execScripts[execScripts.length - 1];
@@ -456,6 +469,9 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     fail502: (name) => {
       gateway502.add(name);
     },
+    wedge: (name, clearedBy = "replace") => {
+      wedged.set(name, clearedBy);
+    },
     failNext: (status, opts = {}) => {
       injected.push({ status, ...opts });
     },
@@ -477,6 +493,9 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
     breakPolicyReadback: (name) => {
       brokenReadback.add(name);
     },
+    repairPolicyReadback: (name) => {
+      brokenReadback.delete(name);
+    },
     setPressure: (name, p) => {
       const home = ensureDir(name);
       writeFileSync(
@@ -492,6 +511,7 @@ export function installFakeSprites(origin = `https://fake-sprites-${++nextOrigin
       calls.length = 0;
       stallAfterRun.clear();
       gateway502.clear();
+      wedged.clear();
       refusedRestart.clear();
       unhealthy.clear();
       health.clear();
